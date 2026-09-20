@@ -22,7 +22,9 @@ or relative filesystem `playbooks.<id>.from` would resolve differently below
 the new directory. It leaves the former file unchanged and names every
 target-preserving absolute replacement. Apply those replacements and retry;
 Playbook does not rewrite the user-authored file. `config/` sits at the depth
-the root's `playbook/` did, so that move retargets no relative locator.
+the root's `playbook/` did, so a relative locator reaching outside the directory
+keeps its target across that move; only one pointing into the directory is
+refused as above.
 
 ```sh
 $EDITOR "${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml"

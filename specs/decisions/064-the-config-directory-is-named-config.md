@@ -25,7 +25,7 @@ The file keeps its name: `playbook.config.yaml` is this product's format, the na
 The relocation of DR-043 now serves two former locations, the nearer first: the root's `playbook/playbook.config.yaml`, then the pre-DR-043 XDG path.
 The first regular file found moves under DR-043's rules — bytes and mode preserved, published with an exclusive link so a canonical entry appearing concurrently wins, refused when a primary relative locator would change target — and the former file goes, its directory with it when that leaves the directory empty.
 A former file that disappears between inspection and staging relocates nothing.
-`config/` sits at the depth `playbook/` did, so a relative `sessions` or `playbooks.<id>.from` locator keeps its target across the sibling move, and the refusal never fires for it.
+`config/` sits at the depth `playbook/` did, so a relative `sessions` or `playbooks.<id>.from` locator reaching beside or above the directory keeps its target across the sibling move; only one pointing into the directory changes, and the refusal stands for it.
 
 Considered and declined:
 
