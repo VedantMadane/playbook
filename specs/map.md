@@ -89,6 +89,7 @@ meta.md       The spec of specs
 | [DR-061](decisions/061-dev-analyst-plans-the-path.md) | 061-dev-analyst-plans-the-path.md | DEV's Analyst plans the path: a bounded planning note, a route-changing Boss question only, and analysis, design, and implementation left to the called playbooks |
 | [DR-062](decisions/062-pre-existing-changes-are-context.md) | 062-pre-existing-changes-are-context.md | Pre-existing changes are the Boss's context: absorbed or altered entries carried by a call's one commit prove `one-descendant-commit` with `preExisting` receipt evidence, the Coder is told what pre-exists, the Boss is told what was carried; only lost entries stay ambiguous |
 | [DR-063](decisions/063-failures-explain-themselves.md) | 063-failures-explain-themselves.md | Failures explain themselves: a closed `{ code, evidence }` cause attached where each failure is decided, `standing` on every advertised action, and one deterministic Boss-visible failure report for every host |
+| [DR-064](decisions/064-the-config-directory-is-named-config.md) | 064-the-config-directory-is-named-config.md | The config directory is named config: `${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml`, the former `playbook/` location relocated ahead of the XDG one, the emptied former directory removed |
 
 ## Packages
 

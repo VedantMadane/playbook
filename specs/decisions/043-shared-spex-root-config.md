@@ -6,6 +6,7 @@
 ## Status
 
 Accepted.
+Amended by [DR-064](064-the-config-directory-is-named-config.md) in one scope: the canonical directory under the root is `config/`, and `playbook/` is a former location the relocation serves.
 
 ## Context
 
