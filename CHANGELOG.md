@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [15.0.0] - 2026-09-20
+
 ### Changed
 
 - **Breaking: the shared config directory is named `config`.** Fresh launches and ordinary reopens now resolve `${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml`, the root's directory of human-authored configuration files — the rest of the root is laid out by what a directory holds, and the singular `playbook/` namespace beside the plural `playbooks/` library never gained a second file. A launching command relocates a regular config from either former location once when the canonical path is absent, the nearer first: the root's `playbook/playbook.config.yaml`, then `${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml`. Exactly one file moves, preserving bytes and permissions, taking the former file's directory with it when that leaves it empty and leaving no alias, while help and raw `--config` remain write-free. `config/` sits at the depth the root's `playbook/` did, so a relative `sessions` or path-shaped `from` locator reaching outside the directory keeps its target across that move; only one pointing into the directory would change, and the rejection stands for it ([DR-064](specs/decisions/064-the-config-directory-is-named-config.md), [[playbook-cli-3](specs/packages/playbook-cli.md#playbook-cli-3)], [[playbook-cli-85](specs/packages/playbook-cli.md#playbook-cli-85)]).
@@ -683,7 +685,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Conformance test suite (386 tests across six files) pinning the gears ↔ FSM 1:1 mapping (PLAYBOOK-1..6), runtime contract (PBRT-5..16), prompt composition, introspect helpers, and onDone arm coverage.
 - Package exports `./code/playbook` (the host-agnostic `createPlaybookRuntime` factory) and `./code/tmux-play` (the cligent-bound Captain factory).
 
-[Unreleased]: https://github.com/sublang-ai/playbook/compare/v14.1.0...HEAD
+[Unreleased]: https://github.com/sublang-ai/playbook/compare/v15.0.0...HEAD
+[15.0.0]: https://github.com/sublang-ai/playbook/compare/v14.1.0...v15.0.0
 [14.1.0]: https://github.com/sublang-ai/playbook/compare/v14.0.0...v14.1.0
 [14.0.0]: https://github.com/sublang-ai/playbook/compare/v13.3.0...v14.0.0
 [13.3.0]: https://github.com/sublang-ai/playbook/compare/v13.2.0...v13.3.0
