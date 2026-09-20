@@ -431,7 +431,9 @@ describe('linked CODE runtime', () => {
     expect(host.playerCalls[0]?.prompt).toContain(
       '> Original request: Fix the bug.\n> Preserve compatibility.',
     );
-    expect(host.playerCalls[0]?.prompt).toContain('Coder is GPT-5.6 Sol.');
+    expect(host.playerCalls[0]?.prompt).toContain(
+      'Credit every AI that contributed to this commit: Coder GPT-5.6 Sol.',
+    );
     expect(host.playerCalls[0]?.prompt).not.toContain('`Commit: `');
     expect(host.childRequests).toHaveLength(1);
     expect(host.childRequests[0]).toMatchObject({

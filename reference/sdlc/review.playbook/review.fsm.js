@@ -67,7 +67,7 @@ const CODER_DISPOSITION_PROMPT = [
     'Follow @specs/packages/git.md.',
     'Make the commit message explain concisely what changed and why, including relevant verification.',
     'Identify every new commit you make.',
-    'Coder is <coder-llm>; Reviewer is <reviewer-llm>.',
+    'Credit every AI that contributed to this commit: Coder <coder-llm> and Reviewer <reviewer-llm>, whose findings it answers.',
     '',
     'If you reject every item, change nothing and make no commit.',
     'Report every disposition, all relevant run results, and every rebuttal.',

@@ -36,7 +36,7 @@ function firstInput(overrides: Partial<PlayerInput> = {}): PlayerInput {
       '> Run results: <run-results>',
       '',
       'Implement the phase.',
-      'Coder is <coder-llm>.',
+      'Credit every AI that contributed to this commit: Coder <coder-llm>.',
     ].join('\n'),
     result: { directCommit: 'done' },
     callerInput: 'line one\nline two',
@@ -65,7 +65,7 @@ describe('CODE player prompt composition', () => {
         '> test two',
         '',
         'Implement the phase.',
-        'Coder is GPT-5.6 Sol.',
+        'Credit every AI that contributed to this commit: Coder GPT-5.6 Sol.',
       ].join('\n'),
     );
   });
@@ -91,7 +91,7 @@ describe('CODE player prompt composition', () => {
         '> Run results: <run-results>',
         '',
         'Read the identified IR.',
-        'Coder is <coder-llm>.',
+        'Credit every AI that contributed to this commit: Coder <coder-llm>.',
       ].join('\n'),
       result: { finalTask: 'done' },
       callerInput: 'Use literal <coder-llm> and $&.\nThen finish.',
@@ -105,7 +105,7 @@ describe('CODE player prompt composition', () => {
         '> IR number: 040',
         '',
         'Read the identified IR.',
-        'Coder is GPT-5.6 Sol.',
+        'Credit every AI that contributed to this commit: Coder GPT-5.6 Sol.',
       ].join('\n'),
     );
   });

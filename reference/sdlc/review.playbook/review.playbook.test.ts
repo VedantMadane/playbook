@@ -388,7 +388,7 @@ describe('linked REVIEW runtime', () => {
       'Identify every new commit you make.',
     );
     expect(playerCalls[1].prompt).toContain(
-      'Coder is GPT-5.6 Sol; Reviewer is Claude Opus 5.',
+      'Credit every AI that contributed to this commit: Coder GPT-5.6 Sol and Reviewer Claude Opus 5, whose findings it answers.',
     );
     expect(playerCalls[1].prompt).not.toContain(
       'format model tokens in conventional human form',

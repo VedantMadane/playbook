@@ -9,7 +9,7 @@ const APPENDED_PHASE_PROMPT = [
     "Make the phase's minimal changes and then one new commit, following @specs/packages/git.md; never amend an existing commit.",
     'Make the commit message explain concisely what changed and why, including relevant verification.',
     'Identify every new commit you make.',
-    'Coder is <coder-llm>.',
+    'Credit every AI that contributed to this commit: Coder <coder-llm>.',
 ];
 const FIRST_PHASE_PROMPT = [
     '> Original request: <caller-input>',

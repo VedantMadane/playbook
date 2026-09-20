@@ -36,7 +36,7 @@ When the first coding phase begins, Captain shall prompt Coder:
 > Make the phase's minimal changes and then one new commit, following @specs/packages/git.md; never amend an existing commit.
 > Make the commit message explain concisely what changed and why, including relevant verification.
 > Identify every new commit you make.
-> Coder is <coder-llm>.
+> Credit every AI that contributed to this commit: Coder <coder-llm>.
 
 Results:
 - `directCommit`: Coder completed and committed the direct implementation phase. Output shall include `coderOutput: <verbatim final text>` and `latestCommit: <commit identity>`.
@@ -77,7 +77,7 @@ When a later IR-task phase begins, Captain shall prompt Coder:
 > Make the phase's minimal changes and then one new commit, following @specs/packages/git.md; never amend an existing commit.
 > Make the commit message explain concisely what changed and why, including relevant verification.
 > Identify every new commit you make.
-> Coder is <coder-llm>.
+> Credit every AI that contributed to this commit: Coder <coder-llm>.
 
 Results:
 - `moreTasks`: Coder completed and committed exactly the IR's next unfinished task and at least one task remains. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, `irNumber` identifying the continued IR, and `irTask` naming the implemented task.

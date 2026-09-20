@@ -1230,7 +1230,7 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
       "Synthesize your independent proposal with Reviewer's proposal below.",
     );
     expect(playerCalls[2].prompt).toContain(
-      'Coder is GPT-5.6 Sol and Reviewer is Claude Opus 5.',
+      'Credit every AI that contributed to this commit: Coder GPT-5.6 Sol and Reviewer Claude Opus 5, whose proposal it carries.',
     );
     expect(playerCalls[2].prompt).toContain(
       '> Original topic: Choose <coder-llm> behavior.\n> Keep mapped roles shared.',
