@@ -1864,7 +1864,7 @@ function createScenario(
   const spexHome = join(root, 'spex');
   const stateHome = join(root, 'xdg-state');
   mkdirSync(join(repo, 'specs/packages'), { recursive: true });
-  mkdirSync(join(spexHome, 'playbook'), { recursive: true });
+  mkdirSync(join(spexHome, 'config'), { recursive: true });
 
   writeFileSync(
     join(repo, 'AGENTS.md'),
@@ -1949,7 +1949,7 @@ function createScenario(
     // to dismiss. A command-mapped workflow switch stays a hermetic
     // A29-7 row; what is live here is the model-decided one.
     writeFileSync(
-      join(spexHome, 'playbook/playbook.config.yaml'),
+      join(spexHome, 'config/playbook.config.yaml'),
       conversationConfig(repo),
     );
     writeFileSync(
@@ -1959,12 +1959,12 @@ function createScenario(
     writeFileSync(join(repo, 'notes.registry.mjs'), notesFixtureSource());
   } else if (name === 'hermetic') {
     writeFileSync(
-      join(spexHome, 'playbook/playbook.config.yaml'),
+      join(spexHome, 'config/playbook.config.yaml'),
       hermeticConfig(repo),
     );
   } else {
     writeFileSync(
-      join(spexHome, 'playbook/playbook.config.yaml'),
+      join(spexHome, 'config/playbook.config.yaml'),
       liveConfig(options),
     );
   }

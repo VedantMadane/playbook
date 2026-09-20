@@ -16,7 +16,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import {
   createEvent,
@@ -1699,7 +1699,7 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
     expect({ reads, loads, probes }).toEqual({ reads: 0, loads: 0, probes: 0 });
     expect(await readFile(legacy, 'utf8')).toBe(sharedConfig());
     await expect(
-      readFile(join(home, '.spex', 'playbook', 'playbook.config.yaml')),
+      readFile(join(home, '.spex', 'config', 'playbook.config.yaml')),
     ).rejects.toThrow();
 
     let fallbackReads = 0;
@@ -1720,7 +1720,7 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
     expect(emptyStdout.text()).toBe('');
     expect(await readFile(legacy, 'utf8')).toBe(sharedConfig());
     await expect(
-      readFile(join(home, '.spex', 'playbook', 'playbook.config.yaml')),
+      readFile(join(home, '.spex', 'config', 'playbook.config.yaml')),
     ).rejects.toThrow();
   });
 
@@ -1728,7 +1728,7 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
     const home = await mkdtemp(join(tmpdir(), 'playbook-headless-relocate-'));
     tempDirs.push(home);
     const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
-    const canonical = join(home, '.spex', 'playbook', 'playbook.config.yaml');
+    const canonical = join(home, '.spex', 'config', 'playbook.config.yaml');
     const source =
       `# delegated run relocation\nsessions: ../../session-state\n` +
       sharedConfig();
@@ -1756,13 +1756,70 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
     expect(out.stderr).not.toContain('created config');
   });
 
+  // DR-064: the root's own `playbook/` namespace became the nearer former
+  // location when `config/` took its place beside the rest of the root.
+  it('relocates the root former config, keeping a directory that holds more', async () => {
+    const home = await mkdtemp(
+      join(tmpdir(), 'playbook-headless-relocate-root-'),
+    );
+    tempDirs.push(home);
+    const former = join(home, '.spex', 'playbook', 'playbook.config.yaml');
+    const neighbour = join(home, '.spex', 'playbook', 'notes.txt');
+    const xdg = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = join(home, '.spex', 'config', 'playbook.config.yaml');
+    const overlay = join(home, 'package-overlay.yaml');
+    // A sibling move keeps both relative locators on their targets.
+    const source =
+      `# root former location\nsessions: ../../session-state\n` +
+      sharedConfig().replace('from: mod://code', 'from: ../../code.registry.mjs');
+    const xdgBytes = `# the farther former location stays put\n${sharedConfig()}`;
+    await mkdir(dirname(former), { recursive: true });
+    await writeFile(former, source, 'utf8');
+    await chmod(former, 0o600);
+    await writeFile(neighbour, 'kept beside the config\n', 'utf8');
+    await mkdir(dirname(xdg), { recursive: true });
+    await writeFile(xdg, xdgBytes, 'utf8');
+    await writeFile(
+      overlay,
+      ['playbooks:', '  code:', '    from: mod://code', ''].join('\n'),
+      'utf8',
+    );
+
+    const out = await headlessHarness(['run', '--with', overlay, 'hello'], {
+      userConfigPath: undefined,
+      homeDir: home,
+      env: {
+        HOME: home,
+        ANTHROPIC_API_KEY: 'a',
+        OPENAI_API_KEY: 'o',
+      },
+    });
+
+    expect(out.result.code).toBe(0);
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect((await stat(canonical)).mode & 0o777).toBe(0o600);
+    expect(resolve(dirname(canonical), '../../code.registry.mjs')).toBe(
+      resolve(dirname(former), '../../code.registry.mjs'),
+    );
+    // The former file goes; the directory stays for what else it holds.
+    await expect(readFile(former, 'utf8')).rejects.toThrow();
+    expect(await readFile(neighbour, 'utf8')).toBe('kept beside the config\n');
+    // Exactly one file moves: the farther former location is untouched.
+    expect(await readFile(xdg, 'utf8')).toBe(xdgBytes);
+    expect(out.stderr).toContain(
+      `playbook: moved config from ${former} to ${canonical}\n`,
+    );
+    expect(out.stderr).not.toContain(xdg);
+    expect(out.stderr).not.toContain('created config');
+  });
+
   it('uses canonical and keeps legacy readable after interrupted publication', async () => {
     const home = await mkdtemp(
       join(tmpdir(), 'playbook-headless-relocate-interrupted-'),
     );
     tempDirs.push(home);
     const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
-    const canonical = join(home, '.spex', 'playbook', 'playbook.config.yaml');
+    const canonical = join(home, '.spex', 'config', 'playbook.config.yaml');
     const legacyBytes = 'unknown-legacy-key: must-not-load\n';
     const canonicalBytes = `# already published\n${sharedConfig()}`;
     await mkdir(dirname(legacy), { recursive: true });
@@ -1796,7 +1853,7 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
     );
     tempDirs.push(home);
     const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
-    const canonical = join(home, '.spex', 'playbook', 'playbook.config.yaml');
+    const canonical = join(home, '.spex', 'config', 'playbook.config.yaml');
     const source = `# move before content migration\n${sharedProfilesConfig()}`;
     await mkdir(dirname(legacy), { recursive: true });
     await writeFile(legacy, source, 'utf8');

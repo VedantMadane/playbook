@@ -1639,9 +1639,9 @@ function stepOptedIn(root, state) {
 function stepInstalledCli(root, state) {
   const home = join(root, 'cli-home');
   const spexHome = join(home, '.spex');
-  mkdirSync(join(spexHome, 'playbook'), { recursive: true });
+  mkdirSync(join(spexHome, 'config'), { recursive: true });
   writeFileSync(
-    join(spexHome, 'playbook', 'playbook.config.yaml'),
+    join(spexHome, 'config', 'playbook.config.yaml'),
     [
       'captain:',
       '  adapter: claude',

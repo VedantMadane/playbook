@@ -4,24 +4,28 @@
 # Configuring agents
 
 Fresh launches and ordinary reopens read one config at
-`${SPEX_HOME:-$HOME/.spex}/playbook/playbook.config.yaml`. The
+`${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml`. The
 first launch seeds it from the bundled starter and prints the path;
 later launches reuse it untouched.
 
-On the first launching command after upgrading Playbook, it moves a config from the
-former `${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml` path
-when the canonical path is absent. The one-time move preserves bytes and
-permissions and leaves no compatibility alias, so running an older Spex host
-afterward could seed a second file at the former path.
+On the first launching command after upgrading Playbook, it moves a config from
+either former location when the canonical path is absent — the root's
+`playbook/playbook.config.yaml` first, then
+`${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml`. Exactly one
+file moves; the one-time move preserves bytes and permissions, takes the former
+file's directory with it when that leaves it empty, and leaves no compatibility
+alias, so running an older Spex host afterward could seed a second file at the
+path it still resolves.
 
-The current guard rejects relocation when a legacy relative `sessions` value
+The current guard rejects relocation when a former relative `sessions` value
 or relative filesystem `playbooks.<id>.from` would resolve differently below
 the new directory. It leaves the former file unchanged and names every
 target-preserving absolute replacement. Apply those replacements and retry;
-Playbook does not rewrite the user-authored file.
+Playbook does not rewrite the user-authored file. `config/` sits at the depth
+the root's `playbook/` did, so that move retargets no relative locator.
 
 ```sh
-$EDITOR "${SPEX_HOME:-$HOME/.spex}/playbook/playbook.config.yaml"
+$EDITOR "${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml"
 ```
 
 ## Anatomy

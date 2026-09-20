@@ -65,7 +65,7 @@ playbook
 Type a task, enter `/code <task>` for implementation, or enter
 `/decide <question>` for an independently proposed and reviewed decision.
 
-On first launch, Playbook writes its config to `${SPEX_HOME:-$HOME/.spex}/playbook/playbook.config.yaml`. A config left at the former `${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml` is moved there on the next launch, unless a relative primary locator would change targets; that case is rejected unchanged with absolute replacements.
+On first launch, Playbook writes its config to `${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml`. A config left at either former location — the root's `playbook/playbook.config.yaml` or `${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml` — is moved there once on the next launch, unless a relative primary locator would change targets; that case is rejected unchanged with absolute replacements.
 
 The same config, compiled Captain, enabled playbooks, stable players, and
 nested calls power headless turns. Both front ends create the same durable

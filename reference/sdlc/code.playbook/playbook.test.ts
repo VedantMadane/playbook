@@ -1193,6 +1193,87 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     );
   });
 
+  // DR-064: `config/` took over from the root's own `playbook/` namespace,
+  // which is now the nearer of the two former locations. The move is a
+  // sibling one, so every relative locator keeps its absolute target.
+  it('relocates the root former config ahead of an untouched XDG file', async () => {
+    const home = await makeTempHome();
+    const former = join(home, '.spex', 'playbook', 'playbook.config.yaml');
+    const xdg = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = resolveUserConfigPath({}, home);
+    const overlay = join(home, 'package-overlay.yaml');
+    const source =
+      `# the root's own namespace, byte for byte\n` +
+      `sessions: ../../session-state\n` +
+      minimalConfig().replace(
+        '"@sublang/playbook/code/registry"',
+        '"../../registry.mjs"',
+      );
+    const xdgBytes = `# the farther former location stays put\n${minimalConfig()}`;
+    await mkdir(dirname(former), { recursive: true });
+    await writeFile(former, source, 'utf8');
+    await chmod(former, 0o600);
+    await mkdir(dirname(xdg), { recursive: true });
+    await writeFile(xdg, xdgBytes, 'utf8');
+    await chmod(xdg, 0o644);
+    await writeFile(
+      overlay,
+      [
+        'playbooks:',
+        '  code:',
+        '    from: "@sublang/playbook/code/registry"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const stderr = writer();
+
+    const result = await runPlaybookCli({
+      argv: ['--list', '--with', overlay],
+      env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr,
+      stdout: writer(),
+      spawn: fakeSpawn().fn,
+      tmuxPlayBin: '/tmp/tmux-play.js',
+    });
+
+    // The bytes and mode move intact, and the relative `sessions` and
+    // filesystem `from` locators reach the same targets as before.
+    expect(result).toEqual({ code: 0 });
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect((await lstat(canonical)).mode & 0o777).toBe(0o600);
+    expect(resolve(dirname(canonical), '../../session-state')).toBe(
+      resolve(dirname(former), '../../session-state'),
+    );
+    // The emptied former directory goes with the file it held.
+    expect(existsSync(former)).toBe(false);
+    expect(existsSync(dirname(former))).toBe(false);
+    // Exactly one file moves: the farther former location is untouched.
+    expect(await readFile(xdg, 'utf8')).toBe(xdgBytes);
+    expect((await lstat(xdg)).mode & 0o777).toBe(0o644);
+    expect(stderr.text()).toContain(
+      `playbook: moved config from ${former} to ${canonical}\n`,
+    );
+    expect(stderr.text()).not.toContain(xdg);
+    expect(stderr.text()).not.toContain('created config');
+
+    // A second launch finds the canonical file and reports nothing.
+    const again = writer();
+    await runPlaybookCli({
+      argv: ['--list', '--with', overlay],
+      env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr: again,
+      stdout: writer(),
+      spawn: fakeSpawn().fn,
+      tmuxPlayBin: '/tmp/tmux-play.js',
+    });
+    expect(again.text()).not.toContain('moved config from');
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect(await readFile(xdg, 'utf8')).toBe(xdgBytes);
+  });
+
   it('uses canonical and keeps legacy readable after interrupted publication', async () => {
     const home = await makeTempHome();
     const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
@@ -1401,7 +1482,7 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
 
       expect(result).toEqual({ code: 0 });
       expect(stdout.text()).toContain(
-        join(homedir(), '.spex', 'playbook', 'playbook.config.yaml'),
+        join(homedir(), '.spex', 'config', 'playbook.config.yaml'),
       );
     },
   );

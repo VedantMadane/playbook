@@ -35,7 +35,7 @@ import {
   projectHostAgent,
   resolveLaunchSessionsDir,
   relocateLegacyUserConfig,
-  resolveLegacyUserConfigPath,
+  resolveFormerUserConfigPaths,
   resolveUserConfigPath,
   snapshotRegistryEntry,
 } from "./launch-config.js";
@@ -127,15 +127,19 @@ export async function runPlaybookRun(options = {}) {
 
   const userConfigPath =
     options.userConfigPath ?? resolveUserConfigPath(env, home);
-  // DR-043: move a pre-relocation config to the canonical path before any
-  // read, seed, or plan work observes its absence.
+  // DR-043/DR-064: move a config left at a former location to the canonical
+  // path before any read, seed, or plan work observes its absence. The nearer
+  // former location goes first, and the one that moves ends the walk.
   if (options.userConfigPath === undefined) {
     try {
-      relocateLegacyUserConfig(
-        userConfigPath,
-        resolveLegacyUserConfigPath(env, home),
-        (line) => stderr.write(line),
-      );
+      for (const formerPath of resolveFormerUserConfigPaths(env, home)) {
+        const moved = relocateLegacyUserConfig(
+          userConfigPath,
+          formerPath,
+          (line) => stderr.write(line),
+        );
+        if (moved) break;
+      }
     } catch (error) {
       await writeStream(stderr, `playbook run: ${message(error)}\n`);
       return { code: EXIT.argument };

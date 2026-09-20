@@ -15,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -133,9 +134,11 @@ export function mergeSelectedConfigs(base, overlay, selectedMembers) {
   );
 }
 
-// DR-043: the config lives under the shared Spex root, resolved exactly as
-// Spex's own shells resolve it so both hosts open one file. The singular
-// `playbook/` namespace is ours; Spex owns the plural `playbooks/` library.
+// DR-043/DR-064: the config lives under the shared Spex root, resolved exactly
+// as Spex's own shells resolve it so both hosts open one file. `config/` is the
+// root's directory of human-authored configuration files, each named for the
+// format it follows; the rest of the root is laid out the same way, by what a
+// directory holds.
 export function resolveSpexHome(env = process.env, home = homedir()) {
   const explicit = env.SPEX_HOME;
   if (typeof explicit === "string" && explicit.trim().length > 0) {
@@ -148,7 +151,7 @@ export function resolveSpexHome(env = process.env, home = homedir()) {
 }
 
 export function resolveUserConfigPath(env = process.env, home = homedir()) {
-  return join(resolveSpexHome(env, home), "playbook", "playbook.config.yaml");
+  return join(resolveSpexHome(env, home), "config", "playbook.config.yaml");
 }
 
 // The pre-DR-043 location, kept only to relocate a config written there.
@@ -158,6 +161,18 @@ export function resolveLegacyUserConfigPath(
 ) {
   const configHome = env.XDG_CONFIG_HOME || join(home, ".config");
   return join(configHome, "playbook", "playbook.config.yaml");
+}
+
+// DR-064: the locations a launch relocates from, the nearer first — the root's
+// pre-DR-064 `playbook/` namespace, then the pre-DR-043 XDG path.
+export function resolveFormerUserConfigPaths(
+  env = process.env,
+  home = homedir(),
+) {
+  return [
+    join(resolveSpexHome(env, home), "playbook", "playbook.config.yaml"),
+    resolveLegacyUserConfigPath(env, home),
+  ];
 }
 
 // PBCLI-46/78: session selection needs this one root locator before the
@@ -1203,22 +1218,24 @@ export function deriveLaunchReadiness(
   return { adapters, ...checkReadiness(adapters, env, home) };
 }
 
-// DR-043: a user-authored config cannot be regenerated, so the one-time move
-// to the canonical path is the deliberate exception to this project's
+// DR-043/DR-064: a user-authored config cannot be regenerated, so the one-time
+// move to the canonical path is the deliberate exception to this project's
 // reject-don't-migrate posture. It runs before seeding, never clobbers a
-// canonical file, and is a no-op once the legacy file is gone.
+// canonical file, and is a no-op once the former file is gone. It answers
+// whether it published, so a caller walking the ordered former locations stops
+// at the one that moved.
 export function relocateLegacyUserConfig(
   userConfigPath,
   legacyUserConfigPath,
   onNotice,
 ) {
-  if (legacyUserConfigPath === undefined) return;
+  if (legacyUserConfigPath === undefined) return false;
   // Any canonical filesystem entry wins, including a dangling symlink. The
   // relocation is considered only when that exact pathname is absent; this
   // keeps an obsolete or malformed legacy entry from blocking a valid config.
   try {
     lstatSync(userConfigPath);
-    return;
+    return false;
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
@@ -1226,7 +1243,7 @@ export function relocateLegacyUserConfig(
   try {
     source = lstatSync(legacyUserConfigPath);
   } catch (error) {
-    if (error?.code === "ENOENT") return;
+    if (error?.code === "ENOENT") return false;
     throw error;
   }
   if (!source.isFile()) {
@@ -1246,11 +1263,18 @@ export function relocateLegacyUserConfig(
   const stagedPath = join(stagingDir, "playbook.config.yaml");
   let published = false;
   try {
-    copyFileSync(
-      legacyUserConfigPath,
-      stagedPath,
-      constants.COPYFILE_EXCL,
-    );
+    try {
+      copyFileSync(
+        legacyUserConfigPath,
+        stagedPath,
+        constants.COPYFILE_EXCL,
+      );
+    } catch (error) {
+      // The former file went between inspection and staging: there is
+      // nothing left to move, and nothing to report.
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
     chmodSync(stagedPath, source.mode & 0o7777);
     assertLegacyRelocationLocatorsSafe(
       readFileSync(stagedPath, "utf8"),
@@ -1268,12 +1292,27 @@ export function relocateLegacyUserConfig(
   } finally {
     rmSync(stagingDir, { recursive: true, force: true });
   }
-  if (!published) return;
+  if (!published) return false;
 
   rmSync(legacyUserConfigPath, { force: true });
+  // The former file's directory went with it when it held nothing else. A
+  // plain rmdir is the whole removal: it refuses a directory with any other
+  // entry, so nothing the user put beside the config is ever swept away.
+  try {
+    rmdirSync(dirname(legacyUserConfigPath));
+  } catch (error) {
+    if (
+      error?.code !== "ENOTEMPTY" &&
+      error?.code !== "EEXIST" &&
+      error?.code !== "ENOENT"
+    ) {
+      throw error;
+    }
+  }
   onNotice(
     `playbook: moved config from ${legacyUserConfigPath} to ${userConfigPath}\n`,
   );
+  return true;
 }
 
 function assertLegacyRelocationLocatorsSafe(

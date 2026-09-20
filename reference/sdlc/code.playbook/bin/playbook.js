@@ -24,7 +24,7 @@ import {
   projectTmuxConfig,
   resolveLaunchSessionsDir,
   relocateLegacyUserConfig,
-  resolveLegacyUserConfigPath,
+  resolveFormerUserConfigPaths,
   resolveUserConfigPath,
   checkReadiness,
 } from "./launch-config.js";
@@ -233,16 +233,21 @@ export async function runPlaybookCli(options = {}) {
     return { code: COMPOSITION_FAILURE_EXIT_CODE };
   }
 
-  // DR-043: only a validated managed launch may relocate the legacy config.
-  // Help and raw --config return above without changing either config path;
-  // the delegated `run` front end applies the same boundary independently.
+  // DR-043/DR-064: only a validated managed launch may relocate a config left
+  // at a former location. Help and raw --config return above without changing
+  // any config path; the delegated `run` front end applies the same boundary
+  // independently. The nearer former location goes first, and the one that
+  // moves ends the walk.
   if (options.userConfigPath === undefined) {
     try {
-      relocateLegacyUserConfig(
-        userConfigPath,
-        resolveLegacyUserConfigPath(env, home),
-        (line) => stderr.write(line),
-      );
+      for (const formerPath of resolveFormerUserConfigPaths(env, home)) {
+        const moved = relocateLegacyUserConfig(
+          userConfigPath,
+          formerPath,
+          (line) => stderr.write(line),
+        );
+        if (moved) break;
+      }
     } catch (error) {
       stderr.write(`playbook: ${errorMessage(error)}\n`);
       return { code: COMPOSITION_FAILURE_EXIT_CODE };
