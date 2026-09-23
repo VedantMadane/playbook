@@ -363,6 +363,39 @@ export function governedSettlementCause(
   return runtimeDefectCause(reason);
 }
 
+/**
+ * DR-063 §2: the causes decided for thrown values that cannot carry the
+ * marker — a string, a frozen error — kept by identity for as long as the
+ * failure stands, so every surface that reads the FSM's own `lastError`
+ * publishes the cause decided for exactly that value, whatever turn reads it.
+ * A value that carries the marker answers from it; the map is bounded, since
+ * only values that refuse the marker need an entry.
+ */
+export interface PlaybookFailureCauseRetention {
+  retain(error: unknown, cause: PlaybookFailureCause): void;
+  causeOf(error: unknown): PlaybookFailureCause | undefined;
+}
+
+const FAILURE_CAUSE_RETENTION_LIMIT = 8;
+
+export function createFailureCauseRetention(): PlaybookFailureCauseRetention {
+  const causes = new Map<unknown, PlaybookFailureCause>();
+  return {
+    retain(error, cause) {
+      if (error === undefined || error === null) return;
+      causes.delete(error);
+      causes.set(error, cause);
+      while (causes.size > FAILURE_CAUSE_RETENTION_LIMIT) {
+        causes.delete(causes.keys().next().value);
+      }
+    },
+    causeOf(error) {
+      if (error === undefined || error === null) return undefined;
+      return normalizeError(error).cause ?? causes.get(error);
+    },
+  };
+}
+
 
 // ---------------------------------------------------------------------------
 // DR-028: both call boundaries treat an `ok` result whose `finalText` is
@@ -3604,15 +3637,17 @@ export function createXStatePlaybookRuntime<
     let deferInspectionEmissions = false;
     let deferredInspectionEmissions: Array<() => void> = [];
     let controlPlaneError: unknown;
-    // DR-063 §2: the cause decided at the site the failure was decided, kept
-    // for the failures whose Error the compiled artifact builds itself and the
-    // runtime therefore cannot decorate. It is cleared at each Boss turn start
-    // and at each successful player result, so it is never stale, and it is
-    // only ever read as the cause of an error that carries none of its own.
-    let lastFailureCause: PlaybookFailureCause | undefined;
-    const rememberFailureCause = (cause: PlaybookFailureCause): void => {
-      lastFailureCause = cause;
-    };
+    // DR-063 §2: the cause decided for a non-`ok` player result before the
+    // compiled artifact builds the Error that carries it and hands it to
+    // `markPlayerResultFailure`. It is cleared at each Boss turn start and at
+    // each successful result, so it is never stale.
+    let pendingResultFailureCause: PlaybookFailureCause | undefined;
+    // DR-063 §2: the causes decided for thrown values that cannot carry the
+    // marker — a string, a frozen error — kept by identity for as long as the
+    // failure stands, so every surface that reads the FSM's own `lastError`
+    // publishes the cause decided for exactly that value, whatever turn reads
+    // it.
+    const failureCauses = createFailureCauseRetention();
     // Previous root-machine state for the inspect-driven telemetry /
     // status emitter. undefined before the first inspect firing.
     let priorState: PlaybookState | undefined;
@@ -4903,8 +4938,8 @@ export function createXStatePlaybookRuntime<
           ? Object.is(error, signal.reason)
           : false;
       const decided = governedSettlementCause(reason, error, aborted, cause);
-      rememberFailureCause(decided);
       if (aborted) {
+        failureCauses.retain(error, decided);
         return {
           status: 'unresolved',
           error: attachPlaybookFailureCause(error, decided),
@@ -4914,6 +4949,7 @@ export function createXStatePlaybookRuntime<
         error instanceof Error
           ? error
           : new Error(`${label} governed outcome remains unresolved: ${reason}`);
+      failureCauses.retain(failure, decided);
       return {
         status: 'unresolved',
         error: attachPlaybookFailureCause(
@@ -5838,19 +5874,17 @@ export function createXStatePlaybookRuntime<
             // the player, and the reported error are known, and a successful
             // result clears it so no later failure inherits it.
             if (result.status === 'ok') {
-              lastFailureCause = undefined;
+              pendingResultFailureCause = undefined;
             } else if (result.status === 'aborted') {
-              rememberFailureCause(ABORTED_FAILURE_CAUSE);
+              pendingResultFailureCause = ABORTED_FAILURE_CAUSE;
             } else {
-              rememberFailureCause(
-                playerFailureCause({
-                  roleId,
-                  ...(playerId === undefined ? {} : { playerId }),
-                  error:
-                    result.error ??
-                    `callPlayer status ${JSON.stringify(result.status)}`,
-                }),
-              );
+              pendingResultFailureCause = playerFailureCause({
+                roleId,
+                ...(playerId === undefined ? {} : { playerId }),
+                error:
+                  result.error ??
+                  `callPlayer status ${JSON.stringify(result.status)}`,
+              });
             }
             return result;
           };
@@ -5960,9 +5994,9 @@ export function createXStatePlaybookRuntime<
       },
 
       markPlayerResultFailure(error): Error {
-        return lastFailureCause === undefined
-          ? error
-          : attachPlaybookFailureCause(error, lastFailureCause);
+        if (pendingResultFailureCause === undefined) return error;
+        failureCauses.retain(error, pendingResultFailureCause);
+        return attachPlaybookFailureCause(error, pendingResultFailureCause);
       },
 
       takeGovernedPlayerOutput(result): GovernedPlayerSettlement | undefined {
@@ -6622,7 +6656,9 @@ export function createXStatePlaybookRuntime<
       }
       return {
         ...normalized,
-        cause: lastFailureCause ?? runtimeDefectCause(normalized.message),
+        cause:
+          failureCauses.causeOf(context.lastError) ??
+          runtimeDefectCause(normalized.message),
       };
     }
 
@@ -6641,7 +6677,7 @@ export function createXStatePlaybookRuntime<
             ...(playerId === undefined ? {} : { playerId }),
             error,
           });
-      rememberFailureCause(cause);
+      failureCauses.retain(error, cause);
       return attachPlaybookFailureCause(error, cause);
     }
 
@@ -8773,9 +8809,10 @@ export function createXStatePlaybookRuntime<
         activeAborts = abortReasonClassifier(signal);
         activeAbortEmission = undefined;
         controlPlaneError = undefined;
-        // DR-063 §2: each turn decides its own failures, so the slot never
-        // carries a previous turn's cause into this one.
-        lastFailureCause = undefined;
+        // DR-063 §2: each turn decides its own failures, so no pending result
+        // cause carries into this one; a cause decided for a parked failure
+        // stays bound to that failure.
+        pendingResultFailureCause = undefined;
         let result: PlaybookRunResult | undefined;
         let operationError: unknown;
         // The boundary sentinel releases on every exit: a settlement defect

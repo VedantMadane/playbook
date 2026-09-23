@@ -894,6 +894,56 @@ describe('repository-relevant Git observations (PBRT-68)', () => {
         commit: false,
         preExisting: { absorbed: [], altered: [], lost: ['base.txt'] },
       },
+      // A worktree deletion loses nothing while the index or the new HEAD
+      // still holds the Boss's content; the entry is altered, not lost.
+      {
+        name: 'modified-staged-then-worktree-deleted',
+        dirty: (repo) => writeFile(join(repo, 'base.txt'), 'boss\n', 'utf8'),
+        call: async (repo) => {
+          await git(repo, 'add', '--', 'base.txt');
+          await rm(join(repo, 'base.txt'));
+        },
+        classification: 'worktree-only-change',
+        commit: false,
+        preExisting: { absorbed: [], altered: ['base.txt'], lost: [] },
+      },
+      {
+        name: 'modified-committed-then-worktree-deleted',
+        dirty: (repo) => writeFile(join(repo, 'base.txt'), 'boss\n', 'utf8'),
+        call: async (repo) => {
+          await git(repo, 'add', '--', 'base.txt');
+          await git(repo, 'commit', '--quiet', '-m', 'carry the boss file');
+          await rm(join(repo, 'base.txt'));
+        },
+        classification: 'observation-ambiguous',
+        commit: false,
+        preExisting: { absorbed: [], altered: ['base.txt'], lost: [] },
+      },
+      {
+        name: 'staged-committed-then-worktree-deleted',
+        dirty: async (repo) => {
+          await writeFile(join(repo, 'base.txt'), 'boss\n', 'utf8');
+          await git(repo, 'add', '--', 'base.txt');
+        },
+        call: async (repo) => {
+          await git(repo, 'commit', '--quiet', '-m', 'carry the index');
+          await rm(join(repo, 'base.txt'));
+        },
+        classification: 'observation-ambiguous',
+        commit: false,
+        preExisting: { absorbed: [], altered: ['base.txt'], lost: [] },
+      },
+      {
+        name: 'untracked-staged-then-worktree-deleted',
+        dirty: (repo) => writeFile(join(repo, 'seed.txt'), 'seed\n', 'utf8'),
+        call: async (repo) => {
+          await git(repo, 'add', '--', 'seed.txt');
+          await rm(join(repo, 'seed.txt'));
+        },
+        classification: 'worktree-only-change',
+        commit: false,
+        preExisting: { absorbed: [], altered: ['seed.txt'], lost: [] },
+      },
       {
         name: 'nested-worktree-changed',
         dirty: async (repo) => {

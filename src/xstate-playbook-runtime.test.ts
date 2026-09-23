@@ -9585,7 +9585,12 @@ describe('parked failure causes over the shared factory (DR-063)', () => {
         },
       };
       // A thrown value that refuses the cause marker is published from the
-      // runtime's own slot: live, in the exported snapshot, and after restore.
+      // runtime's own memory: live, across a later turn that leaves the
+      // failure in place, in the exported snapshot, and after restore.
+      expect(runtime.describe!().lastError?.cause).toEqual(cause);
+      expect((await runtime.handleBossInput(turn(''))).outcome).toBe(
+        'no-action',
+      );
       expect(runtime.describe!().lastError?.cause).toEqual(cause);
       const snapshot = runtime.exportSnapshot!()!;
       expect(

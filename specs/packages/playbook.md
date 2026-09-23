@@ -323,6 +323,7 @@ Where a maintained workflow runs under artifact schema `3`, its compiled runtime
 #### playbook-55
 
 Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall decide the failure cause of [[playbook-runtime-96](playbook-runtime.md#playbook-runtime-96)] where each failure is decided and publish it from the failed state's status data, telemetry, run result, control view, and exported snapshot alike, whether linking emits the shared flat runtime or DECIDE's bespoke parallel runtime.
+A cancellation the runtime itself issues — a parallel proposal cancelled because its sibling failed — decides no cause of its own, and the cohort's failure carries the cause of the member that failed first.
 
 ## Verification
 
@@ -421,4 +422,4 @@ When maintained-workflow conformance drives equivalent artifact-schema-3 deferre
 #### playbook-56
 
 When the DECIDE conformance suites drive its real artifact-schema-3 runtime over a nonempty baseline projection, they shall fail unless the exclusive merge call and its deferred continuation each end with the pre-existing-changes block naming the baseline's paths under their groups while both proposal calls receive none, and unless the prompt each `player.call.started` trace records is the prompt sent (verifying [[playbook-54](#playbook-54)]).
-The suites shall further fail unless a rejected player port, a non-`ok` player result, a refused adjudication, and a mismatched merge receipt each publish their own cause from the failed state's status data, the control view, the exported snapshot, and — where the turn settles rather than rejects — the run result, and unless a restored snapshot still publishes the cause its source runtime decided (verifying [[playbook-55](#playbook-55)]).
+The suites shall further fail unless a rejected player port, a non-`ok` player result, a refused adjudication, and a mismatched merge receipt each publish their own cause from the failed state's status data, the control view, the exported snapshot, and — where the turn settles rather than rejects — the run result; unless a proposal that rejects, returns a malformed result, or returns a non-`ok` result while its sibling is still running publishes that proposal's cause on every surface with no abort; and unless a later Boss turn that leaves the failure in place and a restored snapshot still publish the cause its source runtime decided (verifying [[playbook-55](#playbook-55)]).

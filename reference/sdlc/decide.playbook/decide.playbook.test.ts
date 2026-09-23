@@ -3937,6 +3937,15 @@ describe('DECIDE failure causes (DR-063)', () => {
       status: cause,
       snapshot: cause,
     });
+    // A later turn that leaves the failure in place keeps the cause bound to
+    // it: the runtime's memory is per failure, not per turn.
+    await expect(
+      runtime.handleBossInput({ text: '', signal: signal() }),
+    ).resolves.toMatchObject({ outcome: 'no-action' });
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: cause,
+      snapshot: cause,
+    });
     const snapshot = runtime.exportSnapshot?.();
     await runtime.dispose();
 
@@ -3970,6 +3979,99 @@ describe('DECIDE failure causes (DR-063)', () => {
     expect(failureCauses(runtime, statuses, run)).toMatchObject({
       view: cause,
       status: cause,
+      snapshot: cause,
+    });
+    await runtime.dispose();
+  });
+
+  it.each([
+    [
+      'rejects',
+      async (): Promise<PlayerResult> => {
+        throw 'reviewer is down';
+      },
+      { name: 'Error', message: 'reviewer is down' },
+    ],
+    [
+      'returns a malformed result',
+      async (): Promise<PlayerResult> =>
+        ({ status: 'bogus' }) as unknown as PlayerResult,
+      { name: 'TypeError' },
+    ],
+    [
+      'returns a non-`ok` result',
+      async (): Promise<PlayerResult> => ({
+        status: 'error',
+        error: 'reviewer non-ok',
+      }),
+      { name: 'Error', message: 'reviewer non-ok' },
+    ],
+  ] as const)(
+    'names the proposal that %s while its sibling is still running, not the cancellation',
+    async (_label, reviewerResult, error) => {
+      const { runtime, statuses, run } = await failedRun({
+        callPlayer: async (roleId, _prompt, callSignal) => {
+          if (roleId === 'reviewer') return reviewerResult();
+          // The sibling stays in flight until the cohort cancels it, and then
+          // rejects with the cancellation's own reason, as a port should.
+          return new Promise<PlayerResult>((_resolve, reject) => {
+            callSignal.addEventListener(
+              'abort',
+              () => reject(callSignal.reason),
+              { once: true },
+            );
+          });
+        },
+      });
+      expect(run?.outcome).not.toBe('aborted');
+      const cause = {
+        code: 'player-failed',
+        evidence: { roleId: 'reviewer', error },
+      };
+      expect(failureCauses(runtime, statuses, run)).toMatchObject({
+        view: cause,
+        status: cause,
+        snapshot: cause,
+      });
+      await runtime.dispose();
+    },
+  );
+
+  it('keeps a proposal adjudication failure across the no-op reconciliation that follows it', async () => {
+    // A frozen error refuses the cause marker, so the cause lives only in the
+    // runtime's own memory — which must outlast the turn that decided it.
+    const judgeError = Object.freeze(new Error('judge is down'));
+    const { runtime, statuses, run, rejection } = await failedRun({
+      callJudge: async (prompt) => {
+        if (prompt.includes('source item DECIDE-1')) throw judgeError;
+        return judgeReply(prompt);
+      },
+    });
+    expect(rejection).toBe(judgeError);
+    const cause: Cause = {
+      code: 'judge-failed',
+      evidence: {
+        reason: 'judge transport failed',
+        error: { name: 'Error', message: 'judge is down' },
+      },
+    };
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: cause,
+      status: cause,
+      snapshot: cause,
+    });
+    await expect(
+      runtime.apply?.({
+        actionId: 'reconcile:unresolved-effect',
+        key: 'retry-unresolved-effect',
+        signal: signal(),
+      }),
+    ).resolves.toMatchObject({
+      disposition: 'executed',
+      run: { outcome: 'no-action' },
+    });
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: cause,
       snapshot: cause,
     });
     await runtime.dispose();

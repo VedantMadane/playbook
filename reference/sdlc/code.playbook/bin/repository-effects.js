@@ -613,11 +613,44 @@ function sameContentIdentity(left, right) {
   );
 }
 
+// A worktree deletion loses the Boss's content only when neither the after
+// index nor the after HEAD tree holds it; content the after HEAD cannot
+// produce fails closed as lost.
+async function deletionRetainsContent(baseline, after, path, entry, afterEntry) {
+  try {
+    const baselineIdentity = await baselineContentIdentity(after.worktree, entry);
+    if (
+      afterEntry.kind === 'ordinary' &&
+      afterEntry.indexMode !== undefined &&
+      afterEntry.indexMode !== '000000'
+    ) {
+      const indexIdentity = await blobContentIdentity(
+        after.worktree,
+        afterEntry.indexMode,
+        afterEntry.indexOid,
+      );
+      if (sameContentIdentity(baselineIdentity, indexIdentity)) return true;
+    }
+    if (baseline.head === after.head) return false;
+    const treeEntry = await afterTreeEntry(after.worktree, after.head, path);
+    if (treeEntry === undefined || treeEntry.mode === '160000') return false;
+    const treeIdentity = await blobContentIdentity(
+      after.worktree,
+      treeEntry.mode,
+      treeEntry.oid,
+    );
+    return sameContentIdentity(baselineIdentity, treeIdentity);
+  } catch {
+    return false;
+  }
+}
+
 // DR-062 §1: the fate of one baseline projection entry at the end of a
 // governed call — `preserved`, `altered-uncommitted`, `altered-committed`,
 // `absorbed`, or `lost`. Loss is decided before alteration: a kind that
-// admits no content matching, a deletion of content the baseline recorded,
-// and a commit that dropped the path all leave the Boss's content nowhere.
+// admits no content matching, a worktree deletion whose content survives in
+// neither the index nor the new HEAD, and a commit that dropped the path all
+// leave the Boss's content nowhere.
 async function baselineEntryFate(baseline, after, path, entry) {
   if (hasPath(after.projection, path)) {
     const afterEntry = after.projection[path];
@@ -625,7 +658,11 @@ async function baselineEntryFate(baseline, after, path, entry) {
       return 'preserved';
     }
     if (nonComparableBaselineEntry(entry)) return 'lost';
-    if (entryIsDeletion(afterEntry) && !entryIsDeletion(entry)) return 'lost';
+    if (entryIsDeletion(afterEntry) && !entryIsDeletion(entry)) {
+      return (await deletionRetainsContent(baseline, after, path, entry, afterEntry))
+        ? 'altered-uncommitted'
+        : 'lost';
+    }
     return 'altered-uncommitted';
   }
   // The entry left the working tree, so only a commit this call made can hold

@@ -35,6 +35,7 @@ import {
   attachPlaybookFailureCause,
   combineAbortSignals,
   composePlayerContinuation,
+  createFailureCauseRetention,
   createNestedPlaybookBridge,
   detachPersistedMachineSnapshot,
   effectAuthorizedPreExistingBlock,
@@ -1347,14 +1348,12 @@ function createDecidePlaybookRuntime(
   const semanticCompletionQueue = new PQueue({ concurrency: 1 });
   const governedOutputsByBoundaryId = new Map<string, PlayerOutput>();
   const governedFailuresByBoundaryId = new Map<string, Error>();
-  // DR-063 §2: the cause decided for the failure in flight, published from
-  // here where the FSM's own `lastError` cannot carry it — a thrown string, a
-  // frozen error — so there is no failure without a cause (mirrors the shared
+  // DR-063 §2: the causes decided for thrown values that cannot carry the
+  // marker — a string, a frozen error — kept by identity for as long as the
+  // failure stands, so every surface that reads the FSM's own `lastError`
+  // publishes the cause decided for exactly that value (mirrors the shared
   // factory).
-  let lastFailureCause: PlaybookFailureCause | undefined;
-  const rememberFailureCause = (cause: PlaybookFailureCause): void => {
-    lastFailureCause = cause;
-  };
+  const failureCauses = createFailureCauseRetention();
   const failedStateError = (
     context: Record<string, unknown>,
   ): NormalizedError | undefined => {
@@ -1364,7 +1363,9 @@ function createDecidePlaybookRuntime(
     }
     return {
       ...normalized,
-      cause: lastFailureCause ?? runtimeDefectCause(normalized.message),
+      cause:
+        failureCauses.causeOf(context.lastError) ??
+        runtimeDefectCause(normalized.message),
     };
   };
   const playerResultFailureCause = (
@@ -1382,22 +1383,31 @@ function createDecidePlaybookRuntime(
             `callPlayer status ${JSON.stringify(result.status)}`,
         });
   // A rejected player port or a result the runtime cannot read is a
-  // `player-failed` failure named by role; an abort is `aborted`.
+  // `player-failed` failure named by role; the turn's own abort is `aborted`.
+  // A value that already carries a cause was decided by its originator, and a
+  // cancellation the runtime itself issued — a proposal cancelled because its
+  // sibling failed — is not this player's failure, so neither is decided
+  // again here.
   const decidePlayerCallFailure = (
     error: unknown,
     roleId: RoleId,
     playerId: string | undefined,
     signal: AbortSignal,
   ): void => {
-    const cause = isAbortFailure(error, signal)
-      ? ABORTED_FAILURE_CAUSE
-      : playerFailureCause({
-          roleId,
-          ...(playerId === undefined ? {} : { playerId }),
-          error,
-        });
-    rememberFailureCause(cause);
+    if (failureCauses.causeOf(error) !== undefined) return;
+    const turn = currentSignal;
+    const turnAborted = turn !== undefined && turn.aborted;
+    if (!turnAborted && signal.aborted) return;
+    const cause =
+      turn !== undefined && turn.aborted && Object.is(error, turn.reason)
+        ? ABORTED_FAILURE_CAUSE
+        : playerFailureCause({
+            roleId,
+            ...(playerId === undefined ? {} : { playerId }),
+            error,
+          });
     attachPlaybookFailureCause(error, cause);
+    failureCauses.retain(error, cause);
   };
   const governedEvidenceByBoundaryId = new Map<
     string,
@@ -2341,15 +2351,6 @@ function createDecidePlaybookRuntime(
         throw error;
       }
 
-      // DR-063 §2: a non-`ok` result's cause is decided here, where the role,
-      // the player, and the reported error are known; an `ok` result clears
-      // the slot so no later failure inherits it.
-      if (result.status === 'ok') {
-        lastFailureCause = undefined;
-      } else {
-        rememberFailureCause(playerResultFailureCause(roleId, playerId, result));
-      }
-
       // Keep this finish outside the boundary catch. A trace sink can record
       // the event and then reject; retrying from that catch would duplicate the
       // same call id and falsely recast an emission failure as a player error.
@@ -2433,16 +2434,13 @@ function createDecidePlaybookRuntime(
       currentSignal?.aborted === true &&
       Object.is(error, currentSignal.reason);
     const decided = governedSettlementCause(reason, error, aborted, cause);
-    rememberFailureCause(decided);
-    governedFailuresByBoundaryId.set(
-      boundaryId,
-      attachPlaybookFailureCause(
-        error instanceof Error
-          ? error
-          : new Error(`DECIDE governed outcome remains unresolved: ${reason}`),
-        decided,
-      ),
-    );
+    const failure =
+      error instanceof Error
+        ? error
+        : new Error(`DECIDE governed outcome remains unresolved: ${reason}`);
+    attachPlaybookFailureCause(failure, decided);
+    failureCauses.retain(failure, decided);
+    governedFailuresByBoundaryId.set(boundaryId, failure);
   };
 
   const spendSemanticCorrectionBudget = async (
@@ -3038,9 +3036,18 @@ function createDecidePlaybookRuntime(
                 envelope.result.status !== 'ok' &&
                 !cohortOperations.signal.aborted
               ) {
+                // DR-063 §2: the cancellation carries the cause of the result
+                // that caused it, so the cohort fails for this member.
                 cohortOperations.abort(
-                  new Error(
-                    `DECIDE proposal cohort ${roleId} returned status ${JSON.stringify(envelope.result.status)}`,
+                  attachPlaybookFailureCause(
+                    new Error(
+                      `DECIDE proposal cohort ${roleId} returned status ${JSON.stringify(envelope.result.status)}`,
+                    ),
+                    playerResultFailureCause(
+                      roleId,
+                      resolvedPlayerId(roleId),
+                      envelope.result,
+                    ),
                   ),
                 );
               }
@@ -3123,12 +3130,27 @@ function createDecidePlaybookRuntime(
         for (const result of acknowledgedResults.values()) {
           governedPlayerOutputs.delete(result);
         }
-        throw acknowledgementFailures.length === 1
-          ? acknowledgementFailures[0]
-          : new AggregateError(
-              acknowledgementFailures,
-              'DECIDE proposal cohort reconciliation failed',
-            );
+        const failure =
+          acknowledgementFailures.length === 1
+            ? acknowledgementFailures[0]
+            : new AggregateError(
+                acknowledgementFailures,
+                'DECIDE proposal cohort reconciliation failed',
+              );
+        // DR-063 §2: a cohort fails for the member that failed first. The
+        // failure it caused — the sibling's cancellation, or the aggregate of
+        // both — publishes that member's cause, never an abort.
+        const origin = cohortOperations.signal.aborted
+          ? cohortOperations.signal.reason
+          : undefined;
+        const originCause =
+          failureCauses.causeOf(failure) ??
+          (origin === undefined ? undefined : failureCauses.causeOf(origin));
+        if (originCause !== undefined) {
+          attachPlaybookFailureCause(failure, originCause);
+          failureCauses.retain(failure, originCause);
+        }
+        throw failure;
       }
       for (const roleId of releaseOrder) {
         const member = members[roleId]!;
@@ -3315,7 +3337,6 @@ function createDecidePlaybookRuntime(
           // DR-063 §2: the failure Error built for a non-`ok` result carries
           // the cause decided for that exact result.
           const cause = playerResultFailureCause(roleId, playerId, result);
-          rememberFailureCause(cause);
           throw attachPlaybookFailureCause(
             new Error(
               `${roleLabel(roleId)}${
@@ -4150,8 +4171,6 @@ function createDecidePlaybookRuntime(
     const turnId = ++turnSequence;
     const callId = `apply-${++applyCallSequence}`;
     currentTurnId = turnId;
-    // DR-063 §2: each turn decides its own failures.
-    lastFailureCause = undefined;
     currentSignal = signal;
     currentAborts = abortReasonClassifier(signal);
     controlPlaneError = undefined;
@@ -4800,8 +4819,6 @@ function createDecidePlaybookRuntime(
 
       const turnId = ++turnSequence;
       currentTurnId = turnId;
-      // DR-063 §2: each turn decides its own failures.
-      lastFailureCause = undefined;
       currentSignal = turn.signal;
       currentAborts = abortReasonClassifier(turn.signal);
       controlPlaneError = undefined;
