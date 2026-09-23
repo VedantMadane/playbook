@@ -4,9 +4,10 @@
 
 // Deterministic realization of the prompt-prefix pass (slc/prefix.md): every
 // standalone relay block of an eligible item moves after its last instruction
-// line, byte-for-byte, and the rewritten items are listed in one appended
-// `## Prefixed prompts` section. `--keep <ITEM-ID>` excludes an item the pass
-// judged ineligible; the tool never modifies the source.
+// line, byte-for-byte, and one `## Prefixed prompts` section at the end lists
+// the items this and every earlier application rewrote. `--keep <ITEM-ID>`
+// excludes an item the pass judged ineligible; the tool never modifies the
+// source.
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -16,6 +17,8 @@ const HEADING = /^#{1,3}\s/;
 const ITEM_HEADING = /^###\s+([^\s]+)\s*$/;
 const PROMPT_LINE = /^>\s?(.*)$/;
 const SECTION = '## Prefixed prompts';
+const SECTION_HEADING = /^##\s+Prefixed prompts\s*$/;
+const LISTED = /^-\s+([^\s:]+):\s+relays → tail\s*$/;
 const bullet = (id) => `- ${id}: relays → tail`;
 
 /** Classify one prompt line by its content inside the outer blockquote marker. */
@@ -56,14 +59,26 @@ function prefixBlockquote(quote) {
   );
   if (lastInstruction < firstBlock) return null; // relays already trail
 
-  // Instruction lines keep their order; blank lines left adjacent by a removed
-  // block collapse to one, and none leads or trails the region.
+  // Instruction lines keep their order and their authored blank lines; a
+  // removed block takes the blank lines bounding it and leaves the first of
+  // them where it separated two remaining lines, and none leads or trails the
+  // region.
+  const removed = [...inBlock];
+  inBlock.forEach((inside, index) => {
+    if (!inside) return;
+    for (let at = index - 1; at >= 0 && kinds[at] === 'blank'; at--) removed[at] = true;
+    for (let at = index + 1; at < quote.length && kinds[at] === 'blank'; at++) removed[at] = true;
+  });
   const statics = [];
+  let separator;
   for (let index = 0; index < quote.length; index++) {
-    if (inBlock[index]) continue;
-    const previousBlank =
-      statics.length === 0 || classify(statics[statics.length - 1]) === 'blank';
-    if (kinds[index] === 'blank' && previousBlank) continue;
+    if (removed[index]) {
+      separator ??= quote[index];
+      continue;
+    }
+    if (statics.length === 0 && kinds[index] === 'blank') continue;
+    if (separator !== undefined && statics.length > 0) statics.push(separator);
+    separator = undefined;
     statics.push(quote[index]);
   }
   while (statics.length > 0 && classify(statics[statics.length - 1]) === 'blank') {
@@ -117,9 +132,22 @@ export function prefixPrompts(text, { keep = [] } = {}) {
   }
   if (rewritten.length === 0) return { text, rewritten };
   out.push(...lines.slice(cursor));
-  // The provenance section follows every other section, ending in one newline.
+  // One provenance section follows every other section, ending in one newline;
+  // it replaces every section an earlier application appended and lists, in
+  // item order, each item this or that application rewrote.
+  const listed = new Set(rewritten);
+  for (let index = out.length - 1; index >= 0; index--) {
+    if (!SECTION_HEADING.test(out[index])) continue;
+    let end = index + 1;
+    for (; end < out.length && !HEADING.test(out[end]); end++) {
+      const entry = LISTED.exec(out[end]);
+      if (entry !== null) listed.add(entry[1]);
+    }
+    out.splice(index, end - index);
+  }
   while (out.length > 0 && out[out.length - 1] === '') out.pop();
-  out.push('', SECTION, '', ...rewritten.map(bullet), '');
+  const ids = starts.map((start) => start.id).filter((id) => listed.has(id));
+  out.push('', SECTION, '', ...ids.map(bullet), '');
   return { text: out.join(newline), rewritten };
 }
 

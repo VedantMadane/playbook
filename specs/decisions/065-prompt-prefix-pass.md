@@ -22,11 +22,11 @@ A second pass is the natural home for the reorder: the compiled artifact shows t
 
 ### 1. A second pass: `slc/prefix.md`
 
-- The definition rewrites each eligible acting prompt so that every standalone relay block — a maximal run of quoted relay lines bounded by blank lines, whether Source authored it as a separate quoted relay or set it apart inside a fenced instruction — follows the last instruction line, keeping each line byte-for-byte, the instruction lines in their order, and the relay blocks in theirs.
+- The definition rewrites each eligible acting prompt so that every standalone relay block — a maximal run of quoted relay lines bounded by blank lines, whether Source authored it as a separate quoted relay or set it apart inside a fenced instruction — follows the last instruction line, keeping each line byte-for-byte except the blank lines bounding a moved block, which collapse to one, the instruction lines in their order, and the relay blocks in theirs.
   A GEARS file cannot tell those two authored forms apart, so the unit the pass moves and the unit the checker accepts are defined identically over blank-bounded quoted runs.
 - Eligibility is conservative: script items, items whose relays already trail, and items where an instruction depends on a relay standing before it are left unchanged; the pass invents no line, label, or separator.
 - Source prose that orders a prompt's composition — a relay "after the instruction", an instruction "at the end of the prompt" — binds `text2gears`, not this pass: the pass overrides that order by design, records it in its provenance section, and `--no-optimize` restores it.
-- Provenance is explicit: one appended `## Prefixed prompts` section lists each rewritten item as `- <ITEM-ID>: relays → tail`; an unchanged package carries no section.
+- Provenance is explicit: one `## Prefixed prompts` section at the end lists each rewritten item as `- <ITEM-ID>: relays → tail`, a later application merging into it; a package the pass never rewrote carries no section.
 - The pass name sorts after `optimize`, so a default compile runs `text2gears → optimize → prefix → gears2fsm`, and the pass leaves an `## Optimizations` section untouched.
 - The definition ships beside the other definitions through `./slc/*`, compilable by `slc slc` like any phase, with no `## Compiled execution` section and no compiled bundle, as for `optimize.md` ([DR-047](047-compiled-execution-contract-in-definitions.md)).
 
@@ -37,7 +37,7 @@ A second pass is the natural home for the reorder: the compiled artifact shows t
 
 ### 3. Fidelity checking accepts the new order only with provenance
 
-- The Source-to-GEARS checker accepts, for an item listed under `## Prefixed prompts`, instruction units in Source order, relay units in Source order, and every relay after the last instruction, with every unit intact; it reports a listed item that is absent, unchanged, or still relay-first, and holds every unlisted item to Source order as before.
+- The Source-to-GEARS checker accepts, for an item listed under `## Prefixed prompts`, instruction units in Source order, relay units in Source order, and every relay after the last instruction, with every unit the item carries intact and used once; it reports a listed item that is absent, unchanged, or still relay-first, and a second provenance section, and holds every unlisted item to Source order as before.
 - The slc gate on `text2gears` output is unchanged: it checks the raw GEARS before any pass runs.
   slc keeps its own copy of the checker and also runs it over the installed maintained bundles, so that copy carries the same acceptance rule, rule for rule, before a release ships prefixed maintained artifacts.
 

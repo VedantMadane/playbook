@@ -88,7 +88,10 @@ For each eligible item, the pass shall rewrite only the blockquote:
 
 - Emit every line that is not part of a relay block, in its original order,
   keeping each line byte-for-byte, dropping leading and trailing blank lines,
-  and collapsing blank lines left adjacent by a removed relay block into one.
+  and replacing each run of removed relay blocks together with the blank lines
+  bounding it by the first of those blank lines where it separated two
+  remaining lines; every other blank line, such as one inside a fenced
+  template, stays where it is.
 - Emit one blank line.
 - Emit the relay blocks in their original order, each byte-for-byte, with one
   blank line between consecutive blocks.
@@ -139,18 +142,20 @@ Results:
 
 ## Provenance
 
-The pass shall append one `## Prefixed prompts` section at the end of the
-target — after an `## Optimizations` section when one is present — listing
-every rewritten item, one bullet per item in item order:
-`- <ITEM-ID>: relays → tail`.
-When no item is eligible, the target shall be the source content unchanged,
-with no `## Prefixed prompts` section.
+The target shall end with one `## Prefixed prompts` section — after an
+`## Optimizations` section when one is present — listing every rewritten
+item, one bullet per item in item order: `- <ITEM-ID>: relays → tail`.
+A section an earlier application left in the source is replaced, and the
+items it listed stay listed.
+When no item is eligible, the target shall be the source content unchanged;
+a package the pass never rewrote carries no `## Prefixed prompts` section.
 
 The section is what lets a Source-to-GEARS fidelity checker accept the new
-order: for a listed item it requires every instruction and relay block of the
-authored fragments intact, the instruction blocks in Source order, the relay
-blocks in Source order, and every relay after the last instruction; for any
-other item it requires Source order throughout.
+order: for a listed item it requires each instruction and relay block of the
+fragments the item carries intact, blank lines inside a block included, and
+used exactly once, the instruction blocks in Source order, the relay blocks in
+Source order, and every relay after the last instruction; for any other item
+it requires Source order throughout.
 
 ## Deterministic rewriting
 
@@ -161,7 +166,7 @@ node "<definition-directory>/prefix-prompts.mjs" --source "<source.gears.md>" --
 ```
 
 It reads the source, rewrites every item eligible by the mechanical rules
-above, appends the provenance section, writes the target, and prints the
+above, writes the one provenance section and the target, and prints the
 rewritten item IDs — or reports that no item was eligible and the target
 equals the source.
 `--keep` excludes an item the tool would otherwise rewrite.

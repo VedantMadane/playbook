@@ -76,6 +76,51 @@ function section(gears: string, marker: string): string | undefined {
   return (next === -1 ? rest : rest.slice(0, next)).replace(/\n+$/, '\n');
 }
 
+/** A Source of fenced instructions and its faithful raw GEARS, one item per instruction. */
+function flow(instructions: readonly (readonly string[])[]): { source: string; gears: string } {
+  const head = ['# Flow', '', 'Roles:', '', '- Coder', ''];
+  const source = [
+    ...head,
+    ...instructions.flatMap((lines, index) => [
+      `When step ${index + 1} starts, Captain shall give Coder the following instruction:`,
+      '',
+      '```markdown',
+      ...lines,
+      '```',
+      '',
+    ]),
+  ].join('\n');
+  const gears = [
+    ...head,
+    ...instructions.flatMap((lines, index) => [
+      `### FLOW-${index + 1}`,
+      '',
+      `When step ${index + 1} starts, Captain shall prompt Coder:`,
+      '',
+      ...lines.map((line) => (line === '' ? '>' : `> ${line}`)),
+      '',
+      'Results:',
+      '- `done`: Coder finished.',
+      '',
+    ]),
+  ].join('\n');
+  return { source, gears };
+}
+
+/** An instruction whose fenced template carries an authored run of two blank lines. */
+const TEMPLATE = [
+  '> Request: <caller-input>',
+  '',
+  'Create `notes.txt` with exactly this content:',
+  '',
+  '~~~text',
+  'first',
+  '',
+  '',
+  'second',
+  '~~~',
+];
+
 describe('prompt-prefix pass tool (compiler-prompt-prefix-6)', () => {
   let dir: string;
   beforeEach(() => {
@@ -243,6 +288,14 @@ describe('prompt-prefix pass tool (compiler-prompt-prefix-6)', () => {
     expect(stdout.trim()).toBe('REVIEW-2');
     expect(text).toBe(`${after}\n${SECTION}\n\n- REVIEW-2: relays → tail\n`);
   });
+
+  it('merges a later application into one provenance section', () => {
+    const { gears } = reference('review');
+    const again = prefix(dir, prefix(dir, gears, ['REVIEW-2']).text);
+    expect(again.stdout.trim()).toBe('REVIEW-2');
+    expect(again.text).toBe(prefix(dir, gears).text);
+    expect(again.text.match(/^## Prefixed prompts$/gm)).toHaveLength(1);
+  });
 });
 
 describe('prefix-first prompts share their instructions as a cache prefix (compiler-prompt-prefix-7)', () => {
@@ -317,5 +370,104 @@ describe('fidelity checker accepts prefixed items only with provenance (compiler
     expect(
       checkSourceGearsContract(source, `${gears}\n${SECTION}\n\n- CODE-1: relays → tail\n`),
     ).toEqual(['CODE-1: listed as prefixed but a relay precedes an instruction']);
+    const twice = `${prefixed}\n${SECTION}\n\n- CODE-2: relays → tail\n`;
+    expect(checkSourceGearsContract(source, twice)).toEqual([
+      `Prefixed prompts: duplicate section at line ${twice.split('\n').lastIndexOf(SECTION) + 1}`,
+      'CODE-2: listed as prefixed but its prompt is in Source order',
+    ]);
+  });
+});
+
+describe('prefix units keep ownership, multiplicity, and blank lines (compiler-prompt-prefix-9)', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'playbook-prefix-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("keeps an instruction's authored blank lines and collapses only a moved block's", () => {
+    expect(prompts(prefix(dir, flow([TEMPLATE]).gears).text).get('FLOW-1')).toEqual([
+      'Create `notes.txt` with exactly this content:',
+      '',
+      '~~~text',
+      'first',
+      '',
+      '',
+      'second',
+      '~~~',
+      '',
+      '> Request: <caller-input>',
+    ]);
+    const bounded = flow([['Do X.', '', '', '> Request: <caller-input>', '', 'Do Y.']]);
+    expect(prompts(prefix(dir, bounded.gears).text).get('FLOW-1')).toEqual([
+      'Do X.',
+      '',
+      'Do Y.',
+      '',
+      '> Request: <caller-input>',
+    ]);
+  });
+
+  it('owns units by fragment and counts each occurrence', () => {
+    const shared = flow([
+      ['> Request: <caller-input>', '', 'Implement the request.', '', 'Report every result.'],
+      ['> Request: <caller-input>', '', 'Test the change.', '', 'Report every result.'],
+      ['> Request: <caller-input>', '', 'Run the tests.', '', 'Fix every failure.', '', 'Run the tests.'],
+    ]);
+    expect(checkSourceGearsContract(shared.source, prefix(dir, shared.gears).text)).toEqual([]);
+    const repeated = flow([
+      ['> Request: <caller-input>', '', 'Implement the request.', '', '> Request: <caller-input>', '', 'Report every result.'],
+    ]);
+    const both = prefix(dir, repeated.gears).text;
+    expect(checkSourceGearsContract(repeated.source, both)).toEqual([]);
+    expect(
+      checkSourceGearsContract(repeated.source, both.replace('> > Request: <caller-input>\n>\n', '')),
+    ).toEqual([
+      'source instruction fragment at line 9 was dropped or changed',
+      'FLOW-1: authored prompt fragments are out of Source order',
+    ]);
+    const masked = flow([
+      ['> Request: <caller-input>', '', 'Implement the request.'],
+      ['Test the change.', '', '> Request: <caller-input>'],
+    ]);
+    expect(
+      checkSourceGearsContract(masked.source, `${prefix(dir, masked.gears).text}- FLOW-2: relays → tail\n`),
+    ).toEqual(['FLOW-2: listed as prefixed but its prompt is in Source order']);
+  });
+
+  it('accepts a boundary of more than one blank line that the Source put between fragments', () => {
+    const source = [
+      '# Flow', '', 'Roles:', '', '- Coder', '',
+      "When step 1 starts, Captain shall relay the request in quotes (`>`) and give Coder these instructions:",
+      '', '> Request: <caller-input>', '',
+      '```markdown', 'Implement the request.', '```', '',
+      'Two blank lines then separate the second instruction from the first:', '',
+      '```markdown', 'Report every result.', '```', '',
+    ].join('\n');
+    const gears = [
+      '# Flow', '', 'Roles:', '', '- Coder', '',
+      '### FLOW-1', '', 'When step 1 starts, Captain shall prompt Coder:', '',
+      '> > Request: <caller-input>', '>', '> Implement the request.', '>', '>', '> Report every result.', '',
+      'Results:', '- `done`: Coder finished.', '',
+    ].join('\n');
+    expect(checkSourceGearsContract(source, gears)).toEqual([]);
+    const { text, stdout } = prefix(dir, gears);
+    expect(stdout.trim()).toBe('FLOW-1');
+    expect(prompts(text).get('FLOW-1')).toEqual([
+      'Implement the request.', '', '', 'Report every result.', '', '> Request: <caller-input>',
+    ]);
+    expect(checkSourceGearsContract(source, text)).toEqual([]);
+  });
+
+  it("holds an instruction's interior blank lines exact", () => {
+    const { source, gears } = flow([TEMPLATE]);
+    const text = prefix(dir, gears).text;
+    expect(checkSourceGearsContract(source, text)).toEqual([]);
+    for (const blanks of [0, 1, 3]) {
+      const changed = text.replace('> first\n>\n>\n> second', `> first\n${'>\n'.repeat(blanks)}> second`);
+      expect(checkSourceGearsContract(source, changed)).toContain(
+        'source instruction fragment at line 9 was dropped or changed',
+      );
+    }
   });
 });

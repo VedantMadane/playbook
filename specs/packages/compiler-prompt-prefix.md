@@ -11,7 +11,8 @@ This package governs the prompt-prefix pass of [DR-065](../decisions/065-prompt-
 
 ### compiler-prompt-prefix-1
 
-When the prefix pass rewrites an eligible acting item, the pass shall move every standalone relay block — a maximal run of prompt lines beginning with the literal quote marker [[playbook-6](playbook.md#playbook-6)] bounded by blank prompt lines or the blockquote's edges — after the item's last instruction line, keeping every prompt line byte-for-byte, the instruction lines in their order with one blank line separating them from the relays, and the relay blocks in their order with one blank line between consecutive blocks, and shall leave the item's heading, condition, acting clause, and `Results:` metadata, every other item, and every non-item section byte-for-byte.
+When the prefix pass rewrites an eligible acting item, the pass shall move every standalone relay block — a maximal run of prompt lines beginning with the literal quote marker [[playbook-5](playbook.md#playbook-5)] bounded by blank prompt lines or the blockquote's edges — after the item's last instruction line, keeping every non-blank prompt line byte-for-byte, the instruction lines in their order with one blank line separating them from the relays, and the relay blocks in their order with one blank line between consecutive blocks, and shall leave the item's heading, condition, acting clause, and `Results:` metadata, every other item, and every non-item section other than its provenance section [[compiler-prompt-prefix-3](#compiler-prompt-prefix-3)] byte-for-byte.
+The pass shall replace each maximal run of moved blocks and their bounding blank lines with that run's first blank line where it separated two remaining prompt lines and with nothing where it led or trailed them, drop any other blank line leading or trailing the remaining lines, and keep every other blank line byte-for-byte in place.
 
 ### compiler-prompt-prefix-2
 
@@ -19,7 +20,7 @@ Where an item is a script item, has no standalone relay block preceding an instr
 
 ### compiler-prompt-prefix-3
 
-When the pass has rewritten at least one item, the pass shall append one `## Prefixed prompts` section after every other section listing each rewritten item in item order as `- <ITEM-ID>: relays → tail`; when it has rewritten none, the target shall equal the source with no such section.
+When the pass has rewritten at least one item, the pass shall replace every `## Prefixed prompts` section of the source with one such section after every other section, listing in item order as `- <ITEM-ID>: relays → tail` each item it rewrote and each item a replaced section listed; when it has rewritten none, the target shall equal the source.
 
 ### compiler-prompt-prefix-4
 
@@ -27,7 +28,7 @@ When invoked with `--source <gears.md>` and `--target <gears.md>` and zero or mo
 
 ### compiler-prompt-prefix-5
 
-When the Source-to-GEARS fidelity checker evaluates an item listed under `## Prefixed prompts`, the checker shall read each authored fragment as units — a quoted relay fragment as one relay unit, and an instruction or prompt fragment split at its blank lines into paragraphs, a paragraph of only quoted lines being a relay unit and any other an instruction unit — and shall accept the item only when every unit of every fragment the item carries is intact, the instruction units keep their Source order, the relay units keep their Source order, and every relay unit and bare relay line follows the last instruction unit; the checker shall report a listed ID that names no item, a malformed entry, a listed item whose relays still precede an instruction, and a listed item whose units are already in that order in Source, while holding every unlisted item to Source order [[playbook-1](playbook.md#playbook-1)]:
+When the Source-to-GEARS fidelity checker evaluates an item listed under `## Prefixed prompts`, the checker shall read each authored fragment as units — a quoted relay fragment as one relay unit, and in an instruction or prompt fragment each paragraph of only quoted lines a relay unit and the lines between relay units, without their bounding blank lines, one instruction unit keeping its interior blank lines — and shall accept the item only when, for some fragments it carries whole in Source order, its prompt is their instruction units — one blank line between units of one fragment, one or more between fragments — then one blank line before each of their relay units, each unit occurrence used exactly once and a bare relay line admitted among the relays; the checker shall read every `## Prefixed prompts` section and report a section after the first, a listed ID that names no item, a malformed entry, a listed item whose relays still precede an instruction, and a listed item whose carried units are already in that order in Source, while holding every unlisted item to Source order [[playbook-1](playbook.md#playbook-1)]:
 
 - The units are the blocks the pass moves or keeps [[compiler-prompt-prefix-1](#compiler-prompt-prefix-1)], so a quoted block set apart by blank lines inside a fenced instruction is accepted at the tail like a separate relay, while a quoted line beside instruction text stays with it.
 
@@ -36,6 +37,7 @@ When the Source-to-GEARS fidelity checker evaluates an item listed under `## Pre
 ### compiler-prompt-prefix-6
 
 When the integration suite runs the shipped tool over each maintained workflow's GEARS, it shall verify that the rewritten set is exactly the items whose relays precede an instruction, that every unlisted item and the `## Optimizations` section are byte-identical, that the provenance section lists the rewritten items in order, that a second run changes nothing, and that a kept item is skipped [[compiler-prompt-prefix-1](#compiler-prompt-prefix-1)], [[compiler-prompt-prefix-2](#compiler-prompt-prefix-2)], [[compiler-prompt-prefix-3](#compiler-prompt-prefix-3)], [[compiler-prompt-prefix-4](#compiler-prompt-prefix-4)]; and that the shipped definition's example rewrites through the tool exactly as printed [[compiler-prompt-prefix-1](#compiler-prompt-prefix-1)].
+When the integration suite runs the shipped tool over the output of a run with `--keep`, it shall verify that the second run rewrites only the kept item and yields the text of one run without `--keep`, with one provenance section [[compiler-prompt-prefix-3](#compiler-prompt-prefix-3)], [[compiler-prompt-prefix-4](#compiler-prompt-prefix-4)].
 
 ### compiler-prompt-prefix-7
 
@@ -43,4 +45,8 @@ When the integration suite composes a rewritten item's prompt through the real r
 
 ### compiler-prompt-prefix-8
 
-When the integration suite runs the fidelity checker over each maintained source and its tool-rewritten GEARS, it shall verify zero findings, and over mutants — the provenance section removed, a nested-call item listed, an unknown ID and a malformed entry listed, a listed item with a relay dropped, and the original layout listed — it shall verify the respective findings [[compiler-prompt-prefix-5](#compiler-prompt-prefix-5)]; and over a Source whose fenced instruction opens with a blank-separated quoted block, it shall verify that the tool moves the block, the checker accepts the listed result and rejects the same result unlisted, and a quoted line beside instruction text stays in place [[compiler-prompt-prefix-1](#compiler-prompt-prefix-1)], [[compiler-prompt-prefix-5](#compiler-prompt-prefix-5)].
+When the integration suite runs the fidelity checker over each maintained source and its tool-rewritten GEARS, it shall verify zero findings, and over mutants — the provenance section removed, a nested-call item listed, an unknown ID and a malformed entry listed, a second provenance section, a listed item with a relay dropped, and the original layout listed — it shall verify the respective findings [[compiler-prompt-prefix-5](#compiler-prompt-prefix-5)]; and over a Source whose fenced instruction opens with a blank-separated quoted block, it shall verify that the tool moves the block, the checker accepts the listed result and rejects the same result unlisted, and a quoted line beside instruction text stays in place [[compiler-prompt-prefix-1](#compiler-prompt-prefix-1)], [[compiler-prompt-prefix-5](#compiler-prompt-prefix-5)].
+
+### compiler-prompt-prefix-9
+
+When the integration suite runs the shipped tool and the fidelity checker over Sources in which two items share an instruction paragraph, one instruction repeats a paragraph, one instruction repeats a relay block, one instruction carries an authored run of two blank lines, a relay-last item shares a relay with a relay-first one, and one item's two instruction fragments are joined by two blank lines, it shall verify that the authored run survives the rewrite while the blank lines bounding a moved block collapse to one [[compiler-prompt-prefix-1](#compiler-prompt-prefix-1)], that each listed result has zero findings, and that the checker reports a listed result with one repeated relay block deleted, with the authored run shortened, removed, or lengthened, and with the relay-last item listed [[compiler-prompt-prefix-5](#compiler-prompt-prefix-5)].
