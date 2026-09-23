@@ -1,3 +1,4 @@
+import { normalizeErrorCompact, normalizeErrorFull } from '../../../src/xstate-runtime.js';
 import { type PlayerInput, type DecideEvent, type DecideInput, type PendingBossQuestion } from './decide.fsm.js';
 import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
 import type { CaptainCallOptions, CaptainResult, JsonValue, NormalizedError, PlayerCallOptions, PlayerResult, PlayerSessionStore, PlaybookCallRequest, PlaybookCallResult, PlaybookCallStart, PlaybookControlAction, PlaybookControlReceipt, PlaybookControlView, PlaybookPendingCall, PlaybookPorts, PlaybookRunResult, PlaybookRuntime, PlaybookRuntimeFactory, PlaybookRuntimeSnapshot, PlaybookSession, PlaybookState, PlaybookStateValue, PlaybookTraceEvent, PlaybookTraceType } from '@sublang/playbook/runtime';
@@ -25,15 +26,6 @@ declare function buildAdjudicatorPrompt(input: PlayerInput, playerOutput: string
     readonly error: string;
 }): string;
 declare function combineSignals(a: AbortSignal | undefined, b: AbortSignal | undefined): AbortSignal;
-declare function normalizeErrorCompact(err: unknown): {
-    name: string;
-    message: string;
-} | undefined;
-declare function normalizeErrorFull(err: unknown): {
-    name: string;
-    message: string;
-    stack?: string;
-} | undefined;
 declare function pendingQuestionsFromContext(context: Record<string, unknown>): PendingBossQuestion[];
 declare function pendingQuestionsForState(state: PlaybookState, context: Record<string, unknown>): PendingBossQuestion[];
 export declare const createPlaybookRuntime: PlaybookRuntimeFactory<DecidePlaybookRuntimeConstruction>;

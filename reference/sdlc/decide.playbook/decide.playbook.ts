@@ -28,18 +28,26 @@ import {
 } from '../../../src/accepted-outcome.js';
 
 import {
+  ABORTED_FAILURE_CAUSE,
   assertJsonSafe,
   assertPlaybookEffectLedger,
   assertPlaybookRuntimeSnapshot,
+  attachPlaybookFailureCause,
   combineAbortSignals,
   composePlayerContinuation,
   createNestedPlaybookBridge,
   detachPersistedMachineSnapshot,
+  effectAuthorizedPreExistingBlock,
+  governedSettlementCause,
   normalizeError,
+  normalizeErrorCompact,
+  normalizeErrorFull,
   normalizePlaybookSnapshot,
   PlaybookSemanticCandidateStructureError,
+  playerFailureCause,
   reconcilePlaybookSemanticEvidence,
   renderGovernedOutcomeContract,
+  runtimeDefectCause,
   snapshotJsonValue,
   snapshotPlaybookSession,
   terminalOutcomesFromMachine,
@@ -80,6 +88,7 @@ import type {
   PlaybookEffectBoundaryStart,
   PlaybookEffectLedger,
   PlaybookEffectLedgerCapability,
+  PlaybookFailureCause,
   PlaybookPendingBossQuestion,
   PlaybookPendingCall,
   PlaybookPorts,
@@ -699,20 +708,6 @@ function combineSignals(
   return combineAbortSignals(a, b);
 }
 
-function normalizeErrorCompact(
-  err: unknown,
-): { name: string; message: string } | undefined {
-  if (err === undefined || err === null) return undefined;
-  const normalized = normalizeError(err);
-  return { name: normalized.name, message: normalized.message };
-}
-
-function normalizeErrorFull(
-  err: unknown,
-): { name: string; message: string; stack?: string } | undefined {
-  return err === undefined || err === null ? undefined : normalizeError(err);
-}
-
 // DR-028's unified empty predicate: a missing, empty, or whitespace-only
 // `finalText` on an `ok` player result is the one shape that earns exactly
 // one corrective re-ask before the existing failure path applies. Mirrors
@@ -1240,6 +1235,7 @@ function telemetryPayload(
   event: unknown,
   context: Record<string, unknown>,
   hiddenQuestionId?: string,
+  failedError?: NormalizedError,
 ): JsonValue {
   const pendingBossQuestions = pendingQuestionsForState(
     state,
@@ -1254,7 +1250,7 @@ function telemetryPayload(
     state,
     ...(pendingBossQuestions.length > 0 ? { pendingBossQuestions } : {}),
     ...(state.activeStateIds.includes('failed')
-      ? { lastError: normalizeErrorFull(context.lastError) ?? null }
+      ? { lastError: failedError ?? normalizeErrorFull(context.lastError) ?? null }
       : {}),
   } satisfies Record<string, unknown>;
   assertJsonSafe(payload);
@@ -1278,6 +1274,7 @@ interface ActiveDeferredContinuation {
   readonly result: DeferredValue<PlayerResult>;
   readonly acknowledged: DeferredValue<PlayerResult>;
   playerContinuation?: string | false;
+  baseline?: PlaybookRepositoryReceipt['baseline'];
   input?: PlayerInput;
   playerId?: string;
 }
@@ -1350,6 +1347,58 @@ function createDecidePlaybookRuntime(
   const semanticCompletionQueue = new PQueue({ concurrency: 1 });
   const governedOutputsByBoundaryId = new Map<string, PlayerOutput>();
   const governedFailuresByBoundaryId = new Map<string, Error>();
+  // DR-063 §2: the cause decided for the failure in flight, published from
+  // here where the FSM's own `lastError` cannot carry it — a thrown string, a
+  // frozen error — so there is no failure without a cause (mirrors the shared
+  // factory).
+  let lastFailureCause: PlaybookFailureCause | undefined;
+  const rememberFailureCause = (cause: PlaybookFailureCause): void => {
+    lastFailureCause = cause;
+  };
+  const failedStateError = (
+    context: Record<string, unknown>,
+  ): NormalizedError | undefined => {
+    const normalized = normalizeErrorFull(context.lastError);
+    if (normalized === undefined || normalized.cause !== undefined) {
+      return normalized;
+    }
+    return {
+      ...normalized,
+      cause: lastFailureCause ?? runtimeDefectCause(normalized.message),
+    };
+  };
+  const playerResultFailureCause = (
+    roleId: RoleId,
+    playerId: string | undefined,
+    result: PlayerResult,
+  ): PlaybookFailureCause =>
+    result.status === 'aborted'
+      ? ABORTED_FAILURE_CAUSE
+      : playerFailureCause({
+          roleId,
+          ...(playerId === undefined ? {} : { playerId }),
+          error:
+            result.error ??
+            `callPlayer status ${JSON.stringify(result.status)}`,
+        });
+  // A rejected player port or a result the runtime cannot read is a
+  // `player-failed` failure named by role; an abort is `aborted`.
+  const decidePlayerCallFailure = (
+    error: unknown,
+    roleId: RoleId,
+    playerId: string | undefined,
+    signal: AbortSignal,
+  ): void => {
+    const cause = isAbortFailure(error, signal)
+      ? ABORTED_FAILURE_CAUSE
+      : playerFailureCause({
+          roleId,
+          ...(playerId === undefined ? {} : { playerId }),
+          error,
+        });
+    rememberFailureCause(cause);
+    attachPlaybookFailureCause(error, cause);
+  };
   const governedEvidenceByBoundaryId = new Map<
     string,
     { readonly finalText: string; readonly semanticCandidate?: JsonValue }
@@ -2154,6 +2203,7 @@ function createDecidePlaybookRuntime(
     continuation?: {
       readonly resume?: string | false;
       readonly callId: string;
+      readonly preExistingBlock?: string;
     },
   ): Promise<DeferredContinuationEnvelope> => {
     const aborts = abortReasonClassifier(signal);
@@ -2165,7 +2215,13 @@ function createDecidePlaybookRuntime(
     const roleId = input.role;
     const playerId = resolvedPlayerId(roleId);
     const playerKey = continuationKey(roleId, playerId);
-    const freshPrompt = composeInvocationPrompt(input);
+    // DR-062 §4: composed from this call's own baseline observation, so the
+    // prompt the trace records is the prompt the player is sent.
+    const withPreExisting = (text: string): string =>
+      continuation?.preExistingBlock === undefined
+        ? text
+        : `${text}\n\n${continuation.preExistingBlock}`;
+    const freshPrompt = withPreExisting(composeInvocationPrompt(input));
     let resume: PlayerCallOptions['resume'];
     try {
       signal.throwIfAborted();
@@ -2178,7 +2234,10 @@ function createDecidePlaybookRuntime(
       latchControlPlaneError(error, signal);
       throw error;
     }
-    const prompt = resume === false ? freshPrompt : composeInvocationPrompt(input, true);
+    const prompt =
+      resume === false
+        ? freshPrompt
+        : withPreExisting(composeInvocationPrompt(input, true));
     const callId =
       continuation?.callId ?? `player-${++playerCallSequence}`;
     const identity = {
@@ -2244,6 +2303,7 @@ function createDecidePlaybookRuntime(
         // A rejected call produced no authoritative result, so the previous
         // token remains untouched. This also covers a coder promise that
         // resolves after its invocation signal was cancelled.
+        decidePlayerCallFailure(error, roleId, playerId, signal);
         latchControlPlaneError(error, signal);
         try {
           await emitFailure(error);
@@ -2257,6 +2317,7 @@ function createDecidePlaybookRuntime(
       try {
         result = validatePlayerResult(rawResult);
       } catch (error) {
+        decidePlayerCallFailure(error, roleId, playerId, signal);
         latchControlPlaneError(error, signal);
         try {
           await emitFailure(error);
@@ -2278,6 +2339,15 @@ function createDecidePlaybookRuntime(
           // The continuation-store failure remains authoritative.
         }
         throw error;
+      }
+
+      // DR-063 §2: a non-`ok` result's cause is decided here, where the role,
+      // the player, and the reported error are known; an `ok` result clears
+      // the slot so no later failure inherits it.
+      if (result.status === 'ok') {
+        lastFailureCause = undefined;
+      } else {
+        rememberFailureCause(playerResultFailureCause(roleId, playerId, result));
       }
 
       // Keep this finish outside the boundary catch. A trace sink can record
@@ -2348,16 +2418,30 @@ function createDecidePlaybookRuntime(
     };
   };
 
+  // DR-063 §1/§2: the cause of an unresolved governed settlement is decided
+  // here — a reconciled mismatch supplies its receipt-read cause, an abort or
+  // a refused adjudication its own code, anything else a runtime defect — and
+  // rides the failure the boundary throws.
   const unresolvedGovernedEvidence = (
     boundaryId: string,
     reason: string,
     error?: unknown,
+    cause?: PlaybookFailureCause,
   ): void => {
+    const aborted =
+      error !== undefined &&
+      currentSignal?.aborted === true &&
+      Object.is(error, currentSignal.reason);
+    const decided = governedSettlementCause(reason, error, aborted, cause);
+    rememberFailureCause(decided);
     governedFailuresByBoundaryId.set(
       boundaryId,
-      error instanceof Error
-        ? error
-        : new Error(`DECIDE governed outcome remains unresolved: ${reason}`),
+      attachPlaybookFailureCause(
+        error instanceof Error
+          ? error
+          : new Error(`DECIDE governed outcome remains unresolved: ${reason}`),
+        decided,
+      ),
     );
   };
 
@@ -2706,6 +2790,8 @@ function createDecidePlaybookRuntime(
           unresolvedGovernedEvidence(
             boundary.boundaryId,
             reconciliation.reason,
+            undefined,
+            reconciliation.cause,
           );
           return { finalText, semanticCandidate, unresolved: true as const };
         }
@@ -3120,6 +3206,10 @@ function createDecidePlaybookRuntime(
           const envelope = await runPlayerCall(input, signal, {
             callId: active.effectBoundary.callId,
             resume: active.playerContinuation,
+            preExistingBlock: effectAuthorizedPreExistingBlock(
+              active.effectBoundary,
+              active.baseline,
+            ),
           });
           active.result.resolve(envelope.result);
           const acknowledgedResult = await active.acknowledged.promise;
@@ -3145,8 +3235,16 @@ function createDecidePlaybookRuntime(
       const settled = await deferredEffects.repository.runExclusive({
         signal,
         effectBoundary,
-        operation: async () => {
-          envelope = await runPlayerCall(input, signal, { callId });
+        // DR-062 §4: the call's own baseline, supplied by the host that
+        // captured it under this exclusive claim.
+        operation: async (context) => {
+          envelope = await runPlayerCall(input, signal, {
+            callId,
+            preExistingBlock: effectAuthorizedPreExistingBlock(
+              effectBoundary,
+              context?.baseline,
+            ),
+          });
           return envelope.result;
         },
         completeEffectBoundary: completionEvidenceFor(
@@ -3214,12 +3312,19 @@ function createDecidePlaybookRuntime(
           ));
         }
         if (result.status !== 'ok') {
-          throw new Error(
-            `${roleLabel(roleId)}${
-              playerId === undefined ? '' : ` (${playerId})`
-            } returned status "${result.status}"${
-              result.error ? `: ${result.error}` : ''
-            }`,
+          // DR-063 §2: the failure Error built for a non-`ok` result carries
+          // the cause decided for that exact result.
+          const cause = playerResultFailureCause(roleId, playerId, result);
+          rememberFailureCause(cause);
+          throw attachPlaybookFailureCause(
+            new Error(
+              `${roleLabel(roleId)}${
+                playerId === undefined ? '' : ` (${playerId})`
+              } returned status "${result.status}"${
+                result.error ? `: ${result.error}` : ''
+              }`,
+            ),
+            cause,
           );
         }
         const finalText = result.finalText ?? '';
@@ -3365,6 +3470,9 @@ function createDecidePlaybookRuntime(
         hiddenDeferredOperationId === undefined
           ? undefined
           : 'commitCoderProposal',
+        state.activeStateIds.includes('failed')
+          ? failedStateError(context)
+          : undefined,
       );
       const describedFsmPayload = snapshotJsonValue(
         fsmPayload,
@@ -3444,7 +3552,7 @@ function createDecidePlaybookRuntime(
         }
         const lastError =
           activeStateId === 'failed'
-            ? normalizeErrorCompact(context.lastError)
+            ? normalizeErrorCompact(failedStateError(context))
             : undefined;
         const description = STATE_DESCRIPTIONS[activeStateId];
         if (description === undefined) continue;
@@ -3456,7 +3564,9 @@ function createDecidePlaybookRuntime(
             ? '◆ workflow failed; awaiting Boss recovery.'
             : `⤷ ${roleLabel(roleState.role)}: ${description}`,
           activeStateId,
-          lastError === undefined ? undefined : { lastError },
+          lastError === undefined
+            ? undefined
+            : snapshotJsonValue({ lastError }, 'DECIDE failed status data'),
         );
       }
     } catch (error) {
@@ -3640,7 +3750,7 @@ function createDecidePlaybookRuntime(
       signal,
       operationId,
       effectBoundary,
-      operation: async ({ playerContinuation }) => {
+      operation: async ({ playerContinuation, baseline }) => {
         if (
           playerContinuation !== false &&
           (typeof playerContinuation !== 'string' ||
@@ -3651,6 +3761,8 @@ function createDecidePlaybookRuntime(
           );
         }
         active.playerContinuation = playerContinuation;
+        // DR-062 §4: the continuation's own baseline.
+        active.baseline = baseline;
         readiness.resolve({ status: 'ready' });
         return active.result.promise;
       },
@@ -3957,7 +4069,10 @@ function createDecidePlaybookRuntime(
     const actions = deriveControlCandidates().map(({ action }) => ({
       ...action,
     }));
-    const lastError = normalizeErrorFull(context.lastError);
+    const lastError =
+      state.stateId === 'failed'
+        ? failedStateError(context)
+        : normalizeErrorFull(context.lastError);
     const stateDescription =
       unresolved || state.stateId === undefined
         ? undefined
@@ -4035,6 +4150,8 @@ function createDecidePlaybookRuntime(
     const turnId = ++turnSequence;
     const callId = `apply-${++applyCallSequence}`;
     currentTurnId = turnId;
+    // DR-063 §2: each turn decides its own failures.
+    lastFailureCause = undefined;
     currentSignal = signal;
     currentAborts = abortReasonClassifier(signal);
     controlPlaneError = undefined;
@@ -4306,7 +4423,7 @@ function createDecidePlaybookRuntime(
       return abortedResult(signal);
     }
     if (state.activeStateIds.includes('failed')) {
-      const error = normalizeErrorFull(context.lastError);
+      const error = failedStateError(context);
       return {
         outcome: 'failed',
         state,
@@ -4504,12 +4621,17 @@ function createDecidePlaybookRuntime(
       }
       const state = currentState();
       if (state.status !== 'active' || !state.quiescent) return undefined;
-      const machine = detachPersistedMachineSnapshot(
-        actor.getPersistedSnapshot(),
-      );
       const context = (
         actor.getSnapshot() as SnapshotFrom<typeof decideMachine>
       ).context as unknown as Record<string, unknown>;
+      // DR-063 §2: the failed state's `lastError` is persisted as every live
+      // surface publishes it, completed from the runtime's own cause slot.
+      const machine = detachPersistedMachineSnapshot(
+        actor.getPersistedSnapshot(),
+        state.stateId === 'failed'
+          ? { lastError: failedStateError(context) }
+          : {},
+      );
       if (deferredEffects !== undefined) {
         synchronizeDeferredProjection(readEffectLedger());
       }
@@ -4678,6 +4800,8 @@ function createDecidePlaybookRuntime(
 
       const turnId = ++turnSequence;
       currentTurnId = turnId;
+      // DR-063 §2: each turn decides its own failures.
+      lastFailureCause = undefined;
       currentSignal = turn.signal;
       currentAborts = abortReasonClassifier(turn.signal);
       controlPlaneError = undefined;
@@ -4806,7 +4930,7 @@ function createDecidePlaybookRuntime(
             : {
                 outcome: 'failed',
                 state,
-                error: normalizeErrorFull(effectiveError) ?? {
+                error: failedStateError({ lastError: effectiveError }) ?? {
                   name: 'Error',
                   message: String(effectiveError),
                 },
@@ -4830,7 +4954,7 @@ function createDecidePlaybookRuntime(
         result = {
           outcome: drainAborted ? 'aborted' : 'failed',
           state,
-          error: normalizeErrorFull(effectiveError) ?? {
+          error: failedStateError({ lastError: effectiveError }) ?? {
             name: 'Error',
             message: String(effectiveError),
           },

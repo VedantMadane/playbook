@@ -142,11 +142,12 @@ interface TestEffectHostOptions {
   readonly exclusiveClassifications?: readonly TestReceiptClassification[];
   readonly cohortClassifications?: readonly TestReceiptClassification[];
   readonly sessionId?: string;
+  readonly baseline?: Record<string, unknown>;
 }
 
 function createTestEffectHost(options: TestEffectHostOptions = {}) {
   let ledger = replayLedger([]);
-  let observation = REPLAY_BASELINE;
+  let observation = replayObservation(options.baseline);
   let boundarySequence = 0;
   let attemptSequence = 0;
   let commitSequence = 10;
@@ -460,7 +461,10 @@ function createPlaybookRuntime(
 
 const DEFERRED_ATTEMPT_ID = '50000000-0000-4000-8000-000000000002';
 
-function createDeferredRepositoryHarness() {
+function createDeferredRepositoryHarness(
+  options: { readonly baseline?: Record<string, unknown> } = {},
+) {
+  const harnessBaseline = replayObservation(options.baseline);
   let ledger: PlaybookEffectLedger = replayLedger([]);
   let checkpointMatches = true;
   let restorationMatches = true;
@@ -574,7 +578,7 @@ function createDeferredRepositoryHarness() {
 
   const repository = {
     identity: { worktree: '/repo', gitDir: '/repo/.git' },
-    observe: async () => REPLAY_BASELINE,
+    observe: async () => harnessBaseline,
     acquire: async () => ({}),
     async runCohort(options: any) {
       calls.push({ mode: 'cohort' });
@@ -592,7 +596,7 @@ function createDeferredRepositoryHarness() {
               attemptNumber: 1,
               playbookId: 'decide',
               canonicalWorktree: repository.identity,
-              baseline: REPLAY_BASELINE,
+              baseline: harnessBaseline,
               cohortId,
             },
           ];
@@ -613,7 +617,7 @@ function createDeferredRepositoryHarness() {
             await Promise.resolve()
               .then(() =>
                 options.operations[roleId]({
-                  baseline: REPLAY_BASELINE,
+                  baseline: harnessBaseline,
                   identity: repository.identity,
                   invocationId: options.invocationId,
                   roleId,
@@ -628,8 +632,8 @@ function createDeferredRepositoryHarness() {
       ) as Record<'coder' | 'reviewer', any>;
       const receipt = {
         classification: 'unchanged' as const,
-        baseline: REPLAY_BASELINE,
-        after: REPLAY_BASELINE,
+        baseline: harnessBaseline,
+        after: harnessBaseline,
       };
       const completions = await Promise.all(
         roleIds.map((roleId) =>
@@ -653,7 +657,7 @@ function createDeferredRepositoryHarness() {
           const completion = completions[index];
           return {
             ...boundary,
-            after: REPLAY_BASELINE,
+            after: harnessBaseline,
             physicalReceipt: receipt,
             ...(completion.finalText === undefined
               ? {}
@@ -665,7 +669,7 @@ function createDeferredRepositoryHarness() {
         }),
       };
       return {
-        baseline: REPLAY_BASELINE,
+        baseline: harnessBaseline,
         invocationId: options.invocationId,
         operations,
         receipts: { coder: receipt, reviewer: receipt },
@@ -675,19 +679,24 @@ function createDeferredRepositoryHarness() {
     async runExclusive(options: any) {
       calls.push({ mode: 'exclusive' });
       const operation = await Promise.resolve()
-        .then(options.operation)
+        .then(() =>
+          options.operation({
+            baseline: harnessBaseline,
+            identity: { worktree: '/repo', gitDir: '/repo/.git' },
+          }),
+        )
         .then(
           (value) => ({ status: 'fulfilled' as const, value }),
           (reason) => ({ status: 'rejected' as const, reason }),
         );
-      const after = REPLAY_BASELINE;
+      const after = harnessBaseline;
       const receipt = {
         classification: 'unchanged' as const,
-        baseline: REPLAY_BASELINE,
+        baseline: harnessBaseline,
         after,
       };
       const provisional = boundaryFrom(options.effectBoundary, {
-        baseline: REPLAY_BASELINE,
+        baseline: harnessBaseline,
         after,
         receipt,
         operationId: '50000000-0000-4000-8000-000000000001',
@@ -707,7 +716,7 @@ function createDeferredRepositoryHarness() {
         throw new Error('injected deferred bind completion failure');
       }
       const boundary = boundaryFrom(options.effectBoundary, {
-        baseline: REPLAY_BASELINE,
+        baseline: harnessBaseline,
         after,
         receipt,
         finalText: completion.finalText,
@@ -726,7 +735,7 @@ function createDeferredRepositoryHarness() {
             playbookId: 'decide',
             runtimeSessionId: boundary.runtimeSessionId,
             boundaryIds: [boundary.boundaryId],
-            originalBaseline: REPLAY_BASELINE,
+            originalBaseline: harnessBaseline,
             checkpoint: after,
             pendingQuestion: completion.deferred.pendingQuestion,
             playerContinuation: completion.deferred.playerContinuation,
@@ -2411,6 +2420,46 @@ describe('DECIDE deferred effect continuation', () => {
     await fixture.runtime.dispose();
   });
 
+  it('ends the deferred continuation with the pre-existing changes of its baseline', async () => {
+    const block = [
+      '> Uncommitted changes present before this call, belonging to the Boss:',
+      '> - modified: notes.md',
+      "> Leave them exactly as they are unless the task or the Boss's request requires building on them; never revert or delete them; when you commit any of them, name them in your final report.",
+    ].join('\n');
+    const fixture = stagedFixture(
+      createDeferredRepositoryHarness({
+        baseline: { 'notes.md': { kind: 'ordinary', xy: '.M' } },
+      }),
+    );
+    await fixture.init();
+    await expect(
+      fixture.runtime.handleBossInput({
+        text: 'Choose the durable design.',
+        signal: signal(),
+      }),
+    ).resolves.toMatchObject({ state: { stateId: 'awaitBossReply' } });
+    await expect(
+      fixture.runtime.handleBossInput({
+        text: 'Yes, continue.',
+        signal: signal(),
+      }),
+    ).resolves.toMatchObject({ state: { stateId: 'awaitBossReply' } });
+
+    expect(fixture.playerCalls).toHaveLength(4);
+    for (const call of fixture.playerCalls.slice(0, 2)) {
+      expect(call.prompt).not.toContain(
+        'Uncommitted changes present before this call',
+      );
+    }
+    const [merge, continuation] = fixture.playerCalls.slice(2);
+    expect(merge.prompt.endsWith(`\n\n${block}`)).toBe(true);
+    expect(continuation.prompt.endsWith(`\n\n${block}`)).toBe(true);
+    expect(continuation.options.freshPrompt?.endsWith(`\n\n${block}`)).toBe(
+      true,
+    );
+    await fixture.runtime.dispose();
+  });
+
   it('publishes no advanced question state when a durable completion rejects', async () => {
     const bindFailure = stagedFixture();
     bindFailure.harness.failNextBindCompletion();
@@ -3680,4 +3729,274 @@ describe('DECIDE unresolved apply settlement', () => {
       await runtime.dispose();
     },
   );
+});
+
+describe('DECIDE pre-existing changes (DR-062 §4)', () => {
+  it('tells only the committing Coder which changes pre-exist, in the prompt the trace records', async () => {
+    const block = [
+      '> Uncommitted changes present before this call, belonging to the Boss:',
+      '> - modified: notes.md',
+      '> - untracked: seed.txt',
+      "> Leave them exactly as they are unless the task or the Boss's request requires building on them; never revert or delete them; when you commit any of them, name them in your final report.",
+    ].join('\n');
+    const playerCalls: PlayerCallRecord[] = [];
+    const telemetry: TelemetryRecord[] = [];
+    let coderCalls = 0;
+    const runtime = createPlaybookRuntime(
+      {},
+      createTestEffectHost({
+        baseline: {
+          'notes.md': { kind: 'ordinary', xy: '.M' },
+          'seed.txt': { kind: 'untracked' },
+        },
+      }),
+    );
+    await runtime.init(
+      session(
+        completePorts({
+          callPlayer: async (roleId, prompt, _signal, options) => {
+            playerCalls.push({ roleId, prompt, options: { ...options } });
+            if (roleId === 'reviewer') {
+              return { status: 'ok', finalText: 'Reviewer proposal' };
+            }
+            coderCalls += 1;
+            return {
+              status: 'ok',
+              finalText:
+                coderCalls === 1 ? 'Coder proposal' : 'Committed proposal',
+            };
+          },
+          callJudge: async (prompt) => judgeReply(prompt),
+          callPlaybook: async () => ({
+            state: 'suspended',
+            childSessionId: 'review-child',
+          }),
+          emitTelemetry: async (record) => {
+            telemetry.push(record);
+          },
+        }),
+      ),
+    );
+    await expect(
+      runtime.handleBossInput({
+        text: 'Choose the durable design.',
+        signal: signal(),
+      }),
+    ).resolves.toMatchObject({ outcome: 'suspended' });
+
+    expect(playerCalls).toHaveLength(3);
+    // The proposals are declared exclusively `unchanged`: they may commit
+    // nothing, so they are told nothing.
+    for (const call of playerCalls.slice(0, 2)) {
+      expect(call.prompt).not.toContain(
+        'Uncommitted changes present before this call',
+      );
+    }
+    expect(playerCalls[2].prompt.endsWith(`\n\n${block}`)).toBe(true);
+    const traced = playbookTraces(telemetry)
+      .filter(({ type }) => type === 'player.call.started')
+      .map(({ payload }) => (payload as { prompt: string }).prompt);
+    expect([...traced].sort()).toEqual(
+      playerCalls.map(({ prompt }) => prompt).sort(),
+    );
+    await runtime.dispose();
+  });
+});
+
+describe('DECIDE failure causes (DR-063)', () => {
+  interface Cause {
+    code: string;
+    evidence: Record<string, unknown>;
+  }
+  interface StatusRecord {
+    message: string;
+    data?: unknown;
+  }
+  type CauseCarrier = { lastError?: { cause?: Cause } } | undefined;
+
+  const failureCauses = (
+    runtime: ReturnType<typeof createPlaybookRuntime>,
+    statuses: readonly StatusRecord[],
+    run: PlaybookRunResult | undefined,
+  ) => ({
+    view: runtime.describe?.().lastError?.cause,
+    status: (
+      statuses.findLast(({ message }) =>
+        message.startsWith('◆ workflow failed'),
+      )?.data as CauseCarrier
+    )?.lastError?.cause,
+    result: run?.outcome === 'failed' ? run.error?.cause : undefined,
+    snapshot: (
+      runtime.exportSnapshot?.()?.machine as
+        | { context?: CauseCarrier }
+        | undefined
+    )?.context?.lastError?.cause,
+  });
+
+  async function failedRun(
+    overrides: Partial<PlaybookPorts>,
+    host = createTestEffectHost(),
+  ) {
+    const statuses: StatusRecord[] = [];
+    let coderCalls = 0;
+    const runtime = createPlaybookRuntime({}, host);
+    await runtime.init(
+      session(
+        completePorts({
+          callPlayer: async (roleId) => {
+            if (roleId === 'reviewer') {
+              return { status: 'ok', finalText: 'Reviewer proposal' };
+            }
+            coderCalls += 1;
+            return {
+              status: 'ok',
+              finalText:
+                coderCalls === 1 ? 'Coder proposal' : 'Committed proposal',
+            };
+          },
+          callJudge: async (prompt) => judgeReply(prompt),
+          callPlaybook: async () => ({
+            state: 'suspended',
+            childSessionId: 'review-child',
+          }),
+          emitStatus: async (message, data) => {
+            statuses.push({ message, data });
+          },
+          ...overrides,
+        }),
+      ),
+    );
+    let run: PlaybookRunResult | undefined;
+    let rejection: unknown;
+    try {
+      run = await runtime.handleBossInput({
+        text: 'Choose the durable design.',
+        signal: signal(),
+      });
+    } catch (error) {
+      rejection = error;
+    }
+    return { runtime, statuses, run, rejection, host };
+  }
+
+  it('names a non-`ok` merge result by the role that reported it, on every surface', async () => {
+    let coderCalls = 0;
+    const { runtime, statuses, run } = await failedRun({
+      callPlayer: async (roleId) => {
+        if (roleId === 'reviewer') {
+          return { status: 'ok', finalText: 'Reviewer proposal' };
+        }
+        coderCalls += 1;
+        return coderCalls === 1
+          ? { status: 'ok', finalText: 'Coder proposal' }
+          : { status: 'error', error: 'coder refused' };
+      },
+    });
+    expect(run).toMatchObject({ outcome: 'failed', state: { stateId: 'failed' } });
+    const cause: Cause = {
+      code: 'player-failed',
+      evidence: {
+        roleId: 'coder',
+        error: { name: 'Error', message: 'coder refused' },
+      },
+    };
+    expect(failureCauses(runtime, statuses, run)).toEqual({
+      view: cause,
+      status: cause,
+      result: cause,
+      snapshot: cause,
+    });
+    await runtime.dispose();
+  });
+
+  it('names a rejected merge port and keeps its cause across export and restore', async () => {
+    let coderCalls = 0;
+    const { runtime, statuses, run, rejection, host } = await failedRun({
+      callPlayer: async (roleId) => {
+        if (roleId === 'reviewer') {
+          return { status: 'ok', finalText: 'Reviewer proposal' };
+        }
+        coderCalls += 1;
+        if (coderCalls === 1) return { status: 'ok', finalText: 'Coder proposal' };
+        // A thrown string refuses the cause marker; the runtime's own slot
+        // supplies the cause live, in the snapshot, and after restore.
+        throw 'coder is down';
+      },
+    });
+    expect(run).toBeUndefined();
+    expect(rejection).toBe('coder is down');
+    const cause: Cause = {
+      code: 'player-failed',
+      evidence: {
+        roleId: 'coder',
+        error: { name: 'Error', message: 'coder is down' },
+      },
+    };
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: cause,
+      status: cause,
+      snapshot: cause,
+    });
+    const snapshot = runtime.exportSnapshot?.();
+    await runtime.dispose();
+
+    const restored = createPlaybookRuntime({}, host);
+    if (!restored.restore) throw new Error('DECIDE restore is unavailable');
+    await restored.restore(session(completePorts({})), snapshot!);
+    expect(restored.describe?.().lastError?.cause).toEqual(cause);
+    await restored.dispose();
+  });
+
+  it('names a refused merge adjudication a judge failure, with its transport error', async () => {
+    const { runtime, statuses, run, rejection } = await failedRun({
+      callJudge: async (prompt) => {
+        if (prompt.includes('source item DECIDE-3')) {
+          throw new Error('judge is down');
+        }
+        return judgeReply(prompt);
+      },
+    });
+    const cause: Cause = {
+      code: 'judge-failed',
+      evidence: {
+        reason: 'judge transport failed',
+        error: { name: 'Error', message: 'judge is down' },
+      },
+    };
+    // A refused adjudication is a control-plane error: the turn rejects with
+    // it, and the parked leaf publishes the cause on every other surface.
+    expect(run).toBeUndefined();
+    expect(rejection).toMatchObject({ message: 'judge is down' });
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: cause,
+      status: cause,
+      snapshot: cause,
+    });
+    await runtime.dispose();
+  });
+
+  it('reads a mismatched merge receipt as the repository cause the receipt proves', async () => {
+    const { runtime, statuses, run } = await failedRun(
+      {},
+      createTestEffectHost({ exclusiveClassifications: ['unchanged'] }),
+    );
+    expect(run).toMatchObject({ outcome: 'failed', state: { stateId: 'failed' } });
+    const cause: Cause = {
+      code: 'commit-missing',
+      evidence: {
+        required: 'one-descendant-commit',
+        observed: 'unchanged',
+        baselineHead: '1'.repeat(40),
+        afterHead: '1'.repeat(40),
+        paths: { uncommitted: [] },
+      },
+    };
+    expect(failureCauses(runtime, statuses, run)).toEqual({
+      view: cause,
+      status: cause,
+      result: cause,
+      snapshot: cause,
+    });
+    await runtime.dispose();
+  });
 });

@@ -44,7 +44,9 @@ export interface SnapshotNormalizationOptions {
     pendingCall?: PlaybookPendingCall;
 }
 export declare function normalizePlaybookSnapshot(snapshot: unknown, options?: SnapshotNormalizationOptions): PlaybookState;
-export declare function detachPersistedMachineSnapshot(persisted: unknown): JsonValue;
+export declare function detachPersistedMachineSnapshot(persisted: unknown, completion?: {
+    readonly lastError?: NormalizedError;
+}): JsonValue;
 /** Authority for one governed delegated-player output field (DR-040 §1). */
 export type PlaybookSemanticFieldAuthority = 'presentation' | 'semantic' | 'effect' | 'runtime';
 /** One already-validated state-local governed outcome declaration. */

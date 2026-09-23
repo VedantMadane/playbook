@@ -844,6 +844,75 @@ describe('repository-relevant Git observations (PBRT-68)', () => {
         commit: false,
         preExisting: { absorbed: [], altered: ['base.txt'], lost: [] },
       },
+      // A deletion holds nothing of the Boss's content, committed or not, and
+      // a kind that admits no content matching is lost as soon as it changes.
+      {
+        name: 'modified-deleted-and-committed',
+        dirty: (repo) => writeFile(join(repo, 'base.txt'), 'boss\n', 'utf8'),
+        call: async (repo) => {
+          await rm(join(repo, 'base.txt'));
+          await git(repo, 'add', '--all');
+          await git(repo, 'commit', '--quiet', '-m', 'drop the boss file');
+        },
+        classification: 'observation-ambiguous',
+        commit: false,
+        preExisting: { absorbed: [], altered: [], lost: ['base.txt'] },
+      },
+      {
+        name: 'staged-deleted-and-committed',
+        dirty: async (repo) => {
+          await writeFile(join(repo, 'base.txt'), 'boss\n', 'utf8');
+          await git(repo, 'add', '--', 'base.txt');
+        },
+        call: async (repo) => {
+          await rm(join(repo, 'base.txt'));
+          await git(repo, 'add', '--all');
+          await git(repo, 'commit', '--quiet', '-m', 'drop the staged file');
+        },
+        classification: 'observation-ambiguous',
+        commit: false,
+        preExisting: { absorbed: [], altered: [], lost: ['base.txt'] },
+      },
+      {
+        name: 'modified-deleted-uncommitted',
+        dirty: (repo) => writeFile(join(repo, 'base.txt'), 'boss\n', 'utf8'),
+        call: (repo) => rm(join(repo, 'base.txt')),
+        classification: 'observation-ambiguous',
+        commit: false,
+        preExisting: { absorbed: [], altered: [], lost: ['base.txt'] },
+      },
+      {
+        name: 'modified-deleted-beside-a-commit',
+        dirty: (repo) => writeFile(join(repo, 'base.txt'), 'boss\n', 'utf8'),
+        call: async (repo) => {
+          await rm(join(repo, 'base.txt'));
+          await writeFile(join(repo, 'own.txt'), 'own work\n', 'utf8');
+          await git(repo, 'add', '--', 'own.txt');
+          await git(repo, 'commit', '--quiet', '-m', 'own work only');
+        },
+        classification: 'observation-ambiguous',
+        commit: false,
+        preExisting: { absorbed: [], altered: [], lost: ['base.txt'] },
+      },
+      {
+        name: 'nested-worktree-changed',
+        dirty: async (repo) => {
+          const embedded = join(repo, 'embedded');
+          await mkdir(embedded);
+          await git(embedded, 'init', '--quiet');
+          await git(embedded, 'config', 'user.name', 'Embedded Test');
+          await git(embedded, 'config', 'user.email', 'embedded@example.invalid');
+          await writeFile(join(embedded, 'nested.txt'), 'base\n', 'utf8');
+          await git(embedded, 'add', '--all');
+          await git(embedded, 'commit', '--quiet', '-m', 'nested base');
+          await writeFile(join(embedded, 'nested.txt'), 'boss\n', 'utf8');
+        },
+        call: (repo) =>
+          writeFile(join(repo, 'embedded', 'nested.txt'), 'coder\n', 'utf8'),
+        classification: 'observation-ambiguous',
+        commit: false,
+        preExisting: { absorbed: [], altered: [], lost: ['embedded/'] },
+      },
     ];
 
     for (const testCase of cases) {

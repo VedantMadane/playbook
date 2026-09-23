@@ -316,6 +316,14 @@ Where execution leaves a delegated-role state without suspending for its Boss qu
 
 Where a maintained workflow runs under artifact schema `3` and one governed delegated-role arm declares `needsBossReply` with repository disposition `deferred`, its compiled runtime shall apply the checkpoint-bound logical-operation continuation of [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)] identically whether the workflow uses the shared flat runtime or DECIDE's bespoke parallel runtime.
 
+#### playbook-54
+
+Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall end every effect-authorized player call prompt — the initial call and each deferred continuation — with the pre-existing-changes block of that call's own baseline [[playbook-runtime-94](playbook-runtime.md#playbook-runtime-94)] and shall add none to a call declared exclusively `unchanged`, whether linking emits the shared flat runtime or DECIDE's bespoke parallel runtime.
+
+#### playbook-55
+
+Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall decide the failure cause of [[playbook-runtime-96](playbook-runtime.md#playbook-runtime-96)] where each failure is decided and publish it from the failed state's status data, telemetry, run result, control view, and exported snapshot alike, whether linking emits the shared flat runtime or DECIDE's bespoke parallel runtime.
+
 ## Verification
 
 ### Source and artifact coverage
@@ -409,3 +417,8 @@ When a workflow FSM leaves or abandons a Boss-reply path, its conformance suite 
 #### playbook-31
 
 When maintained-workflow conformance drives equivalent artifact-schema-3 deferred question chains through the shared flat runtimes and DECIDE's bespoke parallel runtime, it shall fail unless both withhold the question until its logical operation is durable, start one authored continuation only from a valid exact-checkpoint answer, preserve one original baseline and cumulative receipt across repeated questions, keep invalid answers waiting, park another exit or checkpoint mismatch without a player, and restore an eligible exact-checkpoint wait without a player or judge; authored and generated DECIDE runtime siblings shall remain behaviorally identical (verifying [[playbook-30](#playbook-30)]).
+
+#### playbook-56
+
+When the DECIDE conformance suites drive its real artifact-schema-3 runtime over a nonempty baseline projection, they shall fail unless the exclusive merge call and its deferred continuation each end with the pre-existing-changes block naming the baseline's paths under their groups while both proposal calls receive none, and unless the prompt each `player.call.started` trace records is the prompt sent (verifying [[playbook-54](#playbook-54)]).
+The suites shall further fail unless a rejected player port, a non-`ok` player result, a refused adjudication, and a mismatched merge receipt each publish their own cause from the failed state's status data, the control view, the exported snapshot, and — where the turn settles rather than rejects — the run result, and unless a restored snapshot still publishes the cause its source runtime decided (verifying [[playbook-55](#playbook-55)]).

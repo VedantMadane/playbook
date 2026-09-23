@@ -70,11 +70,11 @@ const GOVERNED_JUDGE_FAILURE_REASONS = [
     'corrective semantic candidate is invalid',
     'semantic correction budget is unavailable',
 ];
-const ABORTED_FAILURE_CAUSE = assertPlaybookFailureCause({
+export const ABORTED_FAILURE_CAUSE = assertPlaybookFailureCause({
     code: 'aborted',
     evidence: {},
 });
-function runtimeDefectCause(reason) {
+export function runtimeDefectCause(reason) {
     return assertPlaybookFailureCause({
         code: 'runtime-defect',
         evidence: { reason: reason.length === 0 ? 'unknown runtime defect' : reason },
@@ -98,7 +98,7 @@ function failureErrorCode(error) {
         return undefined;
     }
 }
-function playerFailureCause(input) {
+export function playerFailureCause(input) {
     return assertPlaybookFailureCause({
         code: 'player-failed',
         evidence: {
@@ -113,6 +113,29 @@ function playerFailureCause(input) {
                 : { errorCode: failureErrorCode(input.error) }),
         },
     });
+}
+/**
+ * DR-063 §1: the cause of an unresolved governed settlement. A reconciled
+ * mismatch supplies its own receipt-read cause; the reasons a runtime owns map
+ * to adjudication, abort, and runtime-defect codes. Shared with DECIDE's
+ * bespoke runtime, which decides the same reasons.
+ */
+export function governedSettlementCause(reason, error, aborted, supplied) {
+    if (supplied !== undefined)
+        return supplied;
+    if (aborted || reason.includes('aborted'))
+        return ABORTED_FAILURE_CAUSE;
+    if (GOVERNED_JUDGE_FAILURE_REASONS.includes(reason)) {
+        const transport = failureErrorEvidence(error);
+        return assertPlaybookFailureCause({
+            code: 'judge-failed',
+            evidence: {
+                reason,
+                ...(transport === undefined ? {} : { error: transport }),
+            },
+        });
+    }
+    return runtimeDefectCause(reason);
 }
 // ---------------------------------------------------------------------------
 // DR-028: both call boundaries treat an `ok` result whose `finalText` is
@@ -578,7 +601,7 @@ function preExistingChangesBlock(baseline) {
  * `one-descendant-commit` disposition may commit nothing, so it is told
  * nothing.
  */
-function effectAuthorizedPreExistingBlock(effectBoundary, baseline) {
+export function effectAuthorizedPreExistingBlock(effectBoundary, baseline) {
     return effectBoundary.dispositions.includes('one-descendant-commit')
         ? preExistingChangesBlock(baseline)
         : undefined;
@@ -3101,26 +3124,6 @@ export function createXStatePlaybookRuntime(machine, spec) {
                         : {}),
                 },
             });
-        }
-        // DR-063 §1: the cause of an unresolved governed settlement. A reconciled
-        // mismatch supplies its own receipt-read cause; the reasons this function
-        // owns map to adjudication, abort, and runtime-defect codes.
-        function governedSettlementCause(reason, error, aborted, supplied) {
-            if (supplied !== undefined)
-                return supplied;
-            if (aborted || reason.includes('aborted'))
-                return ABORTED_FAILURE_CAUSE;
-            if (GOVERNED_JUDGE_FAILURE_REASONS.includes(reason)) {
-                const transport = failureErrorEvidence(error);
-                return assertPlaybookFailureCause({
-                    code: 'judge-failed',
-                    evidence: {
-                        reason,
-                        ...(transport === undefined ? {} : { error: transport }),
-                    },
-                });
-            }
-            return runtimeDefectCause(reason);
         }
         function unresolvedGovernedSettlement(reason, error, signal = activeSignal, cause) {
             const aborted = error !== undefined && signal?.aborted === true
@@ -5691,9 +5694,15 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 const state = currentState();
                 if (state.status !== 'active' || !state.quiescent)
                     return undefined;
-                const machineSnapshot = detachPersistedMachineSnapshot(actor.getPersistedSnapshot());
                 const context = actor.getSnapshot()
                     .context;
+                // DR-063 §2: the failed state's `lastError` is persisted as every live
+                // surface publishes it, completed from the runtime's own cause slot, so
+                // a thrown value that refused the cause still explains itself after a
+                // restart.
+                const machineSnapshot = detachPersistedMachineSnapshot(actor.getPersistedSnapshot(), state.stateId === 'failed'
+                    ? { lastError: failedStateError(context ?? {}) }
+                    : {});
                 effectLedgerMirror = currentEffectLedger();
                 refreshRetainedEffectReconciliation(effectLedgerMirror);
                 syncDeferredReconciliationOverlay();

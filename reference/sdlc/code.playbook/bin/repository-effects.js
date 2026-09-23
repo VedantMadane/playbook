@@ -520,8 +520,6 @@ function projectionText(projection) {
   return JSON.stringify(projection);
 }
 
-const MISSING_CONTENT_IDENTITY = Object.freeze({ kind: 'missing' });
-
 function hasPath(projection, path) {
   return Object.prototype.hasOwnProperty.call(projection, path);
 }
@@ -555,9 +553,9 @@ function sameTreeEntry(left, right) {
   return left.mode === right.mode && left.oid === right.oid;
 }
 
-// The baseline recorded nothing at the path: a deleted worktree entry, or a
+// The entry records nothing at the path: a deleted worktree entry, or a
 // staged deletion whose index holds no object.
-function baselineEntryIsDeletion(entry) {
+function entryIsDeletion(entry) {
   return entry.worktree === undefined
     ? entry.indexMode === '000000'
     : entry.worktree.kind === 'missing';
@@ -617,12 +615,18 @@ function sameContentIdentity(left, right) {
 
 // DR-062 §1: the fate of one baseline projection entry at the end of a
 // governed call — `preserved`, `altered-uncommitted`, `altered-committed`,
-// `absorbed`, or `lost`.
+// `absorbed`, or `lost`. Loss is decided before alteration: a kind that
+// admits no content matching, a deletion of content the baseline recorded,
+// and a commit that dropped the path all leave the Boss's content nowhere.
 async function baselineEntryFate(baseline, after, path, entry) {
   if (hasPath(after.projection, path)) {
-    return JSON.stringify(after.projection[path]) === JSON.stringify(entry)
-      ? 'preserved'
-      : 'altered-uncommitted';
+    const afterEntry = after.projection[path];
+    if (JSON.stringify(afterEntry) === JSON.stringify(entry)) {
+      return 'preserved';
+    }
+    if (nonComparableBaselineEntry(entry)) return 'lost';
+    if (entryIsDeletion(afterEntry) && !entryIsDeletion(entry)) return 'lost';
+    return 'altered-uncommitted';
   }
   // The entry left the working tree, so only a commit this call made can hold
   // the Boss's content; a call that moved no HEAD made none.
@@ -635,15 +639,15 @@ async function baselineEntryFate(baseline, after, path, entry) {
       // carried no change of the Boss's and his content is nowhere.
       return 'lost';
     }
-    if (baselineEntryIsDeletion(entry)) {
+    if (entryIsDeletion(entry)) {
       return treeEntry === undefined ? 'absorbed' : 'lost';
     }
-    if (treeEntry?.mode === '160000') return 'lost';
+    // A commit that dropped the path, or replaced it with a gitlink, carries
+    // no content of the Boss's to compare.
+    if (treeEntry === undefined || treeEntry.mode === '160000') return 'lost';
     const [baselineIdentity, treeIdentity] = await Promise.all([
       baselineContentIdentity(after.worktree, entry),
-      treeEntry === undefined
-        ? MISSING_CONTENT_IDENTITY
-        : blobContentIdentity(after.worktree, treeEntry.mode, treeEntry.oid),
+      blobContentIdentity(after.worktree, treeEntry.mode, treeEntry.oid),
     ]);
     return sameContentIdentity(baselineIdentity, treeIdentity)
       ? 'absorbed'

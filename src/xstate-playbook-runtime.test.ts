@@ -9562,4 +9562,49 @@ describe('parked failure causes over the shared factory (DR-063)', () => {
     });
     await runtime.dispose();
   });
+
+  it.each([
+    ['a string', 'coder is down'],
+    ['a frozen Error', Object.freeze(new Error('coder is down'))],
+  ] as const)(
+    'keeps the decided cause across export and restore when the port rejected with %s',
+    async (_label, rejection) => {
+      const { ports } = makeRecordingPorts({
+        callPlayer: async () => {
+          throw rejection;
+        },
+      });
+      const runtime = createCodePlaybookRuntime(codeRuntimeConstruction());
+      await runtime.init(makeCodeSession(ports));
+      await runtime.handleBossInput(turn('add a button')).catch(() => undefined);
+      const cause: Cause = {
+        code: 'player-failed',
+        evidence: {
+          roleId: 'coder',
+          error: { name: 'Error', message: 'coder is down' },
+        },
+      };
+      // A thrown value that refuses the cause marker is published from the
+      // runtime's own slot: live, in the exported snapshot, and after restore.
+      expect(runtime.describe!().lastError?.cause).toEqual(cause);
+      const snapshot = runtime.exportSnapshot!()!;
+      expect(
+        (snapshot.machine as { context: { lastError?: { cause?: Cause } } })
+          .context.lastError?.cause,
+      ).toEqual(cause);
+      await runtime.dispose();
+
+      const restored = createCodePlaybookRuntime(
+        governedRuntimeConstruction(
+          {},
+          'code',
+          [],
+          snapshot.effectLedger,
+        ) as unknown as Parameters<typeof createCodePlaybookRuntime>[0],
+      );
+      await restored.restore!(makeCodeSession(ports), snapshot);
+      expect(restored.describe!().lastError?.cause).toEqual(cause);
+      await restored.dispose();
+    },
+  );
 });

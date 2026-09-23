@@ -607,8 +607,15 @@ export function normalizePlaybookSnapshot(snapshot, options = {}) {
 // DR-014 §1: deep-detach an XState persisted actor snapshot into strict
 // JSON for a PlaybookRuntimeSnapshot, normalizing any raw Error value
 // (for example FSM context `lastError`) instead of rejecting it.
-export function detachPersistedMachineSnapshot(persisted) {
-    return snapshotJsonValue(withErrorsNormalized(persisted, new Set()), 'persisted machine snapshot');
+// DR-063 §2: a runtime parked in its failure state supplies the `lastError`
+// it publishes live — completed with the cause it decided — and that record
+// replaces the context's own, which a thrown value may have refused to carry.
+export function detachPersistedMachineSnapshot(persisted, completion = {}) {
+    const detached = withErrorsNormalized(persisted, new Set());
+    const lastError = completion.lastError;
+    return snapshotJsonValue(lastError !== undefined && isRecord(detached) && isRecord(detached.context)
+        ? { ...detached, context: { ...detached.context, lastError } }
+        : detached, 'persisted machine snapshot');
 }
 function withErrorsNormalized(value, ancestors) {
     if (value instanceof Error)

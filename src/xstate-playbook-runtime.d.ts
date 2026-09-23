@@ -1,5 +1,5 @@
 import type { AnyStateMachine, EventObject, PromiseActorLogic } from 'xstate';
-import type { CaptainResult, JsonValue, PlaybookEffectBoundary, PlaybookEffectBoundaryStart, PlaybookEffectLedger, PlaybookEffectLedgerCapability, NormalizedError, PlaybookPendingBossQuestion, PlaybookPorts, PlaybookRepositoryReceipt, PlaybookRuntimeFactory, PlaybookSession, PlaybookState, PlayerResult } from './runtime.js';
+import type { CaptainResult, JsonValue, PlaybookEffectBoundary, PlaybookEffectBoundaryStart, PlaybookEffectLedger, PlaybookEffectLedgerCapability, NormalizedError, PlaybookFailureCause, PlaybookPendingBossQuestion, PlaybookPorts, PlaybookRepositoryReceipt, PlaybookRuntimeFactory, PlaybookSession, PlaybookState, PlayerResult } from './runtime.js';
 export interface PlaybookPendingBossQuestionContext {
     questionId: string;
     resumeStateId: string;
@@ -115,6 +115,20 @@ export declare const BOSS_REPLY_ERRORS: {
     readonly missingQuestion: "needsBossReply outcome missing 'question' field";
     readonly unregisteredState: (stateId: string) => string;
 };
+export declare const ABORTED_FAILURE_CAUSE: PlaybookFailureCause;
+export declare function runtimeDefectCause(reason: string): PlaybookFailureCause;
+export declare function playerFailureCause(input: {
+    readonly roleId: string;
+    readonly playerId?: string;
+    readonly error: unknown;
+}): PlaybookFailureCause;
+/**
+ * DR-063 §1: the cause of an unresolved governed settlement. A reconciled
+ * mismatch supplies its own receipt-read cause; the reasons a runtime owns map
+ * to adjudication, abort, and runtime-defect codes. Shared with DECIDE's
+ * bespoke runtime, which decides the same reasons.
+ */
+export declare function governedSettlementCause(reason: string, error: unknown, aborted: boolean, supplied: PlaybookFailureCause | undefined): PlaybookFailureCause;
 interface XStateRepositoryOperationSettlement<T> {
     readonly status: 'fulfilled';
     readonly value: T;
@@ -389,6 +403,13 @@ export declare function normalizeErrorFull(err: unknown): NormalizedError | unde
 export declare function pendingBossQuestionFromContext(context: Record<string, unknown>): PlaybookPendingBossQuestionContext | undefined;
 /** Add clarification context without repeating the question in a live conversation. */
 export declare function composePlayerContinuation(input: Pick<PlaybookPlayerInput, 'pendingBossQuestion' | 'bossReply'>, body: string, resuming?: boolean): string;
+/**
+ * The block for one governed call, or `undefined` where the call is not
+ * effect-authorized — a call whose declared outcomes carry no
+ * `one-descendant-commit` disposition may commit nothing, so it is told
+ * nothing.
+ */
+export declare function effectAuthorizedPreExistingBlock(effectBoundary: Pick<PlaybookEffectBoundaryStart, 'dispositions'>, baseline: PlaybookRepositoryReceipt['baseline'] | undefined): string | undefined;
 /**
  * Default player-prompt composer (slc/link.md §Player prompt composition).
  * One callback-based pass substitutes each `<fieldName>` placeholder whose
