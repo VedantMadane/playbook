@@ -13,6 +13,67 @@ const PLACEHOLDER = /<([A-Za-z_$#][A-Za-z0-9_$#-]*)>/g;
 const RESULT_BULLET = /^-\s+`([A-Za-z_$][A-Za-z0-9_$]*)`:\s+(.+)$/;
 const REQUIRED_FIELD = /^([A-Za-z_$][A-Za-z0-9_$]*)(?::\s*<([^>]+)>)?$/;
 const ENGLISH_PLAYER = '[A-Z][A-Za-z0-9_-]*';
+const PREFIXED_SECTION = /^##\s+Prefixed prompts\s*$/;
+const PREFIXED_BULLET = /^-\s+([^\s:]+):\s+relays → tail\s*$/;
+const RELAY_LINE = /^>/;
+
+/**
+ * The items a `## Prefixed prompts` section lists as rewritten by the prefix
+ * pass (slc/prefix.md), with a finding for each malformed entry.
+ */
+export function prefixedItems(gearsText) {
+  const ids = [];
+  const findings = [];
+  const lines = gearsText.split('\n');
+  const start = lines.findIndex((line) => PREFIXED_SECTION.test(line));
+  if (start === -1) return { ids, findings };
+  for (let index = start + 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (/^#{1,3}\s/.test(line)) break;
+    if (line.trim() === '') continue;
+    const bullet = PREFIXED_BULLET.exec(line);
+    if (bullet === null) {
+      findings.push(`Prefixed prompts: malformed entry: ${JSON.stringify(line)}`);
+      continue;
+    }
+    ids.push(bullet[1]);
+  }
+  return { ids, findings };
+}
+
+/**
+ * The units the prefix pass moves or keeps: a quoted relay fragment is one
+ * relay unit, and an instruction or prompt fragment splits at its blank lines
+ * into paragraphs, a paragraph of only quoted lines being a relay unit and any
+ * other an instruction unit. Each unit keeps its Source position for ordering.
+ */
+function fragmentUnits(fragment) {
+  if (fragment.kind === 'relay') {
+    return [{ kind: 'relay', start: fragment.start, lines: fragment.lines }];
+  }
+  const units = [];
+  let paragraph = [];
+  let at = 0;
+  const flush = () => {
+    if (paragraph.length === 0) return;
+    units.push({
+      kind: paragraph.every((line) => RELAY_LINE.test(line)) ? 'relay' : 'instruction',
+      start: fragment.start + at,
+      lines: paragraph,
+    });
+    paragraph = [];
+  };
+  fragment.lines.forEach((line, index) => {
+    if (line === '') {
+      flush();
+      return;
+    }
+    if (paragraph.length === 0) at = index;
+    paragraph.push(line);
+  });
+  flush();
+  return units;
+}
 
 /** Resolve Markdown escaping that is Source syntax rather than prompt content. */
 function normalizePromptLine(line) {
@@ -158,6 +219,71 @@ function fragmentIndex(haystack, needle) {
   return -1;
 }
 
+/** Last exact contiguous occurrence of `needle` in `haystack` that `allowed` admits. */
+function lastFragmentIndex(haystack, needle, allowed = () => true) {
+  if (needle.length === 0 || needle.length > haystack.length) return -1;
+  outer: for (let index = haystack.length - needle.length; index >= 0; index--) {
+    for (let offset = 0; offset < needle.length; offset++) {
+      if (haystack[index + offset] !== needle[offset]) continue outer;
+    }
+    if (allowed(index)) return index;
+  }
+  return -1;
+}
+
+/** Whether matched units keep ascending Source positions. */
+function inSourceOrder(entries) {
+  return entries.every((entry, index) =>
+    index === 0 || entries[index - 1].unit.start <= entry.unit.start);
+}
+
+/**
+ * Conservation checks for an item the prefix pass lists as rewritten: the
+ * instruction units keep Source order, the relay units keep Source order, every
+ * relay unit and bare relay line follows the last instruction unit, and the
+ * listing is not a no-op.
+ */
+function prefixedItemFindings(item, units) {
+  const findings = [];
+  const instructions = units
+    .filter((unit) => unit.kind === 'instruction')
+    .map((unit) => ({ unit, index: fragmentIndex(item.prompt, unit.lines) }))
+    .filter((entry) => entry.index >= 0)
+    .map((entry) => ({ ...entry, end: entry.index + entry.unit.lines.length }));
+  // A unit contained in a larger matched instruction unit is that unit's content.
+  const independent = instructions.filter((entry) => !instructions.some((other) =>
+    other !== entry &&
+    other.unit.lines.length > entry.unit.lines.length &&
+    other.index <= entry.index && entry.end <= other.end));
+  const insideInstruction = (index, length) => independent.some((entry) =>
+    entry.index <= index && index + length <= entry.end);
+  const relays = units
+    .filter((unit) => unit.kind === 'relay')
+    .map((unit) => ({
+      unit,
+      index: lastFragmentIndex(item.prompt, unit.lines, (index) =>
+        !insideInstruction(index, unit.lines.length)),
+    }))
+    .filter((entry) => entry.index >= 0);
+  independent.sort((left, right) => left.index - right.index);
+  relays.sort((left, right) => left.index - right.index);
+  if (!inSourceOrder(independent) || !inSourceOrder(relays)) {
+    findings.push(`${item.id}: authored prompt fragments are out of Source order`);
+  }
+  const staticEnd = Math.max(0, ...independent.map((entry) => entry.end));
+  const trailing = relays.every((entry) => entry.index >= staticEnd) &&
+    item.prompt.every((line, index) =>
+      index >= staticEnd || !RELAY_LINE.test(line) || insideInstruction(index, 1));
+  if (!trailing) {
+    findings.push(`${item.id}: listed as prefixed but a relay precedes an instruction`);
+  }
+  const lastInstructionStart = Math.max(-1, ...independent.map((entry) => entry.unit.start));
+  if (relays.every((entry) => entry.unit.start > lastInstructionStart)) {
+    findings.push(`${item.id}: listed as prefixed but its prompt is in Source order`);
+  }
+  return findings;
+}
+
 /** Fields whose result contracts make the player's final text authoritative. */
 export function verbatimFieldsFromGears(gearsText) {
   const fields = new Set();
@@ -193,9 +319,16 @@ export function checkLinkedVerbatimContract(gearsText, linkedFields) {
  * player output are mechanically decidable and checked here.
  */
 export function checkSourceGearsContract(sourceText, gearsText) {
-  const findings = [];
   const fragments = sourcePromptFragments(sourceText);
   const items = parseGearsContract(gearsText);
+  const prefixed = prefixedItems(gearsText);
+  const findings = [...prefixed.findings];
+  const itemIds = new Set(items.map((item) => item.id));
+  for (const id of prefixed.ids) {
+    if (!itemIds.has(id)) findings.push(`Prefixed prompts: ${id} is not an item`);
+  }
+  const prefixedIds = new Set(prefixed.ids);
+  const units = fragments.flatMap(fragmentUnits);
   const relayedFields = new Set(
     fragments
       .filter((fragment) => fragment.kind === 'relay')
@@ -212,7 +345,13 @@ export function checkSourceGearsContract(sourceText, gearsText) {
   );
 
   for (const fragment of fragments) {
-    if (!items.some((item) => fragmentIndex(item.prompt, fragment.lines) >= 0)) {
+    // A prefixed item keeps each of a fragment's units contiguous rather than
+    // the whole fragment, since the pass moves its relay units to the tail.
+    const present = items.some((item) =>
+      fragmentIndex(item.prompt, fragment.lines) >= 0 ||
+      (prefixedIds.has(item.id) &&
+        fragmentUnits(fragment).every((unit) => fragmentIndex(item.prompt, unit.lines) >= 0)));
+    if (!present) {
       findings.push(
         `source ${fragment.kind} fragment at line ${fragment.start + 1} was dropped or changed`,
       );
@@ -235,10 +374,14 @@ export function checkSourceGearsContract(sourceText, gearsText) {
           entry.promptIndex + entry.fragment.lines.length,
       ))
       .sort((left, right) => left.promptIndex - right.promptIndex);
-    for (let index = 1; index < matches.length; index++) {
-      if (matches[index - 1].fragment.start > matches[index].fragment.start) {
-        findings.push(`${item.id}: authored prompt fragments are out of Source order`);
-        break;
+    if (prefixedIds.has(item.id)) {
+      findings.push(...prefixedItemFindings(item, units));
+    } else {
+      for (let index = 1; index < matches.length; index++) {
+        if (matches[index - 1].fragment.start > matches[index].fragment.start) {
+          findings.push(`${item.id}: authored prompt fragments are out of Source order`);
+          break;
+        }
       }
     }
 

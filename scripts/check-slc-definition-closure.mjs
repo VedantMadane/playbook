@@ -40,7 +40,7 @@ try {
   await symlink(join(packageRoot, 'node_modules/xstate'), join(scratch, 'node_modules/xstate'), 'dir');
   const pipeline = await loadPipeline(pipelineDir);
   assert.deepEqual(pipeline.phases.map((phase) => phase.name), ['text2gears', 'gears2fsm']);
-  assert.deepEqual(pipeline.passes.map((phase) => phase.name), ['optimize']);
+  assert.deepEqual(pipeline.passes.map((phase) => phase.name), ['optimize', 'prefix']);
   assert.equal(pipeline.linkFile, join(pipelineDir, 'link.md'));
   const helper = join(pipelineDir, 'materialize-link.mjs');
   const companion = join(pipelineDir, 'references/link-contract.md');
@@ -75,7 +75,7 @@ try {
     return { result, calls };
   };
   const first = await run();
-  assert.deepEqual(first.calls, ['text2gears.md', 'optimize.md', 'gears2fsm.md', 'link.md']);
+  assert.deepEqual(first.calls, ['text2gears.md', 'optimize.md', 'prefix.md', 'gears2fsm.md', 'link.md']);
   const second = await run();
   assert.equal(second.result.outcome, 'up-to-date');
   assert.deepEqual(second.calls, []);
@@ -94,7 +94,7 @@ try {
     changedContractCalls = fifth.calls;
   }
   process.stdout.write(JSON.stringify({
-    discovery: 'two phases, one pass, one link; helper and companion excluded',
+    discovery: 'two phases, two passes, one link; helpers and companion excluded',
     closure: hasCompanion ? 'link declaration includes helper and full contract' : 'link declaration includes helper',
     firstCalls: first.calls,
     unchangedCalls: second.calls,

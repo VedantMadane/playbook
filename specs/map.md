@@ -90,6 +90,7 @@ meta.md       The spec of specs
 | [DR-062](decisions/062-pre-existing-changes-are-context.md) | 062-pre-existing-changes-are-context.md | Pre-existing changes are the Boss's context: absorbed or altered entries carried by a call's one commit prove `one-descendant-commit` with `preExisting` receipt evidence, the Coder is told what pre-exists, the Boss is told what was carried; only lost entries stay ambiguous |
 | [DR-063](decisions/063-failures-explain-themselves.md) | 063-failures-explain-themselves.md | Failures explain themselves: a closed `{ code, evidence }` cause attached where each failure is decided, `standing` on every advertised action, and one deterministic Boss-visible failure report for every host |
 | [DR-064](decisions/064-the-config-directory-is-named-config.md) | 064-the-config-directory-is-named-config.md | The config directory is named config: `${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml`, the former `playbook/` location relocated ahead of the XDG one, the emptied former directory removed |
+| [DR-065](decisions/065-prompt-prefix-pass.md) | 065-prompt-prefix-pass.md | The prompt-prefix pass: a second GEARS pass moves each prompt's relayed runtime values after its instructions so repeated runs share a cacheable prefix, realized by a deterministic tool and accepted by the fidelity checker through its provenance section |
 
 ## Packages
 
@@ -98,6 +99,7 @@ meta.md       The spec of specs
 | [captain-playbook.md](packages/captain-playbook.md) | Compiled session Captain behavior, controller contract, compilation, and verification |
 | [cross-references.md](packages/cross-references.md) | Relative Markdown link and GitHub-anchor resolution plus repository checks |
 | [compiler-optimization.md](packages/compiler-optimization.md) | Exact environmental predicate and resource-location preservation in mechanical optimization |
+| [compiler-prompt-prefix.md](packages/compiler-prompt-prefix.md) | Prefix-first prompt layout: relayed values after instructions, the deterministic tool, provenance, and fidelity acceptance |
 | [compiler-prompt-relays.md](packages/compiler-prompt-relays.md) | Source-authored runtime relays through prompt placeholders and typed actor inputs |
 | [compiler-results.md](packages/compiler-results.md) | GEARS acting-result boundaries, terminal return obligations, authored Boss-question fields, and unambiguous output guidance |
 | [compiler-nested-tags.md](packages/compiler-nested-tags.md) | Nested-playbook call tagging aligned with runtime busy and suspended settlement |

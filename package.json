@@ -46,6 +46,8 @@
     "slc/gears2fsm.md",
     "slc/text2gears.md",
     "slc/optimize.md",
+    "slc/prefix.md",
+    "slc/prefix-prompts.mjs",
     "reference/sdlc/captain.md",
     "reference/sdlc/code.md",
     "reference/sdlc/review.md",

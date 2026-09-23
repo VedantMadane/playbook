@@ -445,21 +445,23 @@ const url = import.meta.resolve('@sublang/playbook/slc/link.md');
 const link = await readFile(fileURLToPath(url), 'utf8');
 ```
 
-The four specs are [`slc/text2gears.md`](../slc/text2gears.md),
+The five specs are [`slc/text2gears.md`](../slc/text2gears.md),
 [`slc/gears2fsm.md`](../slc/gears2fsm.md),
 [`slc/link.md`](../slc/link.md) — the FSM-to-runtime contract that
-`@sublang/playbook/runtime` projects into TypeScript — and
-[`slc/optimize.md`](../slc/optimize.md).
+`@sublang/playbook/runtime` projects into TypeScript —
+[`slc/optimize.md`](../slc/optimize.md), and
+[`slc/prefix.md`](../slc/prefix.md).
 
-Five supporting assets use the same resolution mechanism:
+Six supporting assets use the same resolution mechanism:
 
 | Asset | Purpose |
 | --- | --- |
 | [`slc/workflow-contracts.json`](../slc/workflow-contracts.json) | Public output schemas and default literal target bindings for the builtin REVIEW, DECIDE, CODE, BRANCH, and PR workflows; compilers and embedders can read them without importing workflow implementations. |
 | [`slc/materialize-link.mjs`](../slc/materialize-link.mjs) | Optional CLI that emits a thin linked module from a supported FSM and JSON descriptor; see the profiles and invocation in `slc/link.md`. |
 | [`slc/scaffold-fsm.mjs`](../slc/scaffold-fsm.mjs) | Optional CLI that initializes an incomplete typed FSM from supported GEARS source. |
+| [`slc/prefix-prompts.mjs`](../slc/prefix-prompts.mjs) | CLI that performs the prompt-prefix pass's rewrite of a GEARS package exactly; see the invocation in `slc/prefix.md`. |
 | [`slc/experiments/fsm-scaffold-guidance.md`](../slc/experiments/fsm-scaffold-guidance.md) | Opt-in compiler guidance for the initializer, outside ordinary phase discovery. |
-| [`slc/slc.pin-inputs.json`](../slc/slc.pin-inputs.json) | SLC semantic-input closures for `gears2fsm` and `link`, including the workflow catalog and, for `link`, the materializer. Other phases use SLC's inline-input discovery. |
+| [`slc/slc.pin-inputs.json`](../slc/slc.pin-inputs.json) | SLC semantic-input closures for `gears2fsm`, `prefix`, and `link`, including the workflow catalog, the prefix tool, and, for `link`, the materializer. Other phases use SLC's inline-input discovery. |
 
 For example, resolve `@sublang/playbook/slc/workflow-contracts.json`, read it
 with `readFile`, and parse the result as JSON to inspect the published workflow

@@ -107,7 +107,7 @@ SLC's `playbook` pipeline has three phases:
 2. **GEARS → FSM** ([slc/gears2fsm.md](slc/gears2fsm.md)) — maps each item to an XState state that invokes the Captain, a player, another playbook, or a local script.
 3. **FSM → runtime** ([slc/link.md](slc/link.md)) — links the machine to a host-independent interface for user input, agent calls, status, and telemetry.
 
-The default [optimization pass](slc/optimize.md) replaces eligible mechanical steps with local shell scripts; `--no-optimize` skips it.
+The default passes run between the first two phases: the [optimization pass](slc/optimize.md) replaces eligible mechanical steps with local shell scripts, and the [prompt-prefix pass](slc/prefix.md) moves each prompt's relayed runtime values after its instructions so repeated runs share a cacheable prompt prefix; `--no-optimize` skips both.
 Inspect the complete [Captain](reference/sdlc/captain.md), [CODE](reference/sdlc/code.md), [REVIEW](reference/sdlc/review.md), and [DECIDE](reference/sdlc/decide.md) examples.
 
 ## Contributing

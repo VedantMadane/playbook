@@ -32,6 +32,8 @@ const SLC_ASSETS = [
   'gears2fsm.md',
   'text2gears.md',
   'optimize.md',
+  'prefix.md',
+  'prefix-prompts.mjs',
   'materialize-link.mjs',
   'scaffold-fsm.mjs',
   'experiments/fsm-scaffold-guidance.md',

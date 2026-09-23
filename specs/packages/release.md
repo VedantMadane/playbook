@@ -250,14 +250,15 @@ The published package shall ship the following compiler assets through the publi
 
 | Package path | Purpose |
 | --- | --- |
-| `slc/text2gears.md`, `slc/gears2fsm.md`, `slc/optimize.md`, `slc/link.md` | Authored compiler-phase definitions. |
+| `slc/text2gears.md`, `slc/gears2fsm.md`, `slc/optimize.md`, `slc/prefix.md`, `slc/link.md` | Authored compiler-phase definitions. |
+| `slc/prefix-prompts.mjs` | Prompt-prefix pass rewrite CLI [[compiler-prompt-prefix-4](compiler-prompt-prefix.md#compiler-prompt-prefix-4)]. |
 | `slc/materialize-link.mjs` | Optional thin-module materializer CLI [[link-materialization-1](link-materialization.md#link-materialization-1)]. |
 | `slc/scaffold-fsm.mjs`, `slc/experiments/fsm-scaffold-guidance.md` | Optional incomplete FSM initializer CLI and its opt-in guidance [[fsm-scaffolding-1](fsm-scaffolding.md#fsm-scaffolding-1)]. |
 | `slc/slc.pin-inputs.json` | Phase-set semantic-input declaration for incremental invalidation [[link-materialization-13](link-materialization.md#link-materialization-13)]. |
 | `slc/workflow-contracts.json` | Independently readable builtin workflow output catalog [[compiler-workflow-contracts-1](compiler-workflow-contracts.md#compiler-workflow-contracts-1)]. |
 
 A consumer shall be able to locate each asset by resolving `@sublang/playbook/<package-path>` via `import.meta.resolve` and reading the resolved file from disk.
-The two `.mjs` helpers' public API shall comprise their resolvable file paths and specified CLI contracts; their JavaScript module exports shall remain internal implementation details outside public API compatibility guarantees.
+The three `.mjs` helpers' public API shall comprise their resolvable file paths and specified CLI contracts; their JavaScript module exports shall remain internal implementation details outside public API compatibility guarantees.
 Removing or renaming a published `slc/*` path shall be released under
 [[release-1](#release-1)] SemVer.
 
