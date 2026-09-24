@@ -567,6 +567,59 @@ describe('prefix units keep ownership, multiplicity, and blank lines (compiler-p
       'Prepare.', '> Second: <second>', '', '', 'Execute.', '', '> First: <first>',
     ]);
     expect(checkSourceGearsContract(source, text)).toEqual([]);
+    // The authored count is exact: one or three blank lines there is a change.
+    for (const blanks of [1, 3]) {
+      const changed = text.replace('> > Second: <second>\n>\n>\n> Execute.', `> > Second: <second>\n${'>\n'.repeat(blanks)}> Execute.`);
+      expect(changed).not.toBe(text);
+      expect(checkSourceGearsContract(source, changed)).toContain(
+        'FLOW-1: authored prompt fragments are out of Source order',
+      );
+    }
+  });
+
+  it('keeps the authored boundary before a relay that stays in place', () => {
+    // The first fragment ends with a relay two blank lines after its
+    // instruction; the second fragment's instruction follows it directly, so
+    // the relay stays and the two blank lines before it survive.
+    const source = [
+      ...FLOW_HEAD,
+      'When step 1 starts, Captain shall give Coder these instructions, the second directly after the first:',
+      '', '```markdown', '> Zero: <zero>', '', 'Prepare.', '', '', '> First: <first>', '```', '',
+      '```markdown', 'Execute.', '```', '',
+    ].join('\n');
+    const gears = oneItem(['> Zero: <zero>', '', 'Prepare.', '', '', '> First: <first>', 'Execute.']);
+    expect(checkSourceGearsContract(source, gears)).toEqual([]);
+    const { text, stdout } = prefix(dir, gears);
+    expect(stdout.trim()).toBe('FLOW-1');
+    expect(prompts(text).get('FLOW-1')).toEqual([
+      'Prepare.', '', '', '> First: <first>', 'Execute.', '', '> Zero: <zero>',
+    ]);
+    expect(checkSourceGearsContract(source, text)).toEqual([]);
+    for (const blanks of [1, 3]) {
+      const changed = text.replace('> Prepare.\n>\n>\n> > First: <first>', `> Prepare.\n${'>\n'.repeat(blanks)}> > First: <first>`);
+      expect(changed).not.toBe(text);
+      expect(checkSourceGearsContract(source, changed)).toContain(
+        'FLOW-1: authored prompt fragments are out of Source order',
+      );
+    }
+  });
+
+  it('conserves identical fragments across many items without a search bound', () => {
+    const same = ['> Context: <context>', '', 'Act.'];
+    const seven = flow(Array.from({ length: 7 }, () => same));
+    const sevenRewritten = prefix(dir, seven.gears);
+    expect(sevenRewritten.stdout.trim().split('\n')).toHaveLength(7);
+    expect(checkSourceGearsContract(seven.source, sevenRewritten.text)).toEqual([]);
+    // Deleting one of the seven leaves six occurrences for seven fragments.
+    const seventh = sevenRewritten.text.slice(sevenRewritten.text.indexOf('### FLOW-7'), sevenRewritten.text.indexOf('## Prefixed prompts'));
+    const dropped = checkSourceGearsContract(seven.source, sevenRewritten.text.replace(seventh, '').replace('- FLOW-7: relays → tail\n', ''));
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]).toMatch(/^source instruction fragment at line \d+ was dropped or changed$/);
+    const many = flow(Array.from({ length: 65 }, () => same));
+    const kept = Array.from({ length: 64 }, (_unused, index) => `FLOW-${index + 1}`);
+    const last = prefix(dir, many.gears, kept);
+    expect(last.stdout.trim()).toBe('FLOW-65');
+    expect(checkSourceGearsContract(many.source, last.text)).toEqual([]);
   });
 
   it('reports a fragment that only a tiling already spent could cover', () => {
