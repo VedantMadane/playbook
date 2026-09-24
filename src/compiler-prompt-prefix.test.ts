@@ -550,6 +550,57 @@ describe('prefix units keep ownership, multiplicity, and blank lines (compiler-p
     }
   });
 
+  it('keeps the authored boundary after a relay that stays in place', () => {
+    // The second relay follows `Prepare.` directly, so it stays, and the two
+    // blank lines Source authored after it survive with it.
+    const source = [
+      ...FLOW_HEAD,
+      'When step 1 starts, Captain shall give Coder these instructions, the second directly after the first:',
+      '', '```markdown', '> First: <first>', '', 'Prepare.', '```', '',
+      '```markdown', '> Second: <second>', '', '', 'Execute.', '```', '',
+    ].join('\n');
+    const gears = oneItem(['> First: <first>', '', 'Prepare.', '> Second: <second>', '', '', 'Execute.']);
+    expect(checkSourceGearsContract(source, gears)).toEqual([]);
+    const { text, stdout } = prefix(dir, gears);
+    expect(stdout.trim()).toBe('FLOW-1');
+    expect(prompts(text).get('FLOW-1')).toEqual([
+      'Prepare.', '> Second: <second>', '', '', 'Execute.', '', '> First: <first>',
+    ]);
+    expect(checkSourceGearsContract(source, text)).toEqual([]);
+  });
+
+  it('reports a fragment that only a tiling already spent could cover', () => {
+    // Mirrored items rewrite to the same prompt: deleting one item leaves one
+    // prompt, which can stand for one of the two authored fragments only.
+    const mirrored = flow([
+      ['Act.', '', '> Context: <context>'],
+      ['> Context: <context>', '', 'Act.'],
+    ]);
+    const rewritten = prefix(dir, mirrored.gears).text;
+    expect(checkSourceGearsContract(mirrored.source, rewritten)).toEqual([]);
+    const firstItem = rewritten.slice(rewritten.indexOf('### FLOW-1'), rewritten.indexOf('### FLOW-2'));
+    expect(checkSourceGearsContract(mirrored.source, rewritten.replace(firstItem, ''))).toEqual([
+      'source instruction fragment at line 17 was dropped or changed',
+    ]);
+    // One prompt composed of both fragments loses one of them the same way.
+    const composed = {
+      source: [
+        ...FLOW_HEAD,
+        'When step 1 starts, Captain shall give Coder these two instructions:', '',
+        '```markdown', 'Act.', '', '> Context: <context>', '```', '',
+        '```markdown', '> Context: <context>', '', 'Act.', '```', '',
+      ].join('\n'),
+      gears: oneItem(['Act.', '', '> Context: <context>', '', '> Context: <context>', '', 'Act.']),
+    };
+    const both = prefix(dir, composed.gears).text;
+    expect(checkSourceGearsContract(composed.source, both)).toEqual([]);
+    const halved = both.replace('> Act.\n>\n> Act.', '> Act.').replace('> > Context: <context>\n>\n> > Context: <context>', '> > Context: <context>');
+    expect(prompts(halved).get('FLOW-1')).toEqual(['Act.', '', '> Context: <context>']);
+    expect(checkSourceGearsContract(composed.source, halved)).toEqual([
+      'source instruction fragment at line 15 was dropped or changed',
+    ]);
+  });
+
   it("holds an instruction's interior blank lines exact", () => {
     const { source, gears } = flow([TEMPLATE]);
     const text = prefix(dir, gears).text;

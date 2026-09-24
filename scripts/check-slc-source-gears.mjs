@@ -17,6 +17,7 @@ const PREFIXED_SECTION = /^##\s+Prefixed prompts\s*$/;
 const PREFIXED_BULLET = /^-\s+([^\s:]+):\s+relays → tail\s*$/;
 const RELAY_LINE = /^>/;
 const BARE_RELAY = /^>\s+<[A-Za-z_$#][A-Za-z0-9_$#-]*>$/;
+const TILING_LIMIT = 64;
 
 /**
  * The items every `## Prefixed prompts` section lists as rewritten by the
@@ -238,14 +239,15 @@ function sameLines(left, right) {
 /**
  * Checks for an item the prefix pass lists as rewritten. Its prompt must be
  * tiled by whole fragments taken in Source order: their instruction units in
- * the region before the trailing relay blocks — one blank line between the
- * units of one fragment, the boundary Source authored between fragments — and
- * their relay units among the trailing blocks, or in place where the raw
- * layout kept a relay beside instruction text, each unit occurrence used
- * once, with blank lines and bare relay lines free among the trailing blocks.
- * Every alternative tiling is kept, so a rewrite is recognized whenever one
- * tiling shows a relay that moved past an instruction. Returns the findings
- * and the texts of the fragments the tilings carry.
+ * the region before the trailing relay blocks and their relay units among
+ * the trailing blocks, or in place where the raw layout kept a relay beside
+ * instruction text, each unit occurrence used once, with blank lines and bare
+ * relay lines free among the trailing blocks. Between the units of one
+ * fragment one blank line stands where a moved relay unit stood and the
+ * authored boundary elsewhere; between fragments, the boundary Source
+ * authored. Every alternative tiling is kept: a rewrite is recognized
+ * whenever one tiling shows a relay that moved past an instruction, and the
+ * tilings are returned, as lists of fragment indexes, for conservation.
  */
 function prefixedItemFindings(item, fragments) {
   const { prompt } = item;
@@ -260,20 +262,25 @@ function prefixedItemFindings(item, fragments) {
   }
   const lastStatic = prompt.findLastIndex((line, index) => line !== '' && !inBlock[index]);
   if (inBlock.some((inside, index) => inside && index < lastStatic)) {
-    return { findings: [`${item.id}: listed as prefixed but a relay precedes an instruction`], carried: [] };
+    return { findings: [`${item.id}: listed as prefixed but a relay precedes an instruction`], tilings: [] };
   }
   const statics = prompt.slice(0, lastStatic + 1);
   const tail = prompt.slice(lastStatic + 1);
   const free = (line) => line === '' || BARE_RELAY.test(line);
-  // The static line after `unit` matched at the cursor: exactly one blank line
-  // separates the units of one fragment, and any number, including none,
-  // separates fragments (slc/text2gears.md).
-  const staticMatch = (line, unit, first) => {
+  // The static line after `unit` matched at the cursor across `boundary`:
+  // exactly one blank line where a moved relay unit stood, one or more
+  // between units of one fragment that both stayed, and any number, none
+  // included, between fragments (slc/text2gears.md).
+  const staticMatch = (line, unit, boundary) => {
     let at = line;
     if (line > 0) {
-      if (first) while (at < statics.length && statics[at] === '') at++;
-      else if (statics[at] === '') at++;
-      else return -1;
+      if (boundary === 'moved') {
+        if (statics[at] !== '') return -1;
+        at++;
+      } else {
+        if (boundary === 'stayed' && statics[at] !== '') return -1;
+        while (at < statics.length && statics[at] === '') at++;
+      }
     }
     return sameLines(statics.slice(at, at + unit.lines.length), unit.lines)
       ? at + unit.lines.length
@@ -288,45 +295,49 @@ function prefixedItemFindings(item, fragments) {
     return -1;
   };
   // Each reachable position — static line, tail line, whether a relay unit
-  // reached the tail, whether an instruction unit followed one — with the
-  // fragments every path to it carries.
+  // reached the tail, whether an instruction unit followed one — with every
+  // list of fragment indexes some path to it carries.
   const keyOf = (state) =>
     `${state.line} ${state.tail} ${Number(state.moved)} ${Number(state.rewrite)}`;
   const merge = (states, state) => {
     const existing = states.get(keyOf(state));
     if (existing === undefined) states.set(keyOf(state), state);
-    else for (const text of state.carried) existing.carried.add(text);
+    else for (const list of state.lists) {
+      if (existing.lists.size < TILING_LIMIT) existing.lists.add(list);
+    }
   };
   let reached = new Map();
-  merge(reached, { line: 0, tail: 0, moved: false, rewrite: false, carried: new Set() });
-  for (const fragment of fragments) {
-    const text = JSON.stringify(fragment.lines);
+  merge(reached, { line: 0, tail: 0, moved: false, rewrite: false, lists: new Set(['']) });
+  fragments.forEach((fragment, index) => {
     const next = new Map();
-    for (const state of reached.values()) merge(next, { ...state, carried: new Set(state.carried) });
-    let frontier = [...reached.values()];
-    fragmentUnits(fragment).forEach((unit, index) => {
+    for (const state of reached.values()) merge(next, { ...state, lists: new Set(state.lists) });
+    let frontier = [...reached.values()].map((state) => ({ ...state, boundary: 'fragment' }));
+    for (const unit of fragmentUnits(fragment)) {
       const advanced = [];
       for (const state of frontier) {
-        const line = staticMatch(state.line, unit, index === 0);
+        const line = staticMatch(state.line, unit, state.boundary);
         if (unit.kind === 'instruction') {
-          if (line >= 0) advanced.push({ ...state, line, rewrite: state.rewrite || state.moved });
+          if (line >= 0) {
+            advanced.push({ ...state, line, boundary: 'stayed', rewrite: state.rewrite || state.moved });
+          }
           continue;
         }
         const end = tailMatch(state.tail, unit);
-        if (end >= 0) advanced.push({ ...state, tail: end, moved: true });
-        if (line >= 0) advanced.push({ ...state, line });
+        if (end >= 0) advanced.push({ ...state, tail: end, moved: true, boundary: 'moved' });
+        if (line >= 0) advanced.push({ ...state, line, boundary: 'stayed' });
       }
       frontier = advanced;
-    });
+    }
     for (const state of frontier) {
-      merge(next, { ...state, carried: new Set([...state.carried, text]) });
+      const lists = new Set([...state.lists].map((list) => `${list} ${index}`.trim()));
+      merge(next, { line: state.line, tail: state.tail, moved: state.moved, rewrite: state.rewrite, lists });
     }
     reached = next;
-  }
+  });
   const ends = [...reached.values()].filter((state) =>
     state.line === statics.length && tail.slice(state.tail).every(free));
   if (ends.length === 0) {
-    return { findings: [`${item.id}: authored prompt fragments are out of Source order`], carried: [] };
+    return { findings: [`${item.id}: authored prompt fragments are out of Source order`], tilings: [] };
   }
   // A listing is a no-op only when no tiling shows a relay that moved past an
   // instruction and the tail holds no bare relay line, whose Source position
@@ -334,8 +345,31 @@ function prefixedItemFindings(item, fragments) {
   const noOp = !ends.some((state) => state.rewrite) && !tail.some((line) => BARE_RELAY.test(line));
   return {
     findings: noOp ? [`${item.id}: listed as prefixed but its prompt is in Source order`] : [],
-    carried: [...new Set(ends.flatMap((state) => [...state.carried]))],
+    tilings: [...new Set(ends.flatMap((state) => [...state.lists]))]
+      .map((list) => (list === '' ? [] : list.split(' ').map(Number))),
   };
+}
+
+/**
+ * The fragments, among `uncovered`, that no choice of one tiling per listed
+ * item covers together, the first complete cover ending the search and a
+ * bounded search keeping the best cover found.
+ */
+function uncoveredByTilings(uncovered, choices) {
+  const wanted = new Set(uncovered);
+  let best = new Set();
+  let budget = 10000;
+  const search = (depth, covered) => {
+    if (covered.size > best.size) best = covered;
+    if (budget-- <= 0 || best.size === wanted.size || depth === choices.length) return;
+    for (const tiling of choices[depth]) {
+      const next = new Set(covered);
+      for (const index of tiling) if (wanted.has(index)) next.add(index);
+      search(depth + 1, next);
+    }
+  };
+  search(0, new Set());
+  return uncovered.filter((index) => !best.has(index));
 }
 
 /** Fields whose result contracts make the player's final text authoritative. */
@@ -385,8 +419,21 @@ export function checkSourceGearsContract(sourceText, gearsText) {
   const listed = new Map(items
     .filter((item) => prefixedIds.has(item.id))
     .map((item) => [item.id, prefixedItemFindings(item, fragments)]));
-  // The fragments the listed items' tilings carry, by text.
-  const carried = new Set([...listed.values()].flatMap((entry) => entry.carried));
+  // DR-065 §3: an unlisted item carries a fragment contiguously, as does a
+  // listed item that admits no tiling and is already reported; a listed item
+  // that tiles carries exactly the fragments of one tiling of its prompt,
+  // chosen so that the listed items together cover every fragment no other
+  // item carries — one occurrence never stands for two authored fragments.
+  const contiguousCarriers = items.filter((item) =>
+    !prefixedIds.has(item.id) || listed.get(item.id).tilings.length === 0);
+  const uncovered = fragments
+    .map((_fragment, index) => index)
+    .filter((index) =>
+      !contiguousCarriers.some((item) => fragmentIndex(item.prompt, fragments[index].lines) >= 0));
+  const dropped = uncoveredByTilings(
+    uncovered,
+    [...listed.values()].map((entry) => entry.tilings).filter((tilings) => tilings.length > 0),
+  );
   const relayedFields = new Set(
     fragments
       .filter((fragment) => fragment.kind === 'relay')
@@ -402,16 +449,11 @@ export function checkSourceGearsContract(sourceText, gearsText) {
     fragments.flatMap((fragment) => fragment.lines.filter((line) => line !== '')),
   );
 
-  for (const fragment of fragments) {
-    // A prefixed item carries a fragment as its units rather than contiguously,
-    // since the pass moves its relay units to the tail.
-    const present = carried.has(JSON.stringify(fragment.lines)) ||
-      items.some((item) => fragmentIndex(item.prompt, fragment.lines) >= 0);
-    if (!present) {
-      findings.push(
-        `source ${fragment.kind} fragment at line ${fragment.start + 1} was dropped or changed`,
-      );
-    }
+  for (const index of dropped) {
+    const fragment = fragments[index];
+    findings.push(
+      `source ${fragment.kind} fragment at line ${fragment.start + 1} was dropped or changed`,
+    );
   }
 
   for (const item of items) {

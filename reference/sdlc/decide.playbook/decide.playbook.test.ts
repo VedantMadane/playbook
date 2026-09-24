@@ -4141,6 +4141,64 @@ describe('DECIDE failure causes (DR-063)', () => {
     await runtime.dispose();
   });
 
+  it('names the adjudication that failed first, not the player that finished first', async () => {
+    const judged: string[] = [];
+    const { runtime, statuses, run, rejection } = await failedRun({
+      callPlayer: async (roleId) => {
+        // Reviewer's player finishes first; both adjudications then refuse,
+        // Coder's before Reviewer's.
+        if (roleId === 'coder') await new Promise((resolve) => setTimeout(resolve, 5));
+        return { status: 'ok', finalText: `${roleId} proposal` };
+      },
+      callJudge: async (prompt) => {
+        const item = /source item (DECIDE-[12])\b/.exec(prompt)?.[1];
+        if (item === undefined) return judgeReply(prompt);
+        judged.push(item);
+        throw new Error(`${item} judge is down`);
+      },
+    });
+    expect(judged).toEqual(['DECIDE-1', 'DECIDE-2']);
+    expect(rejection).toMatchObject({ message: 'DECIDE-1 judge is down' });
+    const cause: Cause = {
+      code: 'judge-failed',
+      evidence: {
+        reason: 'judge transport failed',
+        error: { name: 'Error', message: 'DECIDE-1 judge is down' },
+      },
+    };
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: cause,
+      status: cause,
+      snapshot: cause,
+    });
+    await runtime.dispose();
+  });
+
+  it.each([
+    ['a shared string', () => 'provider down'],
+    ['a frozen Error', () => Object.freeze(new Error('provider down'))],
+    ['an ordinary Error', () => new Error('provider down')],
+  ] as const)(
+    'names the proposal that failed first when both fail at once with %s',
+    async (_label, thrown) => {
+      const shared = thrown();
+      const { runtime, statuses, run } = await failedRun({
+        // Both ports reject in the same tick, Coder's first, so both failures
+        // are decided before the cohort cancels either.
+        callPlayer: async () => {
+          throw shared;
+        },
+      });
+      const cause = { code: 'player-failed', evidence: { roleId: 'coder' } };
+      expect(failureCauses(runtime, statuses, run)).toMatchObject({
+        view: cause,
+        status: cause,
+        snapshot: cause,
+      });
+      await runtime.dispose();
+    },
+  );
+
   it('reads a mismatched merge receipt as the repository cause the receipt proves', async () => {
     const { runtime, statuses, run } = await failedRun(
       {},

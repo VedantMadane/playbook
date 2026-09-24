@@ -155,8 +155,9 @@ order: for a listed item it requires each instruction and relay block of the
 fragments the item carries intact, blank lines inside a block included, and
 used exactly once, the instruction blocks in Source order, the relay blocks in
 Source order, and every relay after the last instruction, a relay Source joined
-directly to an instruction staying beside it and a bare relay the prose authored
-free to trail; for any other item it requires Source order throughout.
+directly to an instruction staying beside it with its authored boundary, a bare
+relay the prose authored free to trail, and one occurrence standing for one
+authored fragment; for any other item it requires Source order throughout.
 
 ## Deterministic rewriting
 
