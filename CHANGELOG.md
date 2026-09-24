@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [15.1.0] - 2026-09-24
+
 ### Added
 
 - **Compiled prompts open with their instructions and end with this run's relayed values.** The maintained sources put the caller's request first and the instruction after it, so every fresh player call for the same item began with text no earlier call shared, and the instructions — often the larger part — were processed afresh each time, although OpenAI, Anthropic, and Google each serve a prompt from cache only up to its first differing token and each document the same rule: static content first, variable content last. A second default pass, `slc/prefix.md`, now runs after `optimize` and moves each eligible item's standalone relay blocks — the blank-separated quoted lines such as `> Original request: <caller-input>` — after its last instruction line, keeping every non-blank line byte-for-byte and collapsing only the blank lines around a moved block, the instructions in their order and the relays in theirs, adding no label or separator, and listing the rewritten items in one `## Prefixed prompts` section that a later application merges into; script items, items whose relays already trail, and items whose instructions depend on a relay standing before them stay unchanged, and `--no-optimize` skips the pass. The published `slc/prefix-prompts.mjs` performs the rewrite exactly (`--source`, `--target`, `--keep <ITEM-ID>`), so the pass's only judgment is which items to keep. The Source-to-GEARS checker accepts a listed item when its prompt is exactly the units of the fragments it carries — each used once, interior blank lines intact, instruction and relay units each in Source order, every relay after the last instruction — keeping every alternative assignment of fragments, the boundaries Source authored between fragments and after a relay kept in place, a relay joined directly to an instruction in place, and bare relays authored through prose, and counting one occurrence for one authored fragment, and reports a listed item that is absent, unchanged, or still relay-first, and a second provenance section; every unlisted item is held to Source order as before. The maintained artifacts are unchanged until their next recompile ([DR-065](specs/decisions/065-prompt-prefix-pass.md), [[compiler-prompt-prefix-1](specs/packages/compiler-prompt-prefix.md#compiler-prompt-prefix-1)], [[compiler-prompt-prefix-4](specs/packages/compiler-prompt-prefix.md#compiler-prompt-prefix-4)], [[compiler-prompt-prefix-5](specs/packages/compiler-prompt-prefix.md#compiler-prompt-prefix-5)]).
@@ -696,7 +698,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Conformance test suite (386 tests across six files) pinning the gears ↔ FSM 1:1 mapping (PLAYBOOK-1..6), runtime contract (PBRT-5..16), prompt composition, introspect helpers, and onDone arm coverage.
 - Package exports `./code/playbook` (the host-agnostic `createPlaybookRuntime` factory) and `./code/tmux-play` (the cligent-bound Captain factory).
 
-[Unreleased]: https://github.com/sublang-ai/playbook/compare/v15.0.0...HEAD
+[Unreleased]: https://github.com/sublang-ai/playbook/compare/v15.1.0...HEAD
+[15.1.0]: https://github.com/sublang-ai/playbook/compare/v15.0.0...v15.1.0
 [15.0.0]: https://github.com/sublang-ai/playbook/compare/v14.1.0...v15.0.0
 [14.1.0]: https://github.com/sublang-ai/playbook/compare/v14.0.0...v14.1.0
 [14.0.0]: https://github.com/sublang-ai/playbook/compare/v13.3.0...v14.0.0

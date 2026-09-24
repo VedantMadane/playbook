@@ -2383,9 +2383,20 @@ function stepEffectReconciliation(root, state) {
     'This evidence does not establish workflow completion or attribute any ' +
       'repository change or commit to this workflow.',
   ].join('\n');
+  const parkedReply = [
+    unresolvedReply,
+    '',
+    'Failure: the runtime could not settle the step: Error: EFFECT governed ' +
+      'outcome remains unresolved: corrective semantic candidate is invalid.',
+    'Controls:',
+    '- Retry unresolved effect reconciliation ' +
+      '(no-op: nothing has changed since it failed)',
+    '- Abandon unresolved workflow attempt (ready)',
+    '- Stop /effect (ready)',
+  ].join('\n');
   const parkedEnvelope = parseExactHeadlessReply(
     parkedRun.stdout,
-    unresolvedReply,
+    parkedReply,
   );
   const parkedRecord = sessionRecord(parkedEnvelope.sessionId);
   assertBoundary(parkedRecord, {
@@ -2430,7 +2441,7 @@ function stepEffectReconciliation(root, state) {
   );
   parseExactHeadlessReply(
     reconcileRun.stdout,
-    unresolvedReply,
+    parkedReply,
     parkedEnvelope.sessionId,
   );
   const reconciledRecord = sessionRecord(parkedEnvelope.sessionId);
