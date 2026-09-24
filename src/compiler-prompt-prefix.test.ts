@@ -121,6 +121,18 @@ const TEMPLATE = [
   '~~~',
 ];
 
+/** A faithful raw GEARS of one Flow item with the given prompt lines. */
+function oneItem(prompt: readonly string[]): string {
+  return [
+    '# Flow', '', 'Roles:', '', '- Coder', '',
+    '### FLOW-1', '', 'When step 1 starts, Captain shall prompt Coder:', '',
+    ...prompt.map((line) => (line === '' ? '>' : `> ${line}`)), '',
+    'Results:', '- `done`: Coder finished.', '',
+  ].join('\n');
+}
+
+const FLOW_HEAD = ['# Flow', '', 'Roles:', '', '- Coder', ''];
+
 describe('prompt-prefix pass tool (compiler-prompt-prefix-6)', () => {
   let dir: string;
   beforeEach(() => {
@@ -457,6 +469,85 @@ describe('prefix units keep ownership, multiplicity, and blank lines (compiler-p
       'Implement the request.', '', '', 'Report every result.', '', '> Request: <caller-input>',
     ]);
     expect(checkSourceGearsContract(source, text)).toEqual([]);
+  });
+
+  it('keeps the alternative assignment that shows the rewrite', () => {
+    // Two items whose fragments mirror each other rewrite to identical prompts.
+    const mirrored = flow([
+      ['Implement the request.', '', '> Request: <caller-input>'],
+      ['> Request: <caller-input>', '', 'Implement the request.'],
+    ]);
+    const { text, stdout } = prefix(dir, mirrored.gears);
+    expect(stdout.trim()).toBe('FLOW-2');
+    expect(checkSourceGearsContract(mirrored.source, text)).toEqual([]);
+  });
+
+  it('accepts moved bare relays authored through prose, alone and adjacent', () => {
+    const source = [
+      ...FLOW_HEAD,
+      'When step 1 starts, Captain shall relay the caller input and the run results in quotes (`>`) before giving Coder this instruction:',
+      '', '```markdown', 'Do X.', '```', '',
+    ].join('\n');
+    for (const bare of [['> <caller-input>'], ['> <caller-input>', '> <run-results>']]) {
+      const gears = oneItem([...bare, '', 'Do X.']);
+      expect(checkSourceGearsContract(source, gears)).toEqual([]);
+      const { text, stdout } = prefix(dir, gears);
+      expect(stdout.trim()).toBe('FLOW-1');
+      expect(prompts(text).get('FLOW-1')).toEqual(['Do X.', '', ...bare]);
+      expect(checkSourceGearsContract(source, text)).toEqual([]);
+    }
+  });
+
+  it('accepts the boundaries the Source authored between fragments, including none', () => {
+    const cases = [
+      {
+        // Two instruction fragments joined without a blank line.
+        source: [
+          ...FLOW_HEAD,
+          'When step 1 starts, Captain shall relay the request in quotes (`>`) and give Coder these instructions, the second directly after the first:',
+          '', '> Request: <caller-input>', '',
+          '```markdown', 'Do X.', '```', '',
+          '```markdown', 'Do Y.', '```', '',
+        ],
+        gears: oneItem(['> Request: <caller-input>', '', 'Do X.', 'Do Y.']),
+        rewritten: ['Do X.', 'Do Y.', '', '> Request: <caller-input>'],
+      },
+      {
+        // Two relay fragments joined without a blank line.
+        source: [
+          ...FLOW_HEAD,
+          'When step 1 starts, Captain shall relay the request in quotes (`>`):',
+          '', '> Request: <caller-input>', '',
+          'and, directly below it, the summary in quotes (`>`):',
+          '', '> Summary: <summary>', '',
+          'Then Captain shall give Coder this instruction:',
+          '', '```markdown', 'Do X.', '```', '',
+        ],
+        gears: oneItem(['> Request: <caller-input>', '> Summary: <summary>', '', 'Do X.']),
+        rewritten: ['Do X.', '', '> Request: <caller-input>', '> Summary: <summary>'],
+      },
+      {
+        // A relay fragment joined directly to an instruction stays beside it.
+        source: [
+          ...FLOW_HEAD,
+          'When step 1 starts, Captain shall relay the summary in quotes (`>`):',
+          '', '> Summary: <summary>', '',
+          'and the request in quotes (`>`) directly followed by this instruction:',
+          '', '> Request: <caller-input>', '',
+          '```markdown', 'Do X.', '```', '',
+        ],
+        gears: oneItem(['> Summary: <summary>', '', '> Request: <caller-input>', 'Do X.']),
+        rewritten: ['> Request: <caller-input>', 'Do X.', '', '> Summary: <summary>'],
+      },
+    ];
+    for (const { source: lines, gears, rewritten } of cases) {
+      const source = lines.join('\n');
+      expect(checkSourceGearsContract(source, gears)).toEqual([]);
+      const { text, stdout } = prefix(dir, gears);
+      expect(stdout.trim()).toBe('FLOW-1');
+      expect(prompts(text).get('FLOW-1')).toEqual(rewritten);
+      expect(checkSourceGearsContract(source, text)).toEqual([]);
+    }
   });
 
   it("holds an instruction's interior blank lines exact", () => {

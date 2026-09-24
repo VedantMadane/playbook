@@ -1384,17 +1384,16 @@ function createDecidePlaybookRuntime(
         });
   // A rejected player port or a result the runtime cannot read is a
   // `player-failed` failure named by role; the turn's own abort is `aborted`.
-  // A value that already carries a cause was decided by its originator, and a
-  // cancellation the runtime itself issued — a proposal cancelled because its
-  // sibling failed — is not this player's failure, so neither is decided
-  // again here.
+  // A cancellation the runtime itself issued — a proposal cancelled because
+  // its sibling failed — is not this player's failure and decides nothing, so
+  // the originator's cause stands; every other failure is decided afresh,
+  // whatever an earlier failure threw.
   const decidePlayerCallFailure = (
     error: unknown,
     roleId: RoleId,
     playerId: string | undefined,
     signal: AbortSignal,
   ): void => {
-    if (failureCauses.causeOf(error) !== undefined) return;
     const turn = currentSignal;
     const turnAborted = turn !== undefined && turn.aborted;
     if (!turnAborted && signal.aborted) return;
@@ -3137,15 +3136,21 @@ function createDecidePlaybookRuntime(
                 acknowledgementFailures,
                 'DECIDE proposal cohort reconciliation failed',
               );
-        // DR-063 §2: a cohort fails for the member that failed first. The
-        // failure it caused — the sibling's cancellation, or the aggregate of
-        // both — publishes that member's cause, never an abort.
+        // DR-063 §2: a cohort fails for the member that failed first — the one
+        // whose failure cancelled its sibling, else the first acknowledgement
+        // failure carrying a cause in the members' completion order, as when
+        // both adjudications or both receipts failed after the calls
+        // completed. The cancellation, the sibling's own rejection, or the
+        // aggregate of both publishes that member's cause, never an abort.
         const origin = cohortOperations.signal.aborted
           ? cohortOperations.signal.reason
           : undefined;
         const originCause =
           failureCauses.causeOf(failure) ??
-          (origin === undefined ? undefined : failureCauses.causeOf(origin));
+          (origin === undefined ? undefined : failureCauses.causeOf(origin)) ??
+          acknowledgementFailures
+            .map((candidate) => failureCauses.causeOf(candidate))
+            .find((cause) => cause !== undefined);
         if (originCause !== undefined) {
           attachPlaybookFailureCause(failure, originCause);
           failureCauses.retain(failure, originCause);

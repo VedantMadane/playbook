@@ -236,11 +236,16 @@ function sameLines(left, right) {
 }
 
 /**
- * Checks for an item the prefix pass lists as rewritten. Its prompt must be,
- * for some fragments taken whole in Source order, their instruction units
- * joined by one blank line, then one blank line before each of their relay
- * units, every unit occurrence used once and a bare relay line admitted among
- * the relays. Returns the findings and the fragments the item carries.
+ * Checks for an item the prefix pass lists as rewritten. Its prompt must be
+ * tiled by whole fragments taken in Source order: their instruction units in
+ * the region before the trailing relay blocks — one blank line between the
+ * units of one fragment, the boundary Source authored between fragments — and
+ * their relay units among the trailing blocks, or in place where the raw
+ * layout kept a relay beside instruction text, each unit occurrence used
+ * once, with blank lines and bare relay lines free among the trailing blocks.
+ * Every alternative tiling is kept, so a rewrite is recognized whenever one
+ * tiling shows a relay that moved past an instruction. Returns the findings
+ * and the texts of the fragments the tilings carry.
  */
 function prefixedItemFindings(item, fragments) {
   const { prompt } = item;
@@ -258,59 +263,79 @@ function prefixedItemFindings(item, fragments) {
     return { findings: [`${item.id}: listed as prefixed but a relay precedes an instruction`], carried: [] };
   }
   const statics = prompt.slice(0, lastStatic + 1);
-  const blocks = [];
-  for (const line of prompt.slice(lastStatic + 1)) {
-    if (line === '') blocks.push([]);
-    else if (blocks.length === 0) blocks.push([line]);
-    else blocks[blocks.length - 1].push(line);
-  }
-  const bare = (block) => block.length === 1 && BARE_RELAY.test(block[0]);
-  // Each reachable (static line, relay block) position with the first
-  // Source-ordered fragment set that reaches it.
-  let reached = new Map([['0 0', { line: 0, block: 0, carried: [] }]]);
+  const tail = prompt.slice(lastStatic + 1);
+  const free = (line) => line === '' || BARE_RELAY.test(line);
+  // The static line after `unit` matched at the cursor: exactly one blank line
+  // separates the units of one fragment, and any number, including none,
+  // separates fragments (slc/text2gears.md).
+  const staticMatch = (line, unit, first) => {
+    let at = line;
+    if (line > 0) {
+      if (first) while (at < statics.length && statics[at] === '') at++;
+      else if (statics[at] === '') at++;
+      else return -1;
+    }
+    return sameLines(statics.slice(at, at + unit.lines.length), unit.lines)
+      ? at + unit.lines.length
+      : -1;
+  };
+  // The tail line after `unit` matched at or after the cursor, past free lines.
+  const tailMatch = (at, unit) => {
+    for (let t = at; t + unit.lines.length <= tail.length; t++) {
+      if (sameLines(tail.slice(t, t + unit.lines.length), unit.lines)) return t + unit.lines.length;
+      if (!free(tail[t])) return -1;
+    }
+    return -1;
+  };
+  // Each reachable position — static line, tail line, whether a relay unit
+  // reached the tail, whether an instruction unit followed one — with the
+  // fragments every path to it carries.
+  const keyOf = (state) =>
+    `${state.line} ${state.tail} ${Number(state.moved)} ${Number(state.rewrite)}`;
+  const merge = (states, state) => {
+    const existing = states.get(keyOf(state));
+    if (existing === undefined) states.set(keyOf(state), state);
+    else for (const text of state.carried) existing.carried.add(text);
+  };
+  let reached = new Map();
+  merge(reached, { line: 0, tail: 0, moved: false, rewrite: false, carried: new Set() });
   for (const fragment of fragments) {
-    const next = new Map(reached);
-    for (const state of reached.values()) {
-      let { line, block } = state;
-      let first = true;
-      const fits = fragmentUnits(fragment).every((unit) => {
+    const text = JSON.stringify(fragment.lines);
+    const next = new Map();
+    for (const state of reached.values()) merge(next, { ...state, carried: new Set(state.carried) });
+    let frontier = [...reached.values()];
+    fragmentUnits(fragment).forEach((unit, index) => {
+      const advanced = [];
+      for (const state of frontier) {
+        const line = staticMatch(state.line, unit, index === 0);
         if (unit.kind === 'instruction') {
-          // One blank line separates the units of one fragment; text2gears joins
-          // fragments with one unless Source supplied another boundary.
-          let at = line;
-          if (line > 0) {
-            if (statics[at] !== '') return false;
-            at++;
-            if (first) while (at < statics.length && statics[at] === '') at++;
-          }
-          first = false;
-          if (!sameLines(statics.slice(at, at + unit.lines.length), unit.lines)) return false;
-          line = at + unit.lines.length;
-          return true;
+          if (line >= 0) advanced.push({ ...state, line, rewrite: state.rewrite || state.moved });
+          continue;
         }
-        while (block < blocks.length && bare(blocks[block]) && !sameLines(blocks[block], unit.lines)) block++;
-        if (block === blocks.length || !sameLines(blocks[block], unit.lines)) return false;
-        block++;
-        return true;
-      });
-      const key = `${line} ${block}`;
-      if (fits && !next.has(key)) next.set(key, { line, block, carried: [...state.carried, fragment] });
+        const end = tailMatch(state.tail, unit);
+        if (end >= 0) advanced.push({ ...state, tail: end, moved: true });
+        if (line >= 0) advanced.push({ ...state, line });
+      }
+      frontier = advanced;
+    });
+    for (const state of frontier) {
+      merge(next, { ...state, carried: new Set([...state.carried, text]) });
     }
     reached = next;
   }
-  const end = [...reached.values()].find((state) =>
-    state.line === statics.length && blocks.slice(state.block).every(bare));
-  if (end === undefined) {
+  const ends = [...reached.values()].filter((state) =>
+    state.line === statics.length && tail.slice(state.tail).every(free));
+  if (ends.length === 0) {
     return { findings: [`${item.id}: authored prompt fragments are out of Source order`], carried: [] };
   }
-  const units = end.carried.flatMap(fragmentUnits);
-  const lastInstruction = Math.max(-1, ...units
-    .filter((unit) => unit.kind === 'instruction')
-    .map((unit) => unit.start));
-  const findings = units.every((unit) => unit.kind === 'instruction' || unit.start > lastInstruction)
-    ? [`${item.id}: listed as prefixed but its prompt is in Source order`]
-    : [];
-  return { findings, carried: end.carried };
+  // A listing is a no-op only when no tiling shows a relay that moved past an
+  // instruction and the tail holds no bare relay line, whose Source position
+  // the prose leaves open.
+  const noOp = !ends.some((state) => state.rewrite) && !tail.some((line) => BARE_RELAY.test(line));
+  return {
+    findings: noOp ? [`${item.id}: listed as prefixed but its prompt is in Source order`] : [],
+    carried: [...new Set(ends.flatMap((state) => [...state.carried]))],
+  };
 }
 
 /** Fields whose result contracts make the player's final text authoritative. */
@@ -360,11 +385,8 @@ export function checkSourceGearsContract(sourceText, gearsText) {
   const listed = new Map(items
     .filter((item) => prefixedIds.has(item.id))
     .map((item) => [item.id, prefixedItemFindings(item, fragments)]));
-  // The fragments the listed items carry, by text: two identical fragments in
-  // two items may both tile as the first of them.
-  const carried = new Set([...listed.values()]
-    .flatMap((entry) => entry.carried)
-    .map((fragment) => JSON.stringify(fragment.lines)));
+  // The fragments the listed items' tilings carry, by text.
+  const carried = new Set([...listed.values()].flatMap((entry) => entry.carried));
   const relayedFields = new Set(
     fragments
       .filter((fragment) => fragment.kind === 'relay')

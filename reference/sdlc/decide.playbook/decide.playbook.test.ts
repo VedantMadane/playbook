@@ -4077,6 +4077,70 @@ describe('DECIDE failure causes (DR-063)', () => {
     await runtime.dispose();
   });
 
+  it('names a refused proposal adjudication when both proposals refuse', async () => {
+    const { runtime, statuses, run } = await failedRun({
+      callJudge: async (prompt) => {
+        if (/source item DECIDE-[12]\b/.test(prompt)) throw new Error('judge is down');
+        return judgeReply(prompt);
+      },
+    });
+    const cause: Cause = {
+      code: 'judge-failed',
+      evidence: {
+        reason: 'judge transport failed',
+        error: { name: 'Error', message: 'judge is down' },
+      },
+    };
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: cause,
+      status: cause,
+      snapshot: cause,
+    });
+    await runtime.dispose();
+  });
+
+  it('reads a repository mismatch shared by both proposals as the receipt cause it proves', async () => {
+    const { runtime, statuses, run } = await failedRun(
+      {},
+      createTestEffectHost({ cohortClassifications: ['concurrent-or-foreign-change'] }),
+    );
+    expect(run).toMatchObject({ outcome: 'failed', state: { stateId: 'failed' } });
+    const cause = { code: 'foreign-change', evidence: { required: 'unchanged' } };
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: cause,
+      status: cause,
+      result: cause,
+      snapshot: cause,
+    });
+    await runtime.dispose();
+  });
+
+  it('attributes a repeated failure value to the player that failed this time', async () => {
+    let attempt = 1;
+    const { runtime, statuses, run } = await failedRun({
+      callPlayer: async (roleId) => {
+        const failing = attempt === 1 ? 'coder' : 'reviewer';
+        if (roleId === failing) throw 'provider down';
+        return { status: 'ok', finalText: `${roleId} proposal` };
+      },
+    });
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: { code: 'player-failed', evidence: { roleId: 'coder' } },
+    });
+    attempt = 2;
+    const retry = await runtime
+      .handleBossInput({ text: 'Choose again.', signal: signal() })
+      .catch((error: unknown) => ({ rejected: error }));
+    expect(retry).not.toMatchObject({ outcome: 'no-action' });
+    const cause = { code: 'player-failed', evidence: { roleId: 'reviewer' } };
+    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+      view: cause,
+      status: cause,
+      snapshot: cause,
+    });
+    await runtime.dispose();
+  });
+
   it('reads a mismatched merge receipt as the repository cause the receipt proves', async () => {
     const { runtime, statuses, run } = await failedRun(
       {},

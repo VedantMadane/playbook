@@ -154,8 +154,9 @@ The section is what lets a Source-to-GEARS fidelity checker accept the new
 order: for a listed item it requires each instruction and relay block of the
 fragments the item carries intact, blank lines inside a block included, and
 used exactly once, the instruction blocks in Source order, the relay blocks in
-Source order, and every relay after the last instruction; for any other item
-it requires Source order throughout.
+Source order, and every relay after the last instruction, a relay Source joined
+directly to an instruction staying beside it and a bare relay the prose authored
+free to trail; for any other item it requires Source order throughout.
 
 ## Deterministic rewriting
 
