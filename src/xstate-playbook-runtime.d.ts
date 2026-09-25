@@ -131,11 +131,12 @@ export declare function playerFailureCause(input: {
 export declare function governedSettlementCause(reason: string, error: unknown, aborted: boolean, supplied: PlaybookFailureCause | undefined): PlaybookFailureCause;
 /**
  * DR-063 §2: the causes decided for thrown values that cannot carry the
- * marker — a string, a frozen error — kept by identity for as long as the
- * failure stands, so every surface that reads the FSM's own `lastError`
- * publishes the cause decided for exactly that value, whatever turn reads it.
- * A value that carries the marker answers from it; the map is bounded, since
- * only values that refuse the marker need an entry.
+ * marker — a string, a frozen error — and for the record a machine keeps in
+ * place of the thrown value, kept by identity for as long as the failure
+ * stands, so every surface that reads the FSM's own `lastError` publishes the
+ * cause decided for exactly that failure, whatever turn reads it. A value
+ * that carries the marker answers from it; the map is bounded, since only
+ * values that lack the marker need an entry.
  */
 export interface PlaybookFailureCauseRetention {
     retain(error: unknown, cause: PlaybookFailureCause): void;

@@ -9666,6 +9666,276 @@ describe('parked failure causes over the shared factory (DR-063)', () => {
       await restored.dispose();
     },
   );
+
+  // A compiled machine keeps a JSON-safe `{ name, message }` record as its
+  // `lastError` (gears2fsm requires JSON-safe context), so the value the
+  // failed state holds is neither the thrown value nor carries its marker.
+  // The cause the runtime decided for the failure that parked the machine is
+  // still the one every surface publishes, live and after restore.
+  describe('when the machine records the failure as a JSON-safe record', () => {
+    const recordingConfig = cloneMachineConfig(
+      (workflowMachine as unknown as { config: Record<string, unknown> })
+        .config,
+    );
+    recordingConfig.states.implement.invoke.onError.actions = assign({
+      lastError: ({ event }: { event: { error?: unknown } }) =>
+        event.error instanceof Error
+          ? { name: event.error.name, message: event.error.message }
+          : { name: 'Error', message: String(event.error) },
+    });
+    const createRecordingRuntimeFactory = createXStatePlaybookRuntime(
+      createMachine(recordingConfig, {
+        actions: { 'playbook.acceptedOutcome': () => undefined },
+      }),
+      workflowSpec,
+    );
+    const createRecordingRuntime = (
+      ledger: PlaybookEffectLedger = emptyPlaybookEffectLedger(),
+    ) =>
+      createRecordingRuntimeFactory(
+        governedRuntimeConstruction({}, 'factory-test', [], ledger),
+      );
+
+    const everySurface = (
+      runtime: PlaybookRuntime,
+      telemetry: readonly RecordedTelemetry[],
+      statuses: readonly RecordedStatus[],
+      result: Cause | undefined,
+    ) => {
+      const { view, status, transition } = publishedCauses(
+        runtime,
+        telemetry,
+        statuses,
+        { outcome: 'quiescent', state: runtime.describe!().state },
+      );
+      return {
+        view,
+        status,
+        transition,
+        result,
+        snapshot: (
+          runtime.exportSnapshot!()!.machine as unknown as {
+            context: { lastError?: { cause?: Cause } };
+          }
+        ).context.lastError?.cause,
+      };
+    };
+
+    async function expectRestoredCause(
+      runtime: PlaybookRuntime,
+      session: PlaybookSession,
+      cause: Cause,
+    ): Promise<void> {
+      const snapshot = runtime.exportSnapshot!()!;
+      await runtime.dispose();
+      const restored = createRecordingRuntime(snapshot.effectLedger);
+      await restored.restore!(session, snapshot);
+      expect(restored.describe!().lastError?.cause).toEqual(cause);
+      await restored.dispose();
+    }
+
+    it('publishes a rejected player port as `player-failed` on every surface', async () => {
+      const { ports, telemetry, statuses } = makeRecordingPorts({
+        callPlayer: async () => {
+          throw new Error('coder is down');
+        },
+      });
+      const session = makeSession(ports);
+      const runtime = createRecordingRuntime();
+      await runtime.init(session);
+      // A thrown port is a control-plane error, so the boundary rejects; the
+      // machine still parks on the record its own onError built.
+      const rejection = await runtime
+        .handleBossInput(turn('build it'))
+        .catch((error: unknown) => error);
+      const cause: Cause = {
+        code: 'player-failed',
+        evidence: {
+          roleId: 'coder',
+          error: { name: 'Error', message: 'coder is down' },
+        },
+      };
+      expect(runtime.describe!().state.stateId).toBe('failed');
+      expect(runtime.describe!().lastError).toEqual({
+        name: 'Error',
+        message: 'coder is down',
+        cause,
+      });
+      expect(
+        everySurface(
+          runtime,
+          telemetry,
+          statuses,
+          normalizeError(rejection).cause,
+        ),
+      ).toEqual({
+        view: cause,
+        status: cause,
+        transition: cause,
+        result: cause,
+        snapshot: cause,
+      });
+      // The cause is bound to the parked failure, not to the turn that
+      // decided it.
+      expect((await runtime.handleBossInput(turn(''))).outcome).toBe(
+        'no-action',
+      );
+      expect(runtime.describe!().lastError?.cause).toEqual(cause);
+      await expectRestoredCause(runtime, session, cause);
+    });
+
+    it('publishes a non-`ok` player result as `player-failed` on every surface', async () => {
+      const { ports, telemetry, statuses } = makeRecordingPorts({
+        callPlayer: async () => ({ status: 'error', error: 'coder refused' }),
+      });
+      const session = makeSession(ports);
+      const runtime = createRecordingRuntime();
+      await runtime.init(session);
+      const run = await runtime.handleBossInput(turn('build it'));
+
+      expect(run).toMatchObject({
+        outcome: 'failed',
+        state: { stateId: 'failed' },
+      });
+      const cause: Cause = {
+        code: 'player-failed',
+        evidence: {
+          roleId: 'coder',
+          error: { name: 'Error', message: 'coder refused' },
+        },
+      };
+      expect(
+        everySurface(
+          runtime,
+          telemetry,
+          statuses,
+          run.outcome === 'failed' ? run.error?.cause : undefined,
+        ),
+      ).toEqual({
+        view: cause,
+        status: cause,
+        transition: cause,
+        result: cause,
+        snapshot: cause,
+      });
+      await expectRestoredCause(runtime, session, cause);
+    });
+
+    it('publishes a refused adjudication as `judge-failed`', async () => {
+      const { ports, telemetry, statuses } = makeRecordingPorts({
+        callPlayer: async () => ({ status: 'ok', finalText: 'Implemented.' }),
+        callJudge: async () => {
+          throw new Error('provider refused the control call');
+        },
+      });
+      const session = makeSession(ports);
+      const runtime = createRecordingRuntime();
+      await runtime.init(session);
+      const run = await runtime.handleBossInput(turn('build it'));
+
+      expect(run).toMatchObject({
+        outcome: 'failed',
+        state: { stateId: 'failed' },
+      });
+      const cause: Cause = {
+        code: 'judge-failed',
+        evidence: {
+          reason: 'judge transport failed',
+          error: {
+            name: 'Error',
+            message: 'provider refused the control call',
+          },
+        },
+      };
+      expect(
+        everySurface(
+          runtime,
+          telemetry,
+          statuses,
+          run.outcome === 'failed' ? run.error?.cause : undefined,
+        ),
+      ).toEqual({
+        view: cause,
+        status: cause,
+        transition: cause,
+        result: cause,
+        snapshot: cause,
+      });
+      await expectRestoredCause(runtime, session, cause);
+    });
+
+    it("carries a nested playbook's failure as `child-failed` with the child's cause", async () => {
+      // The child's failure is marked where the bridge builds it, never kept
+      // in the runtime's memory, so only the error the parking transition
+      // carried names it.
+      const nestedConfig = cloneMachineConfig(
+        (nestedMachine as unknown as { config: Record<string, unknown> })
+          .config,
+      );
+      nestedConfig.states.call.invoke.onError.actions = assign({
+        lastError: ({ event }: { event: { error?: unknown } }) =>
+          event.error instanceof Error
+            ? { name: event.error.name, message: event.error.message }
+            : { name: 'Error', message: String(event.error) },
+      });
+      const runtime = createXStatePlaybookRuntime(createMachine(nestedConfig), {
+        compat: { artifactSchema: 3, runtimeAbi: RUNTIME_ABI },
+        snapshotOptions: () => ({}),
+        roleStates: {},
+        machineInput: () => ({}),
+        entryEvent: { type: 'GO', textField: 'request' },
+        outcomeAuthority: ROLELESS_OUTCOME_AUTHORITY,
+      })(governedRuntimeConstruction({}, 'factory-test'));
+      const childCause: Cause = {
+        code: 'player-failed',
+        evidence: {
+          roleId: 'coder',
+          error: { name: 'Error', message: 'the child coder is down' },
+        },
+      };
+      const { ports, telemetry, statuses } = makeRecordingPorts({
+        callPlaybook: async () => ({
+          state: 'settled' as const,
+          result: {
+            status: 'error' as const,
+            playbookId: 'child',
+            childSessionId: 'child-session-1',
+            error: {
+              name: 'Error',
+              message: 'the child coder is down',
+              cause: childCause,
+            },
+          },
+        }),
+      });
+      await runtime.init(makeSession(ports));
+      const run = await runtime.handleBossInput(turn('do it'));
+
+      expect(run).toMatchObject({
+        outcome: 'failed',
+        state: { stateId: 'failed' },
+      });
+      const cause: Cause = {
+        code: 'child-failed',
+        evidence: { playbookId: 'child', cause: childCause },
+      };
+      expect(
+        everySurface(
+          runtime,
+          telemetry,
+          statuses,
+          run.outcome === 'failed' ? run.error?.cause : undefined,
+        ),
+      ).toEqual({
+        view: cause,
+        status: cause,
+        transition: cause,
+        result: cause,
+        snapshot: cause,
+      });
+      await runtime.dispose();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

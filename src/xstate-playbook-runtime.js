@@ -157,6 +157,24 @@ export function createFailureCauseRetention() {
         },
     };
 }
+/**
+ * DR-063 §2: the value an invoked actor's rejection carried into the machine,
+ * read from the XState error event that delivered it, or `undefined` for any
+ * other event.
+ */
+function actorErrorOf(event) {
+    if (typeof event !== 'object' || event === null)
+        return undefined;
+    try {
+        const { type, error } = event;
+        return typeof type === 'string' && type.startsWith('xstate.error.actor.')
+            ? error
+            : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
 // ---------------------------------------------------------------------------
 // DR-028: both call boundaries treat an `ok` result whose `finalText` is
 // missing, empty, or whitespace-only under one empty predicate, and that
@@ -2687,10 +2705,11 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // each successful result, so it is never stale.
         let pendingResultFailureCause;
         // DR-063 §2: the causes decided for thrown values that cannot carry the
-        // marker — a string, a frozen error — kept by identity for as long as the
+        // marker — a string, a frozen error — and for the record a machine keeps
+        // in place of the thrown value, kept by identity for as long as the
         // failure stands, so every surface that reads the FSM's own `lastError`
-        // publishes the cause decided for exactly that value, whatever turn reads
-        // it.
+        // publishes the cause decided for exactly that failure, whatever turn
+        // reads it.
         const failureCauses = createFailureCauseRetention();
         // DR-063 §2 / DR-067 §1: the cause decided for each non-`ok` player
         // result, keyed by the result itself, so concurrent region calls never
@@ -5232,6 +5251,24 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     runtimeDefectCause(normalized.message),
             };
         }
+        // DR-063 §2: the failure that parks the machine is the error its parking
+        // transition carried, but a compiled machine keeps a JSON-safe record of
+        // it as `lastError` (gears2fsm requires JSON-safe context), so neither
+        // that value's identity nor its marker reaches the failed state. The cause
+        // decided for the carried error is retained under the value the machine
+        // kept, so every surface of this turn and of each later one publishes the
+        // runtime's own decision for as long as that failure stands. A kept value
+        // that already answers keeps its cause.
+        function bindParkedFailureCause(context, event) {
+            const kept = context.lastError;
+            if (kept === undefined || kept === null)
+                return;
+            if (failureCauses.causeOf(kept) !== undefined)
+                return;
+            const decided = failureCauses.causeOf(actorErrorOf(event));
+            if (decided !== undefined)
+                failureCauses.retain(kept, decided);
+        }
         // DR-063 §2: a rejected player port or a result the runtime cannot read is
         // a `player-failed` failure named by role; an abort is `aborted`. A
         // cancellation the runtime itself issued to a cohort member because its
@@ -5462,6 +5499,9 @@ export function createXStatePlaybookRuntime(machine, spec) {
                         }
                         const context = (snap.context ??
                             {});
+                        if (state.stateId === 'failed') {
+                            bindParkedFailureCause(context, inspectionEvent.event);
+                        }
                         if (state.stateId === BOSS_REPLY_WAIT_STATE_ID &&
                             deferredReconciliationOperationId !== undefined) {
                             priorState = state;
