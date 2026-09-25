@@ -53,6 +53,38 @@ function prefix(
   return { text: readFileSync(target, 'utf8'), stdout };
 }
 
+/**
+ * A relay-first pre-image of a GEARS the pass already rewrote: each prompt's
+ * trailing relay block moves back to the head of its blockquote and the
+ * provenance section is dropped. For REVIEW-2 this is exactly its Source
+ * order, and the shipped tool rewrites the result back to the maintained
+ * GEARS byte for byte.
+ */
+function relayFirst(gears: string): string {
+  const start = gears.indexOf(`\n${SECTION}\n`);
+  if (start === -1) return gears;
+  const lines = gears.slice(0, start + 1).split('\n');
+  const out: string[] = [];
+  for (let index = 0; index < lines.length; ) {
+    if (!lines[index].startsWith('>')) {
+      out.push(lines[index++]);
+      continue;
+    }
+    let end = index;
+    while (end < lines.length && lines[end].startsWith('>')) end++;
+    const quote = lines.slice(index, end);
+    let relay = quote.length;
+    while (relay > 0 && quote[relay - 1].startsWith('> > ')) relay--;
+    out.push(
+      ...(relay > 1 && relay < quote.length && quote[relay - 1] === '>'
+        ? [...quote.slice(relay), '>', ...quote.slice(0, relay - 1)]
+        : quote),
+    );
+    index = end;
+  }
+  return out.join('\n');
+}
+
 /** Prompt lines of each item, keyed by item id. */
 function prompts(gears: string): Map<string, readonly string[]> {
   return new Map(parseGearsContract(gears).map((item) => [item.id, item.prompt]));
@@ -203,7 +235,7 @@ describe('prompt-prefix pass tool (compiler-prompt-prefix-6)', () => {
   });
 
   it('skips a kept item and leaves an ineligible package untouched', () => {
-    const { gears } = reference('review');
+    const gears = relayFirst(reference('review').gears);
     const { text, stdout } = prefix(dir, gears, ['REVIEW-2']);
     expect(stdout.trim().split('\n')).toEqual(['REVIEW-1', 'REVIEW-3', 'REVIEW-4']);
     expect(prompts(text).get('REVIEW-2')).toEqual(prompts(gears).get('REVIEW-2'));
@@ -316,10 +348,11 @@ describe('prompt-prefix pass tool (compiler-prompt-prefix-6)', () => {
   });
 
   it('merges a later application into one provenance section', () => {
-    const { gears } = reference('review');
+    const gears = relayFirst(reference('review').gears);
     const again = prefix(dir, prefix(dir, gears, ['REVIEW-2']).text);
     expect(again.stdout.trim()).toBe('REVIEW-2');
     expect(again.text).toBe(prefix(dir, gears).text);
+    expect(again.text).toBe(reference('review').gears);
     expect(again.text.match(/^## Prefixed prompts$/gm)).toHaveLength(1);
   });
 });
@@ -328,11 +361,11 @@ describe('prefix-first prompts share their instructions as a cache prefix (compi
   it('composes REVIEW-2 with two requests sharing the whole instruction block', () => {
     const dir = mkdtempSync(join(tmpdir(), 'playbook-prefix-'));
     try {
-      const { gears } = reference('review');
+      const gears = relayFirst(reference('review').gears);
       const { text } = prefix(dir, gears);
       const compose = (prompt: readonly string[], callerInput: string) =>
         defaultComposePlayerPrompt({
-          stateId: 'addressFindings',
+          stateId: 'fixFindings',
           role: 'coder',
           sourceItem: 'REVIEW-2',
           prompt: prompt.join('\n'),

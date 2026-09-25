@@ -185,7 +185,7 @@ const hermeticToken = 'HERMETIC_ACCEPTANCE_OK';
 
 // Approval is a recorded machine outcome, never a turn of phrase: REVIEW
 // reaches its `{ noUnsettledFindings: true, evaluatedRevision }` terminal
-// only through a Reviewer round the runtime accepted as `noFindings`, so the
+// only through a Reviewer round the runtime accepted as `clean`, so the
 // durable ledger — not the Captain's wording — is the evidence. The reply is
 // held to nothing beyond being present.
 function expectRecordedReviewApproval(
@@ -201,7 +201,7 @@ function expectRecordedReviewApproval(
   // `evaluatedRevision` is effect-owned (DR-045), so the retained candidate
   // is the guard alone; the receipt beside it proves the revision.
   expect(reviewerRounds.at(-1)?.semanticCandidate).toEqual({
-    guard: 'noFindings',
+    guard: 'clean',
   });
   expect(reviewerRounds.at(-1)?.physicalReceipt?.classification).toBe(
     'unchanged',
@@ -1493,19 +1493,19 @@ function expectDecideContinuity(record: DurableSessionRecord): string {
   const nestedFindingBoundaries = boundaries.filter(
     (boundary) =>
       boundary.playbookId === 'review' &&
-      boundary.sourceStateId === 'reviewInitial' &&
+      boundary.sourceStateId === 'reviewFirstRound' &&
       boundary.roleId === 'reviewer',
   );
   expect(nestedFindingBoundaries).toHaveLength(1);
   expect(nestedFindingBoundaries[0]?.semanticCandidate).toEqual({
-    guard: 'hasFindings',
+    guard: 'findings',
   });
   expect(nestedFindingBoundaries[0]?.finalText).toContain(marker);
 
   const correctionBoundaries = boundaries.filter(
     (boundary) =>
       boundary.playbookId === 'review' &&
-      boundary.sourceStateId === 'addressFindings' &&
+      boundary.sourceStateId === 'fixFindings' &&
       boundary.physicalReceipt?.classification === 'one-descendant-commit',
   );
   expect(correctionBoundaries.length).toBeGreaterThanOrEqual(1);
@@ -1516,14 +1516,14 @@ function expectDecideContinuity(record: DurableSessionRecord): string {
   const approvalBoundaries = boundaries.filter(
     (boundary) =>
       boundary.playbookId === 'review' &&
-      ['reviewAfterCommit', 'reviewAfterRebuttal'].includes(
+      ['reviewAfterCommit', 'reviewAfterRejection'].includes(
         boundary.sourceStateId,
       ) &&
       boundary.roleId === 'reviewer',
   );
   expect(approvalBoundaries.length).toBeGreaterThanOrEqual(1);
   expect(approvalBoundaries.map((boundary) => boundary.semanticCandidate))
-    .toContainEqual({ guard: 'noFindings' });
+    .toContainEqual({ guard: 'clean' });
   return marker;
 }
 

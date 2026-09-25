@@ -186,6 +186,7 @@ async function harness(input: HarnessInput) {
   const ledgerService = effectLedgerService();
   const telemetry: Array<{ topic: string; payload: unknown }> = [];
   const statuses: string[] = [];
+  const judgePrompts: string[] = [];
   const commitOids: string[] = [];
   let effectIndex = 0;
   const applyRepositoryEffect = async (
@@ -239,7 +240,8 @@ async function harness(input: HarnessInput) {
     ): Promise<CaptainResult> {
       throw new Error('REVIEW must not call Captain directly');
     },
-    async callJudge() {
+    async callJudge(prompt) {
+      judgePrompts.push(prompt);
       const reply = input.judgeReplies.shift();
       if (reply === undefined) throw new Error('unexpected judge call');
       return reply;
@@ -276,6 +278,7 @@ async function harness(input: HarnessInput) {
     ports,
     telemetry,
     statuses,
+    judgePrompts,
     baseCommit,
     commitOids,
     effectLedger: ledgerService,
@@ -324,9 +327,9 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"hasFindings"}',
+        '{"guard":"findings"}',
         '{"guard":"committed"}',
-        '{"guard":"noFindings"}',
+        '{"guard":"clean"}',
       ],
     });
     const runtime = linkedRuntime(host);
@@ -341,7 +344,7 @@ describe('linked REVIEW runtime', () => {
     assertWorkflowTerminal('review', result);
     if (result.outcome === 'terminal') {
       expect(result.stateDescription).toBe(
-        'The requested review is complete: no unsettled findings remain within the review scope.',
+        'The review completed with no unsettled findings; it returns the exact repository revision at which the review scope was evaluated.',
       );
       // The evaluated revision is the receipt-derived review-fix commit OID:
       // the judge reply named no commit, so only the receipt can supply it.
@@ -360,12 +363,13 @@ describe('linked REVIEW runtime', () => {
       false,
       'reviewer-1',
     ]);
-    expect(playerCalls[0].prompt).toContain(
-      '> Original request: Review the feature.\n> Run result: focused suite passed.',
-    );
-    expect(playerCalls[0].prompt).toContain(
-      'A new review begins for the review scope.',
-    );
+    // DR-065: the instructions lead and the relayed caller input trails.
+    expect(playerCalls[0].prompt.startsWith(
+      'A new review begins for the review scope.\n',
+    )).toBe(true);
+    expect(playerCalls[0].prompt.endsWith(
+      '\n\n> Original request: Review the feature.\n> Run result: focused suite passed.',
+    )).toBe(true);
     expect(playerCalls[0].prompt).toContain(
       'Keep to the original intent and follow what it asks.',
     );
@@ -412,28 +416,40 @@ describe('linked REVIEW runtime', () => {
     );
     expect(acceptedOutcomes(host)).toEqual([
       {
-        source: 'reviewInitial',
-        target: 'addressFindings',
-        acceptedOutcome: 'hasFindings',
+        source: 'reviewFirstRound',
+        target: 'fixFindings',
+        acceptedOutcome: 'findings',
       },
       {
-        source: 'addressFindings',
+        source: 'fixFindings',
         target: 'reviewAfterCommit',
         acceptedOutcome: 'committed',
       },
       {
         source: 'reviewAfterCommit',
         target: 'done',
-        acceptedOutcome: 'noFindings',
+        acceptedOutcome: 'clean',
       },
     ]);
     expect(host.statuses).toEqual(
       expect.arrayContaining([
-        '→ hasFindings',
+        '→ findings',
         '→ committed',
-        '→ noFindings',
+        '→ clean',
       ]),
     );
+    // compiler-results-13 / playbook-21: each Reviewer adjudication prompt
+    // tells the judge, in both the findings and the clean outcome, that a
+    // progress report, status update, or promise supports neither.
+    expect(host.judgePrompts).toHaveLength(3);
+    for (const index of [0, 2]) {
+      expect(
+        host.judgePrompts[index]?.split(
+          'a progress report, status update, or promise of a later result does not support this outcome',
+        ),
+        `judge prompt ${index}`,
+      ).toHaveLength(3);
+    }
 
     await runtime.dispose();
   });
@@ -462,9 +478,9 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"hasFindings"}',
+        '{"guard":"findings"}',
         '{"guard":"rejectedAll"}',
-        '{"guard":"noFindings"}',
+        '{"guard":"clean"}',
       ],
     });
     const runtime = linkedRuntime(host);
@@ -522,19 +538,19 @@ describe('linked REVIEW runtime', () => {
     expect(playerCalls[2].prompt).not.toContain('> <latest-commit>');
     expect(acceptedOutcomes(host)).toEqual([
       {
-        source: 'reviewInitial',
-        target: 'addressFindings',
-        acceptedOutcome: 'hasFindings',
+        source: 'reviewFirstRound',
+        target: 'fixFindings',
+        acceptedOutcome: 'findings',
       },
       {
-        source: 'addressFindings',
-        target: 'reviewAfterRebuttal',
+        source: 'fixFindings',
+        target: 'reviewAfterRejection',
         acceptedOutcome: 'rejectedAll',
       },
       {
-        source: 'reviewAfterRebuttal',
+        source: 'reviewAfterRejection',
         target: 'done',
-        acceptedOutcome: 'noFindings',
+        acceptedOutcome: 'clean',
       },
     ]);
 
@@ -553,7 +569,7 @@ describe('linked REVIEW runtime', () => {
           repositoryEffect: 'commit',
         },
       ],
-      judgeReplies: ['{"guard":"noFindings"}'],
+      judgeReplies: ['{"guard":"clean"}'],
     });
     const runtime = linkedRuntime(host);
     await runtime.init(session(host.ports));
@@ -599,7 +615,7 @@ describe('linked REVIEW runtime', () => {
           repositoryEffect: 'unchanged',
         },
       ],
-      judgeReplies: ['{"guard":"hasFindings"}', '{"guard":"committed"}'],
+      judgeReplies: ['{"guard":"findings"}', '{"guard":"committed"}'],
     });
     const runtime = linkedRuntime(host);
     await runtime.init(session(host.ports));
@@ -624,8 +640,12 @@ describe('linked REVIEW runtime', () => {
     ).toEqual(['unchanged', 'unchanged']);
     expect(host.statuses).not.toContain('→ committed');
     expect(runtime.unresolvedEffectEnvelopes?.()).toEqual([]);
+    // Besides the ordinary retry, Boss may jump back into any round whose
+    // typed context exists; no reconciliation action is offered.
     expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
       'retry:START_REVIEW',
+      'jump:fixFindings',
+      'jump:reviewFirstRound',
     ]);
     await runtime.dispose();
   });
@@ -656,7 +676,7 @@ describe('linked REVIEW runtime', () => {
           },
         ],
         judgeReplies: [
-          '{"guard":"hasFindings"}',
+          '{"guard":"findings"}',
           JSON.stringify({ guard }),
         ],
       });
@@ -680,9 +700,9 @@ describe('linked REVIEW runtime', () => {
         .toMatchObject({ classification });
       expect(acceptedOutcomes(host)).toEqual([
         {
-          source: 'reviewInitial',
-          target: 'addressFindings',
-          acceptedOutcome: 'hasFindings',
+          source: 'reviewFirstRound',
+          target: 'fixFindings',
+          acceptedOutcome: 'findings',
         },
       ]);
       expect(host.statuses).not.toContain(`→ ${guard}`);
@@ -712,7 +732,7 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"hasFindings"}',
+        '{"guard":"findings"}',
         // The candidate may carry only the guard plus semantic-owned fields;
         // a judge-supplied latestCommit is a structural error, and the one
         // corrective adjudication repeats it, so the boundary stays parked.
@@ -738,9 +758,9 @@ describe('linked REVIEW runtime', () => {
     ]);
     expect(acceptedOutcomes(host)).toEqual([
       {
-        source: 'reviewInitial',
-        target: 'addressFindings',
-        acceptedOutcome: 'hasFindings',
+        source: 'reviewFirstRound',
+        target: 'fixFindings',
+        acceptedOutcome: 'findings',
       },
     ]);
     expect(host.statuses).not.toContain('→ committed');
@@ -753,7 +773,7 @@ describe('linked REVIEW runtime', () => {
 
   it.each([
     {
-      origin: 'reviewInitial',
+      origin: 'reviewFirstRound',
       playerResults: [
         {
           status: 'ok' as const,
@@ -769,7 +789,7 @@ describe('linked REVIEW runtime', () => {
       judgeReplies: [
         '{"guard":"needsBossReply"}',
         '{"type":"BOSS_REPLY"}',
-        '{"guard":"noFindings"}',
+        '{"guard":"clean"}',
       ],
       resumedCall: 1,
       resumedPlayer: 'reviewer',
@@ -778,7 +798,7 @@ describe('linked REVIEW runtime', () => {
       expectsFixRevision: false,
     },
     {
-      origin: 'addressFindings',
+      origin: 'fixFindings',
       playerResults: [
         {
           status: 'ok' as const,
@@ -804,11 +824,11 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"hasFindings"}',
+        '{"guard":"findings"}',
         '{"guard":"needsBossReply"}',
         '{"type":"BOSS_REPLY"}',
         '{"guard":"committed"}',
-        '{"guard":"noFindings"}',
+        '{"guard":"clean"}',
       ],
       resumedCall: 2,
       resumedPlayer: 'coder',
@@ -842,11 +862,11 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"hasFindings"}',
+        '{"guard":"findings"}',
         '{"guard":"committed"}',
         '{"guard":"needsBossReply"}',
         '{"type":"BOSS_REPLY"}',
-        '{"guard":"noFindings"}',
+        '{"guard":"clean"}',
       ],
       resumedCall: 3,
       resumedPlayer: 'reviewer',
@@ -855,7 +875,7 @@ describe('linked REVIEW runtime', () => {
       expectsFixRevision: true,
     },
     {
-      origin: 'reviewAfterRebuttal',
+      origin: 'reviewAfterRejection',
       playerResults: [
         {
           status: 'ok' as const,
@@ -879,11 +899,11 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"hasFindings"}',
+        '{"guard":"findings"}',
         '{"guard":"rejectedAll"}',
         '{"guard":"needsBossReply"}',
         '{"type":"BOSS_REPLY"}',
-        '{"guard":"noFindings"}',
+        '{"guard":"clean"}',
       ],
       resumedCall: 3,
       resumedPlayer: 'reviewer',
@@ -950,14 +970,14 @@ describe('linked REVIEW runtime', () => {
     );
     for (const prompt of [resumed?.prompt, resumed?.options.freshPrompt]) {
       expect(prompt).toContain('> Original request: Review the release commit.');
-      if (scenario.origin === 'addressFindings') {
+      if (scenario.origin === 'fixFindings') {
         expect(prompt).toContain(
           '> Reviewer findings: 1. The target is ambiguous.',
         );
       } else if (scenario.origin === 'reviewAfterCommit') {
         expect(prompt).toContain(`> Latest commit: ${host.commitOids[0]}`);
         expect(prompt).toContain('> Coder output: Fixed and committed.');
-      } else if (scenario.origin === 'reviewAfterRebuttal') {
+      } else if (scenario.origin === 'reviewAfterRejection') {
         expect(prompt).toContain('> Coder output: Rejected with evidence.');
       }
     }
@@ -991,10 +1011,13 @@ describe('linked REVIEW runtime', () => {
           resumeToken: 'reviewer-restarted',
         },
       ],
+      // A fresh request enters through the start event, whose text the
+      // runtime attaches as the new caller input; a Boss jump would re-run a
+      // round with the retained input instead.
       judgeReplies: [
         '{"guard":"needsBossReply"}',
-        '{"type":"BOSS_INTERRUPT","targetId":"reviewInitial"}',
-        '{"guard":"noFindings"}',
+        '{"type":"START_REVIEW"}',
+        '{"guard":"clean"}',
       ],
     });
     const runtime = linkedRuntime(host);
@@ -1035,7 +1058,7 @@ describe('linked REVIEW runtime', () => {
       // makes no classifier call — the only judge reply the turn consumes
       // is the restarted reviewer's adjudication. A classifier call here
       // would shift this queue and fail loudly on the missing guard.
-      judgeReplies: ['{"guard":"noFindings"}'],
+      judgeReplies: ['{"guard":"clean"}'],
     });
     const runtime = linkedRuntime(host);
     await runtime.init(session(host.ports));
@@ -1061,11 +1084,165 @@ describe('linked REVIEW runtime', () => {
     await runtime.dispose();
   });
 
+  // playbook-13/-15: a resumed call that fails leaves its working state
+  // without suspending for its own question, so neither the control view
+  // nor the exported snapshot keeps the answered question or its reply.
+  it.each([
+    {
+      role: 'Reviewer',
+      playerResults: [
+        {
+          status: 'ok' as const,
+          finalText: 'Which release target should govern?',
+          resumeToken: 'reviewer-question',
+        },
+        { status: 'error' as const, error: 'reviewer transport failed' },
+      ],
+      judgeReplies: ['{"guard":"needsBossReply"}', '{"type":"BOSS_REPLY"}'],
+      error: 'reviewer transport failed',
+    },
+    {
+      role: 'Coder',
+      playerResults: [
+        {
+          status: 'ok' as const,
+          finalText: '1. The target is ambiguous.',
+          resumeToken: 'reviewer-findings',
+        },
+        {
+          status: 'ok' as const,
+          finalText: 'Which release target should govern?',
+          resumeToken: 'coder-question',
+        },
+        { status: 'error' as const, error: 'coder transport failed' },
+      ],
+      judgeReplies: [
+        '{"guard":"findings"}',
+        '{"guard":"needsBossReply"}',
+        '{"type":"BOSS_REPLY"}',
+      ],
+      error: 'coder transport failed',
+    },
+  ])('drops the answered question when the resumed $role call fails', async (scenario) => {
+    const playerCalls: PlayerCall[] = [];
+    const host = await harness({
+      playerCalls,
+      playerResults: [...scenario.playerResults],
+      judgeReplies: [...scenario.judgeReplies],
+    });
+    const runtime = linkedRuntime(host);
+    await runtime.init(session(host.ports));
+
+    const parked = await runtime.handleBossInput({
+      text: 'Review the release commit.',
+      signal: new AbortController().signal,
+    });
+    expect(parked.state.stateId).toBe('awaitBossReply');
+    expect(runtime.describe!().pendingQuestions).toHaveLength(1);
+
+    const failed = await runtime.handleBossInput({
+      text: 'Target version 6.0.0.',
+      signal: new AbortController().signal,
+    });
+    expect(failed.outcome).toBe('failed');
+    expect(playerCalls.at(-1)?.prompt).toContain(
+      'Boss reply:\nTarget version 6.0.0.',
+    );
+    const view = runtime.describe!();
+    expect(view.state.stateId).toBe('failed');
+    expect(view.pendingQuestions).toEqual([]);
+    expect(view.lastError).toMatchObject({ message: scenario.error });
+    const machine = runtime.exportSnapshot!()!.machine as {
+      context: Record<string, unknown>;
+    };
+    expect(machine.context.pendingBossQuestion).toBeUndefined();
+    expect(machine.context.bossReply).toBeUndefined();
+    expect(machine.context.lastError).toMatchObject({ message: scenario.error });
+    await runtime.dispose();
+  });
+
+  // DR-063: the compiled machine keeps a JSON-safe `{ name, message }`
+  // record as its `lastError`, not the value the Reviewer's call threw, and
+  // the runtime still publishes the cause it decided for that failure.
+  it.each([
+    ['a rejected Reviewer port', 'reject'],
+    ['a non-`ok` Reviewer result', 'error'],
+  ] as const)(
+    'publishes %s as `player-failed` naming the Reviewer role and its player',
+    async (_label, failure) => {
+      const host = await harness({
+        playerCalls: [],
+        playerResults: [],
+        judgeReplies: [],
+      });
+      const failedStatusData: unknown[] = [];
+      const ports: PlaybookPorts = {
+        ...host.ports,
+        async callPlayer() {
+          if (failure === 'reject') throw new Error('reviewer is down');
+          return { status: 'error', error: 'reviewer is down' };
+        },
+        async emitStatus(message, data) {
+          host.statuses.push(message);
+          if (message.startsWith('◆ workflow failed')) {
+            failedStatusData.push(data);
+          }
+        },
+      };
+      const runtime = linkedRuntime(host);
+      await runtime.init(session(ports));
+
+      const settled = await runtime
+        .handleBossInput({
+          text: 'Review the latest commit.',
+          signal: new AbortController().signal,
+        })
+        .then(
+          (result) => ({ result }),
+          (rejection: unknown) => ({ rejection }),
+        );
+
+      const cause = {
+        code: 'player-failed',
+        evidence: {
+          roleId: 'reviewer',
+          playerId: 'reviewer',
+          error: { name: 'Error', message: 'reviewer is down' },
+        },
+      };
+      // A thrown port is a control-plane error, so that boundary rejects; a
+      // non-`ok` result settles `failed` and carries the cause itself.
+      if (failure === 'reject') {
+        expect(settled).toMatchObject({
+          rejection: { message: 'reviewer is down' },
+        });
+      } else {
+        expect(settled).toMatchObject({
+          result: { outcome: 'failed', error: { cause } },
+        });
+      }
+      const view = runtime.describe!();
+      expect(view.state.stateId).toBe('failed');
+      expect(view.lastError).toMatchObject({
+        name: 'Error',
+        message: 'reviewer is down',
+        cause,
+      });
+      expect(failedStatusData).toMatchObject([{ lastError: { cause } }]);
+      expect(runtime.exportSnapshot!()!.machine).toMatchObject({
+        context: {
+          lastError: { name: 'Error', message: 'reviewer is down', cause },
+        },
+      });
+      await runtime.dispose();
+    },
+  );
+
   it('counts only Reviewer review and rebuttal states as rounds', () => {
     expect(reviewStateCountLabels).toEqual({
-      reviewInitial: 'review round',
+      reviewFirstRound: 'review round',
       reviewAfterCommit: 'review round',
-      reviewAfterRebuttal: 'rebuttal',
+      reviewAfterRejection: 'rebuttal',
     });
   });
 
@@ -1112,7 +1289,7 @@ describe('linked REVIEW runtime', () => {
       sourceItem: 'REVIEW-3',
       role: 'reviewer',
       prompt: '> <coder-output>\nUse <coder-llm>.',
-      result: { noFindings: 'No findings.' },
+      result: { clean: 'No findings.' },
       coderOutput: 'Line one\nLine two with <coder-llm> and $&.',
     }, (roleId) => roleId === 'coder' ? 'GPT-5.6 Sol' : roleId);
     expect(prompt).toBe(

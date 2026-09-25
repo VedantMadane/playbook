@@ -38,7 +38,7 @@ tree, which pnpm's strict linking will not allow.
 
 ```ts
 import createPlaybookRuntime, {
-  type ReviewPlaybookHostCapabilities,
+  type PlaybookHostCapabilities,
 } from '@sublang/playbook/review/playbook';
 import type {
   CaptainCallOptions,
@@ -156,7 +156,7 @@ const playbookSessionId = randomUUID();
 // machine input, or a persisted snapshot. A host outside the CLI constructs
 // the repository and effect-ledger members through the facade described in
 // "Constructing worktree host capabilities" below.
-declare const hostCapabilities: ReviewPlaybookHostCapabilities;
+declare const hostCapabilities: PlaybookHostCapabilities;
 
 const runtime = createPlaybookRuntime({
   configuredOptions: {},
