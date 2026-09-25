@@ -21,11 +21,15 @@ The output shapes shall preserve the maintained public return contracts [[playbo
 When the selected pipeline supplies the catalog [[compiler-workflow-contracts-1](#compiler-workflow-contracts-1)], gears2fsm shall adopt its explicit `literalTargetBindings` as the default nested-target namespace, with an explicit Source or supplied compiler-dependency binding overriding a default and requiring its own public interface; runtime hosts shall honor the compiled dependency bindings as external ABIs.
 Where compilation binds a nested target to a cataloged builtin dependency, when deriving an output predicate, gears2fsm shall read that declared interface [[compiler-workflow-contracts-1](#compiler-workflow-contracts-1)] and enforce only the caller's source-owned acceptance or relay conditions on its actual fields; the shared bridge's invocation correlation [[playbook-runtime-42](playbook-runtime.md#playbook-runtime-42)] supplies call identity, and source predicates remain distinct from successful bridge delivery [[playbook-runtime-84](playbook-runtime.md#playbook-runtime-84)].
 A REVIEW success attests to the supplied scope with `noUnsettledFindings: true` and its exact `evaluatedRevision`, which may include REVIEW-owned fixes [[playbook-26](playbook.md#playbook-26)]; the caller shall not invent a `reviewedCommit` field or require that final revision to equal its own earlier commit.
-The catalog shall not impose a builtin interface on an unrelated local source or custom target merely because its name matches.
+A local basename or a custom target reusing a builtin's id shall establish no nested-call binding for a caller; the compiled workflow's own interface under that id is governed by [[compiler-workflow-contracts-6](#compiler-workflow-contracts-6)].
 
 ### compiler-workflow-contracts-3
 
 Where a source-owned child-output predicate requires an external interface, when that interface is unavailable or inconsistent with its declared dependency, the compilation definition shall report the missing or incompatible compiler input without inventing output fields or asking the author to repair sufficient domain behavior; a missing, contradictory, or materially ambiguous authored behavior remains a source clarification concern.
+
+### compiler-workflow-contracts-6
+
+Where the selected pipeline supplies the catalog [[compiler-workflow-contracts-1](#compiler-workflow-contracts-1)] and the compiled Source's basename is one of its `literalTargetBindings`, when text2gears and gears2fsm compile that Source, they shall hold the workflow to that builtin's declared output interface, because callers compiled against the catalog address it by that id: text2gears shall read the catalog as a semantic input and name each semantic or presentation result property whose value the interface returns by the interface's property name, leaving an effect-owned commit identity its canonical per-call name for the FSM to project; gears2fsm shall declare the terminal output as exactly the interface's variants, `status` constants, property names, and requiredness, derived from typed context; and where a Source placeholder names such a value otherwise or an authored outcome cannot be expressed by the interface, the definition shall report the inconsistency as an incompatible compiler input [[compiler-workflow-contracts-3](#compiler-workflow-contracts-3)] rather than rename or invent, while a Source outside those ids is named from its own words ([DR-066](../decisions/066-compiled-builtins-keep-their-public-interface.md)).
 
 ## Verification
 
@@ -36,3 +40,7 @@ When the integration suite checks the published catalog, it shall verify its dec
 ### compiler-workflow-contracts-5
 
 When compiler-input integration checks the package and definition closure, it shall verify independent catalog inclusion, reference discovery and changed catalog identity in the declared semantic inputs [[compiler-workflow-contracts-1](#compiler-workflow-contracts-1)], explicit source-owned predicate and invocation-correlation guidance [[compiler-workflow-contracts-2](#compiler-workflow-contracts-2)], and separate missing-interface versus missing-behavior guidance [[compiler-workflow-contracts-3](#compiler-workflow-contracts-3)].
+
+### compiler-workflow-contracts-7
+
+When the integration suite reads the shipped definitions and sidecar, it shall verify that text2gears cites the catalog and states the interface-name rule for a cataloged basename with its effect-owned exception and inconsistency report, that gears2fsm states the terminal-output conformance and its inconsistency report, that the declared semantic-input closure of text2gears names the catalog, and that each maintained GEARS names the semantic and presentation values its interface returns by the catalog's property names [[compiler-workflow-contracts-6](#compiler-workflow-contracts-6)].

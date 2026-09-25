@@ -23,8 +23,12 @@ The terminal-return requirement shall remain non-acting semantics outside prompt
 
 ### compiler-results-5
 
-When Source gives a direct-Captain or delegated-player acting result that asks Boss a question and waits for the answer before the same behavior resumes, text2gears shall preserve the authored prompt, guard name, wait, and answer-dependent continuation [[playbook-runtime-11](playbook-runtime.md#playbook-runtime-11)] while declaring the result's `question` output property in the annotated `question: <verbatim final text>` form [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)] [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)].
-The result name or prose alone shall not satisfy the field declaration, and text2gears shall not emit the framework-owned `needsBossReply` result added by [gears2fsm's Boss-reply suspension](../../slc/gears2fsm.md#boss-reply-suspension).
+When Source gives a direct-Captain or delegated-player behavior a Boss question that waits for the answer before the same behavior resumes, text2gears shall preserve the authored prompt, the wait, and the answer-dependent continuation on the originating item [[playbook-runtime-11](playbook-runtime.md#playbook-runtime-11)] and shall declare no result for that question outside the decide-call-observe routing contract: the question is the framework-owned `needsBossReply` outcome that [gears2fsm's Boss-reply suspension](../../slc/gears2fsm.md#boss-reply-suspension) adds to every such state [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], and a second guard for the same wait would give the adjudicator two equivalent outcomes.
+Where the behavior is Captain's routing decision under that contract, whose `question` and `followUpQuestion` results are fixed compiler vocabulary, text2gears shall declare the routing question's `question` output property in the annotated `question: <verbatim final text>` form [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], and the result name or prose alone shall not satisfy that declaration.
+
+### compiler-results-9
+
+When declaring a result's output properties, text2gears shall declare a property only where a consumer requires its value — a later item's placeholder, the workflow's terminal return [[compiler-results-3](#compiler-results-3)], or the workflow's declared public interface [[compiler-workflow-contracts-6](compiler-workflow-contracts.md#compiler-workflow-contracts-6)] — and shall carry a detail the acting agent reports only within its final text, such as a reason, a summary, or a list, in that result's verbatim final-text property rather than as a separate judge-authored property ([DR-066](../decisions/066-compiled-builtins-keep-their-public-interface.md)).
 
 ### compiler-results-7
 
@@ -55,5 +59,9 @@ This representation check shall not claim to detect a model's omission of a term
 
 ### compiler-results-6
 
-When the integration suite parses an authored Boss-wait result through the supplied SLC installation, it shall verify that the annotated `question: <verbatim final text>` field is represented as runtime-supplied whole-final-text metadata when the runtime contract is given an explicit `question` presentation-owned outcome-authority mapping, while the prompt, guard name, and wait semantics remain unchanged [[compiler-results-5](#compiler-results-5)].
+When the integration suite parses an authored routing-question result through the supplied SLC installation, it shall verify that the annotated `question: <verbatim final text>` field is represented as runtime-supplied whole-final-text metadata when the runtime contract is given an explicit `question` presentation-owned outcome-authority mapping, while the prompt, guard name, and wait semantics remain unchanged, and when it reads the shipped text2gears definition, it shall verify that a delegated player's authored Boss question declares no result beside the framework-owned `needsBossReply` [[compiler-results-5](#compiler-results-5)].
 It shall also verify that a separate unannotated typed extracted field remains judge-owned through the explicit semantic outcome-authority mapping, and shall not claim that representation proves automatic inference from annotation, detection of semantic omissions, or model success [[compiler-results-5](#compiler-results-5)].
+
+### compiler-results-10
+
+When the integration suite reads the shipped text2gears definition, it shall verify that its result-contract rules confine output properties to consumed values — a later placeholder, the terminal return, or the declared public interface — and name the verbatim final-text property as the carrier of detail the acting agent reports only in its final text [[compiler-results-9](#compiler-results-9)].

@@ -164,6 +164,26 @@ guard name: a kebab-case Source placeholder such as `<coder-output>` names the
 property `coderOutput` through the canonical kebab-token-to-camel-field mapping
 of [link](link.md), never a quoted kebab-case key, because downstream artifacts
 and calling playbooks consume these properties by name.
+A result shall declare an output property only where a consumer requires it:
+a later item's `<placeholder>`, the workflow's terminal return, or the
+workflow's declared public interface below.
+A detail the acting agent reports only within its final text — a reason, a
+summary, a list — travels in the result's verbatim final-text property and is
+not a separate judge-authored property.
+
+Where the selected pipeline supplies the
+[workflow contracts](workflow-contracts.json) catalog and the Source's basename
+is one of its `literalTargetBindings`, the compiled workflow is held to that
+builtin's declared output interface, because callers compiled against the
+catalog address it by that id: a semantic or presentation result property
+whose value that interface returns shall take the interface's property name —
+`branch`, `issueSummary`, and `coderOutput` for `branch`, for instance — while
+an effect-owned commit identity keeps its canonical per-call name for the FSM
+to project into the interface.
+A Source placeholder that names such a value otherwise is an inconsistency
+between the Source and the catalog: leave the Target unwritten and report it
+as an incompatible compiler input rather than rename or invent.
+A Source outside those ids is named from its own words as above.
 
 A produced value consumed later shall have a declared producer: where any
 later item's blockquote reads a value through a `<placeholder>`, the item
@@ -215,10 +235,16 @@ when the answer changes its complete runtime prompt. It shall not emit a
 second item solely for "Boss answers," "after the question," or clearing the
 consumed question/reply. The FSM and linker own the same-leaf suspension,
 continuation blocks, and consumed-context cleanup.
-When such an authored result asks Boss and waits, its `Results:` description
-shall declare `question: <verbatim final text>` as an output property; the
-result name or prose saying that a question is asked is not the field
-declaration.
+Outside the decide-call-observe routing contract, an authored Boss question
+is the framework-owned `needsBossReply` outcome that
+[gears2fsm](gears2fsm.md#boss-reply-suspension) adds to every Captain- or
+player-invoking state: text2gears shall keep the question's conditions in the
+prompt and its continuation in the item's prose and shall declare no result
+for it, because a second guard for the same wait would give the adjudicator
+two equivalent outcomes.
+Only the routing contract's own `question` and `followUpQuestion` results
+declare the question, as `question: <verbatim final text>`; there, the result
+name or prose saying that a question is asked is not the field declaration.
 
 This rule is an exception to splitting by accumulated prompt content below.
 Split only when Source requires a genuinely different acting behavior after

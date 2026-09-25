@@ -882,6 +882,16 @@ Where Source declares a JSON-safe terminal result, the setup types shall
 declare that output and the root machine shall derive it from typed context
 through XState's machine `output` function. A final-state transition alone does
 not satisfy a declared output contract.
+Where the selected pipeline supplies the
+[workflow contracts](workflow-contracts.json) catalog and the compiled Source's
+basename is one of its `literalTargetBindings`, the declared terminal output
+shall be exactly that builtin's public interface — its variants, `status`
+constants, property names, and requiredness — derived from typed context,
+because callers compiled against the catalog consume it by those names; an
+authored outcome the interface cannot express is an inconsistency between the
+Source and the catalog, reported as an incompatible compiler input under
+[Nested playbook calls](#nested-playbook-calls) rather than expressed by an
+invented or renamed outcome.
 Fields that Source requires in every terminal output shall be required in the
 TypeScript output type. In particular, a declared `{ response }` result shall
 compile as `{ response: string }`, not `{ response?: string }`; reaching the
