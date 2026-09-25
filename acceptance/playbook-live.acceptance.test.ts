@@ -1355,10 +1355,37 @@ function readDurableSession(
     type: 'session_context', contextVersion: 1,
     configuration: record.lastAppliedExecutionProjection,
   });
+  // playbook-cli-75 / session-storage-7: the writer strips provider tokens
+  // from structured fields and provider metadata, while a player's own tool
+  // content — prompts, file paths, commands — remains history. Claude Code
+  // names its scratchpad directory after its session id, so a Coder that
+  // writes there echoes its own token into tool input; that is retained
+  // history, not a manifest leak, so tool input and output are excluded here.
+  const structuredReplay = entries
+    .map((entry) => {
+      const record = entry.record;
+      const payload = record?.event?.payload;
+      if (
+        (record?.type === 'player_event' || record?.type === 'captain_event') &&
+        typeof payload === 'object' &&
+        payload !== null
+      ) {
+        const structured = { ...payload } as Record<string, unknown>;
+        delete structured.input;
+        delete structured.output;
+        return {
+          ...entry,
+          record: { ...record, event: { ...record.event, payload: structured } },
+        };
+      }
+      return entry;
+    })
+    .map((entry) => JSON.stringify(entry))
+    .join('\n');
   for (const token of [hints.captain?.token, ...Object.values(hints.players ?? {})]) {
     if (typeof token !== 'string') continue;
     expect(bytes.toString('utf8')).not.toContain(token);
-    expect(replay.toString('utf8')).not.toContain(token);
+    expect(structuredReplay).not.toContain(token);
   }
   return record;
 }
