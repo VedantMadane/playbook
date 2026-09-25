@@ -2386,8 +2386,8 @@ function stepEffectReconciliation(root, state) {
   const parkedReply = [
     unresolvedReply,
     '',
-    'Failure: the runtime could not settle the step: Error: EFFECT governed ' +
-      'outcome remains unresolved: corrective semantic candidate is invalid.',
+    'Failure: the hidden adjudication failed: corrective semantic candidate ' +
+      'is invalid.',
     'Controls:',
     '- Retry unresolved effect reconciliation ' +
       '(no-op: nothing has changed since it failed)',
