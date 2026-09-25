@@ -422,6 +422,9 @@ Markdown escaping is Source syntax, not content: extraction shall resolve escape
 
 Partition items by every variable that determines prompt content — including accumulated state when the trigger alone doesn't.
 
+Conversely, do not split by trigger alone: where two or more triggers lead to one behavior with the same acting clause, prompt, and result contract — a nested call Source says a later path makes "with the same input as" an earlier path's, for instance — text2gears shall emit one item whose condition joins the triggers and shall keep each path's continuation as that item's prose.
+An item per trigger duplicates an identical prompt and multiplies the FSM's states without a content difference.
+
 ### Prune dead disjuncts
 
 Drop disjunctive branches incompatible with the rest of an item's condition or prompt.

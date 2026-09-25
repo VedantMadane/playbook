@@ -47,3 +47,28 @@ it('defines unreachable nested onDone omission without dropping authored failure
     'An invalid result returns no authored outcome and takes the existing\ncontrol-error fallback.',
   );
 });
+
+it('joins the paths that share one nested call in one item, as the maintained DEV GEARS does', () => {
+  const definition = readFileSync(
+    new URL('../slc/text2gears.md', import.meta.url),
+    'utf8',
+  ).replace(/\s+/g, ' ');
+  expect(definition).toContain('do not split by trigger alone');
+  expect(definition).toContain(
+    'text2gears shall emit one item whose condition joins the triggers and shall keep each path\'s continuation as that item\'s prose',
+  );
+  const gears = readFileSync(
+    new URL('../reference/sdlc/dev.playbook/dev.gears.md', import.meta.url),
+    'utf8',
+  );
+  const items = [...gears.matchAll(/^### (DEV-\d+)$/gm)].map((match) => match[1]);
+  expect(items).toEqual(['DEV-1', 'DEV-2', 'DEV-3', 'DEV-4', 'DEV-5', 'DEV-6']);
+  const conditions = gears.split(/^### DEV-\d+$/m).slice(1).map((section) =>
+    section.split('\n').find((line) => /Captain shall call playbook/.test(line)) ?? '',
+  );
+  // DEV-2 (`code`), DEV-3 (`decide`), and DEV-5 (`branch`) each name both
+  // paths that enter the call in one condition.
+  expect(conditions[1]).toMatch(/selects `code`, or `branch` succeeds/);
+  expect(conditions[2]).toMatch(/selects `decide then code`, or `branch` succeeds/);
+  expect(conditions[4]).toMatch(/`code via pull request` or `decide then code via pull request`/);
+});
