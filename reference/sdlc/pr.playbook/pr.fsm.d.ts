@@ -201,12 +201,6 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
     type: "clearBossReplyContext";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "completeWithInsufficientCodeResult";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "completeWithCodeFailure";
-    params: import("xstate").NonReducibleUnknown;
-} | {
     type: "startPr";
     params: import("xstate").NonReducibleUnknown;
 } | {
@@ -214,6 +208,12 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "completeNotPublished";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "completeWithCodeFailure";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "completeWithInsufficientCodeResult";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "completeFixNotPublished";

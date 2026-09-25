@@ -341,7 +341,7 @@ function failedTerminalChild(
 }
 
 const CHILD_FAILURE_DESCRIPTION =
-  "The development workflow relayed a child playbook's authored abort, failure, or insufficient terminal result.";
+  "DEV ended by relaying a child playbook's authored abort, failure, or result that did not prove the required success.";
 
 describe('linked DEV runtime', () => {
   it('labels only the planning rounds DEV itself owns', () => {
@@ -406,7 +406,7 @@ describe('linked DEV runtime', () => {
     expect(
       result.outcome === 'terminal' ? result.stateDescription : undefined,
     ).toBe(
-      "The selected development path completed with the final child playbook's successful result.",
+      "The selected development path completed with its final child playbook's successful result.",
     );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'complete',
@@ -448,7 +448,7 @@ describe('linked DEV runtime', () => {
     const view = runtime.describe!();
     expect(view.state.stateId).toBe('done');
     expect(view.stateDescription).toBe(
-      "The selected development path completed with the final child playbook's successful result.",
+      "The selected development path completed with its final child playbook's successful result.",
     );
     await runtime.dispose();
   });
@@ -604,7 +604,7 @@ describe('linked DEV runtime', () => {
     expect(
       result.outcome === 'terminal' ? result.stateDescription : undefined,
     ).toBe(
-      'The planning discussion concluded after a Boss reply with no repository work to follow.',
+      'After a Boss reply, the planning discussion concluded with no child call or repository change.',
     );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'discussion-complete',
@@ -670,7 +670,7 @@ describe('linked DEV runtime', () => {
     expect(
       result.outcome === 'terminal' ? result.stateDescription : undefined,
     ).toBe(
-      "The development workflow relayed a child playbook's authored abort, failure, or insufficient terminal result.",
+      "DEV ended by relaying a child playbook's authored abort, failure, or result that did not prove the required success.",
     );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'child-failed',
@@ -715,7 +715,7 @@ describe('linked DEV runtime', () => {
     expect(
       result.outcome === 'terminal' ? result.stateDescription : undefined,
     ).toBe(
-      "The development workflow relayed a child playbook's authored abort, failure, or insufficient terminal result.",
+      "DEV ended by relaying a child playbook's authored abort, failure, or result that did not prove the required success.",
     );
     await runtime.dispose();
   });
@@ -800,7 +800,7 @@ describe('linked DEV runtime', () => {
     expect(
       result.outcome === 'terminal' ? result.stateDescription : undefined,
     ).toBe(
-      "The selected development path completed with the final child playbook's successful result.",
+      "The selected development path completed with its final child playbook's successful result.",
     );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'complete',

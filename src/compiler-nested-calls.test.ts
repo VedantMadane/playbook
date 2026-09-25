@@ -68,7 +68,13 @@ it('joins the paths that share one nested call in one item, as the maintained DE
   );
   // DEV-2 (`code`), DEV-3 (`decide`), and DEV-5 (`branch`) each name both
   // paths that enter the call in one condition.
-  expect(conditions[1]).toMatch(/selects `code`, or `branch` succeeds/);
-  expect(conditions[2]).toMatch(/selects `decide then code`, or `branch` succeeds/);
-  expect(conditions[4]).toMatch(/`code via pull request` or `decide then code via pull request`/);
+  expect(conditions[1]).toMatch(
+    /^When the accepted planning result is code, or when `branch` has succeeded on the code via pull request path, Captain shall call playbook `code`:$/,
+  );
+  expect(conditions[2]).toMatch(
+    /^When the accepted planning result is decide then code, or when `branch` has succeeded on the decide then code via pull request path, Captain shall call playbook `decide`:$/,
+  );
+  expect(conditions[4]).toMatch(
+    /^When the accepted planning result is code via pull request or decide then code via pull request and no child call has started yet, Captain shall call playbook `branch`:$/,
+  );
 });
