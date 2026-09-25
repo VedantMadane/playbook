@@ -7867,6 +7867,156 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
+  // PBRT-71 / DR-040 §4: a jump out of the failure state restarts the failed
+  // attempt's work exactly as the retry does, so the same replay fence gates
+  // it. A machine whose root accepts BOSS_INTERRUPT made the ungated jump the
+  // one control that could still replay a possibly-effectful player call.
+  it('fences failure-state jumps with the retry unless every boundary of the failed attempt is unchanged', async () => {
+    // Commit-authorized implement state, so a resolved commit can precede the
+    // failure inside the same host attempt.
+    const createCommitWorkflowRuntime = createXStatePlaybookRuntime(
+      workflowMachine,
+      {
+        ...workflowSpec,
+        outcomeAuthority: {
+          governedPlayerStates: {
+            implement: {
+              implemented: {
+                fields: { summary: 'semantic' },
+                repositoryDisposition: 'one-descendant-commit',
+              },
+              needsBossReply: {
+                fields: { question: 'presentation' },
+                repositoryDisposition: 'unchanged',
+              },
+            },
+          },
+        },
+      },
+    );
+    const launch = (
+      options: WorkflowOptions,
+      classifications: readonly CodeEffectClassification[],
+      initialLedger?: PlaybookEffectLedger,
+    ) => {
+      const construction = governedRuntimeConstruction(
+        options,
+        'factory-test',
+        classifications,
+        initialLedger,
+      );
+      const hostLedger = (
+        construction.hostCapabilities as unknown as {
+          effectLedger: { snapshot(): PlaybookEffectLedger };
+        }
+      ).effectLedger;
+      return {
+        runtime: createCommitWorkflowRuntime(construction),
+        receipts: () =>
+          hostLedger
+            .snapshot()
+            .boundaries.map(
+              ({ physicalReceipt }) => physicalReceipt?.classification,
+            ),
+      };
+    };
+
+    // Fenced: implement commits and resolves, then verification fails, so the
+    // failed attempt holds a boundary whose receipt is not `unchanged`.
+    let fencedPlayerCalls = 0;
+    const fencedJudge = vi.fn<PlaybookPorts['callJudge']>(
+      async () => '{"guard":"implemented","summary":"shipped"}',
+    );
+    const { ports: fencedPorts } = makeRecordingPorts({
+      callPlayer: async () => {
+        fencedPlayerCalls += 1;
+        return { status: 'ok', finalText: 'Committed the widget.' };
+      },
+      callJudge: fencedJudge,
+    });
+    const fencedSession = makeSession(fencedPorts);
+    const fenced = launch({ command: 'false' }, ['one-descendant-commit']);
+    await fenced.runtime.init(fencedSession);
+    const failedRun = await fenced.runtime.handleBossInput(
+      turn('build the widget'),
+    );
+    expect(failedRun).toMatchObject({
+      outcome: 'failed',
+      state: { stateId: 'failed' },
+    });
+    expect(fenced.receipts()).toEqual(['one-descendant-commit']);
+    const fencedView = fenced.runtime.describe!();
+    expect(fencedView.state.stateId).toBe('failed');
+    // Neither the retry nor the root interrupt's jump is advertised.
+    expect(fencedView.actions).toEqual([]);
+    await expect(
+      fenced.runtime.apply!({
+        actionId: 'jump:implement',
+        key: 'jump-fenced',
+        signal: sigOf(),
+      }),
+    ).resolves.toMatchObject({ disposition: 'rejected' });
+    expect(fencedPlayerCalls).toBe(1);
+    expect(fencedJudge).toHaveBeenCalledOnce();
+    expect(fenced.runtime.describe!().state.stateId).toBe('failed');
+
+    // The persisted failed attempt keeps the jump fenced across restore.
+    const snapshot = fenced.runtime.exportSnapshot!()!;
+    await fenced.runtime.dispose();
+    const restored = launch({ command: 'false' }, [], snapshot.effectLedger);
+    await restored.runtime.restore!(fencedSession, snapshot);
+    expect(restored.runtime.describe!().actions).toEqual([]);
+    await expect(
+      restored.runtime.apply!({
+        actionId: 'jump:implement',
+        key: 'jump-restored',
+        signal: sigOf(),
+      }),
+    ).resolves.toMatchObject({ disposition: 'rejected' });
+    expect(fencedPlayerCalls).toBe(1);
+    await restored.runtime.dispose();
+
+    // Open: the player errors over an `unchanged` receipt, so the whole
+    // failed attempt is proven effect-free and the jump runs its target.
+    let openPlayerCalls = 0;
+    const { ports: openPorts } = makeRecordingPorts({
+      callPlayer: async () => {
+        openPlayerCalls += 1;
+        return openPlayerCalls === 1
+          ? { status: 'error', error: 'agent crashed' }
+          : { status: 'ok', finalText: 'Committed the widget.' };
+      },
+      callJudge: async () => '{"guard":"implemented","summary":"shipped"}',
+    });
+    const open = launch({}, ['unchanged', 'one-descendant-commit']);
+    await open.runtime.init(makeSession(openPorts));
+    expect(
+      (await open.runtime.handleBossInput(turn('build the widget'))).state
+        .stateId,
+    ).toBe('failed');
+    expect(open.receipts()).toEqual(['unchanged']);
+    expect(open.runtime.describe!().actions).toEqual([
+      { id: 'retry:START', label: 'Retry: implement state', standing: 'ready' },
+      {
+        id: 'jump:implement',
+        label: 'Resume from: implement state',
+        standing: 'ready',
+      },
+    ]);
+    const jumped = await open.runtime.apply!({
+      actionId: 'jump:implement',
+      key: 'jump-open',
+      signal: sigOf(),
+    });
+    expect(jumped).toMatchObject({
+      disposition: 'executed',
+      run: { outcome: 'terminal', state: { stateId: 'done' } },
+    });
+    expect(openPlayerCalls).toBe(2);
+    expect(open.receipts()).toEqual(['unchanged', 'one-descendant-commit']);
+    await open.runtime.dispose();
+  });
+
   it('finishes the apply pair aborted when the start sink cancels with the exact reason', async () => {
     // DR-036 decision 4 at the apply boundary: the pre-acceptance call may
     // still throw, but the pair finishes `aborted` with the canonical

@@ -5781,10 +5781,9 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // context member above sources. A candidate whose event the live
         // snapshot does not accept — or whose payload the runtime can source
         // from neither — is excluded rather than completed with invented text.
+        // The caller has already applied the PBRT-71 replay fence.
         function retryActionFor(snapshot, stateId) {
             if (stateId !== 'failed')
-                return undefined;
-            if (!failedAttemptAllowsReplay())
                 return undefined;
             const retryEvent = retryEventFrom(snapshot);
             if (retryEvent === undefined)
@@ -5894,6 +5893,15 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     },
                     unresolvedEffectAction: 'abandon',
                 });
+                return derived;
+            }
+            // PBRT-71 / DR-040 §4: out of the failure state, a jump restarts the
+            // failed attempt's work exactly as the retry does, so one fence gates
+            // both. Unless every governed boundary of that attempt carries a
+            // complete `unchanged` receipt, neither is advertised — and `apply`,
+            // which revalidates against this list, accepts neither — so no
+            // control can replay a player call whose effect may already exist.
+            if (state.stateId === 'failed' && !failedAttemptAllowsReplay()) {
                 return derived;
             }
             const retry = retryActionFor(snapshot, state.stateId);
