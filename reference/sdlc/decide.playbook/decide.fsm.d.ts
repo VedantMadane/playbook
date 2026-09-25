@@ -1,133 +1,189 @@
+import type { PlaybookCallResult } from '@sublang/playbook/runtime';
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
 };
-type Role = 'coder' | 'reviewer';
-export declare const concurrentRoleSets: readonly [readonly ["coder", "reviewer"]];
-type JumpableStateId = 'independentProposals';
-type ResumableStateId = 'askCoderProposal' | 'askReviewerProposal' | 'commitCoderProposal';
-export interface PendingBossQuestion {
-    questionId: ResumableStateId;
-    resumeStateId: ResumableStateId;
-    sourceItem: string;
-    asker: {
-        kind: 'role';
-        roleId: Role;
+export type CompactError = {
+    readonly name: string;
+    readonly message: string;
+};
+export type ErrorRecord = {
+    readonly name: string;
+    readonly message: string;
+    readonly stack?: string;
+};
+export type DecideRoleId = 'coder' | 'reviewer';
+export type DecideSourceItem = 'DECIDE-1' | 'DECIDE-2' | 'DECIDE-3' | 'DECIDE-4';
+/** Delegated-player working leaves; each is its own Boss-reply resume target. */
+export type ResumableStateId = 'askCoderProposal' | 'askReviewerProposal' | 'synthesizeCommit';
+/**
+ * Root BOSS_INTERRUPT targets: the parallel proposal pair as one unit, and the
+ * synthesis leaf once both proposals have been promoted.
+ */
+export type JumpableStateId = 'independentProposals' | 'synthesizeCommit';
+/**
+ * One role-id array per parallel group, in first-item source order; each
+ * inner array follows that group's item order (DECIDE-1, DECIDE-2).
+ */
+export declare const concurrentRoleSets: readonly (readonly DecideRoleId[])[];
+declare const REVIEW_PLAYBOOK_ID: "review";
+export type PendingBossQuestion = {
+    readonly questionId: ResumableStateId;
+    readonly resumeStateId: ResumableStateId;
+    readonly sourceItem: 'DECIDE-1' | 'DECIDE-2' | 'DECIDE-3';
+    readonly asker: {
+        readonly kind: 'role';
+        readonly roleId: DecideRoleId;
     };
-    question: string;
-}
-type PendingBossQuestions = Partial<Record<ResumableStateId, PendingBossQuestion>>;
-type BossReplies = Partial<Record<ResumableStateId, string>>;
-type PendingBossQuestionParams = Omit<PendingBossQuestion, 'questionId'>;
-export interface ReviewSuccessOutput {
-    evaluatedRevision: string;
-    noUnsettledFindings: true;
-}
-export interface DecideSuccessOutput {
-    decideCommit: string;
-    evaluatedRevision: string;
-    noUnsettledFindings: true;
-}
-export interface DecideFailureOutput {
-    lastDecideCommit: string;
-    noUnsettledFindings: false;
-    reviewStatus: 'aborted' | 'error';
-    error?: {
-        name: string;
-        message: string;
-    };
-}
-export type DecideOutput = DecideSuccessOutput | DecideFailureOutput;
-interface ChildFailure {
-    status: 'aborted' | 'error';
-    playbookId: 'review';
-    error?: {
-        name: string;
-        message: string;
-    };
-}
-export interface DecideContext {
-    callerTopic?: string;
-    coderProposal?: string;
-    reviewerProposal?: string;
-    latestCommit?: string;
-    coderOutput?: string;
-    reviewResult?: ReviewSuccessOutput;
-    reviewFailure?: ChildFailure;
-    lastResult?: PlayerOutput;
-    lastError?: unknown;
-    pendingBossQuestions?: PendingBossQuestions;
-    bossReplies?: BossReplies;
-    stagedCoderResult?: PlayerOutput;
-    stagedReviewerResult?: PlayerOutput;
-}
-export type DecideEvent = {
-    type: 'START_DECIDE';
-    callerTopic: string;
-} | {
-    type: 'BOSS_INTERRUPT';
-    targetId: JumpableStateId;
-    bossIntent: string;
-} | {
-    type: 'BOSS_REPLY';
-    questionId?: ResumableStateId;
-    answer: string;
+    readonly question: string;
+};
+export type PendingBossQuestions = Partial<Record<ResumableStateId, PendingBossQuestion>>;
+export type BossReplies = Partial<Record<ResumableStateId, string>>;
+declare const CODER_PROPOSAL_RESULTS: {
+    readonly proposed: "Coder affirmatively provided a complete design proposal; a progress report, status update, or promise of a later proposal supports no proposal outcome.";
+    readonly needsBossReply: "The acting agent's prose surfaces a clarifying question for Boss that the agent cannot answer alone. Output shall include `question: <verbatim question text from the acting agent's prose>`.";
+};
+declare const REVIEWER_PROPOSAL_RESULTS: {
+    readonly proposed: "Reviewer affirmatively provided a complete design proposal; a progress report, status update, or promise of a later proposal supports no proposal outcome. Output shall include `reviewerProposal: <verbatim final text>`.";
+    readonly needsBossReply: "The acting agent's prose surfaces a clarifying question for Boss that the agent cannot answer alone. Output shall include `question: <verbatim question text from the acting agent's prose>`.";
+};
+declare const SYNTHESIZE_COMMIT_RESULTS: {
+    readonly committed: "Coder committed the synthesized design as one new commit. Output shall include `coderOutput: <verbatim final text>` and `latestCommit: <commit identity>`.";
+    readonly needsBossReply: "The acting agent's prose surfaces a clarifying question for Boss that the agent cannot answer alone. Output shall include `question: <verbatim question text from the acting agent's prose>`.";
+};
+type PlayerInputBase = {
+    readonly pendingBossQuestion?: PendingBossQuestion;
+    readonly bossReply?: string;
+};
+/** DECIDE-1: relays `<caller-topic>` as `callerTopic`. */
+export type CoderProposalInput = PlayerInputBase & {
+    readonly stateId: 'askCoderProposal';
+    readonly role: 'coder';
+    readonly sourceItem: 'DECIDE-1';
+    readonly prompt: string;
+    readonly result: typeof CODER_PROPOSAL_RESULTS;
+    readonly callerTopic: string;
+};
+/** DECIDE-2: relays `<caller-topic>` as `callerTopic`. */
+export type ReviewerProposalInput = PlayerInputBase & {
+    readonly stateId: 'askReviewerProposal';
+    readonly role: 'reviewer';
+    readonly sourceItem: 'DECIDE-2';
+    readonly prompt: string;
+    readonly result: typeof REVIEWER_PROPOSAL_RESULTS;
+    readonly callerTopic: string;
+};
+/**
+ * DECIDE-3: relays `<caller-topic>` as `callerTopic` and
+ * `<reviewer-proposal>` as `reviewerProposal`.
+ */
+export type SynthesizeCommitInput = PlayerInputBase & {
+    readonly stateId: 'synthesizeCommit';
+    readonly role: 'coder';
+    readonly sourceItem: 'DECIDE-3';
+    readonly prompt: string;
+    readonly result: typeof SYNTHESIZE_COMMIT_RESULTS;
+    readonly callerTopic: string;
+    readonly reviewerProposal: string;
+};
+export type PlayerInput = CoderProposalInput | ReviewerProposalInput | SynthesizeCommitInput;
+export type NeedsBossReplyOutput = {
+    readonly guard: 'needsBossReply';
+    readonly question: string;
+};
+export type CoderProposalOutput = {
+    readonly guard: 'proposed';
+} | NeedsBossReplyOutput;
+export type ReviewerProposalOutput = {
+    readonly guard: 'proposed';
+    readonly reviewerProposal: string;
+} | NeedsBossReplyOutput;
+export type SynthesizeCommitOutput = {
+    readonly guard: 'committed';
+    readonly coderOutput: string;
+    /** Effect-owned: the runtime fills it from the repository receipt. */
+    readonly latestCommit: string;
+} | NeedsBossReplyOutput;
+export type PlayerOutput = CoderProposalOutput | ReviewerProposalOutput | SynthesizeCommitOutput;
+/** DECIDE-4: literal call of the builtin `review` playbook. */
+export type PlaybookInput = {
+    readonly stateId: 'reviewCommit';
+    readonly sourceItem?: 'DECIDE-4';
+    readonly playbookId: typeof REVIEW_PLAYBOOK_ID;
+    readonly text: string;
+};
+/** The child machine output itself (or `undefined`), never a wrapper. */
+export type PlaybookOutput = JsonValue | undefined;
+/** Public output interface of the packaged builtin `review` workflow. */
+export type ReviewOutput = {
+    readonly noUnsettledFindings: true;
+    readonly evaluatedRevision: string;
 };
 export type DecideInput = Readonly<Record<string, never>>;
-export interface PlayerInput {
-    stateId: ResumableStateId;
-    sourceItem: string;
-    prompt: string;
-    result: Record<string, string>;
-    role: Role;
-    callerTopic?: string;
-    reviewerProposal?: string;
-    pendingBossQuestion?: PendingBossQuestion;
-    bossReply?: string;
-}
-type AdditionalPlayerFields = {
-    coderProposal?: string;
-    reviewerProposal?: string;
-    coderOutput?: string;
-    latestCommit?: string;
-    question?: string;
-    readonly [key: string]: unknown;
+export type ReviewStatus = 'aborted' | 'error';
+/**
+ * Typed run context. A text field holds `''` until its producer runs; every
+ * transition that reads one guards it as non-empty first.
+ */
+export type DecideContext = {
+    /** `<caller-topic>`: set by START_DECIDE or a restarting BOSS_INTERRUPT. */
+    readonly callerTopic: string;
+    /** Branch-staged results; the parallel join promotes them atomically. */
+    readonly stagedCoderProposed: boolean;
+    readonly stagedReviewerProposal: string;
+    /** Promoted proposal results. */
+    readonly coderProposed: boolean;
+    /** `<reviewer-proposal>`. */
+    readonly reviewerProposal: string;
+    /** `<coder-output>`. */
+    readonly coderOutput: string;
+    /** `<decide-commit>`: DECIDE-3's accepted, receipt-owned `latestCommit`. */
+    readonly decideCommit: string;
+    /** REVIEW's evaluated repository revision on approval. */
+    readonly evaluatedRevision: string;
+    readonly reviewStatus: ReviewStatus | null;
+    readonly reviewError: CompactError | null;
+    readonly lastError: ErrorRecord | null;
+    readonly pendingBossQuestions: PendingBossQuestions;
+    readonly bossReplies: BossReplies;
 };
-export type PlayerOutput = ({
-    guard: 'proposed';
-    coderProposal: string;
-} & AdditionalPlayerFields) | ({
-    guard: 'proposed';
-    reviewerProposal: string;
-} & AdditionalPlayerFields) | ({
-    guard: 'committed';
-    coderOutput: string;
-    latestCommit: string;
-} & AdditionalPlayerFields) | ({
-    guard: 'needsBossReply';
-    question: string;
-} & AdditionalPlayerFields);
-export interface PlaybookInput {
-    stateId: 'reviewCommit';
-    sourceItem: 'DECIDE-4';
-    playbookId: 'review';
-    text: string;
-}
-export declare const decideMachine: import("xstate").StateMachine<DecideContext, {
-    type: "START_DECIDE";
-    callerTopic: string;
+export type DecideEvent = {
+    readonly type: 'START_DECIDE';
+    readonly callerTopic: string;
 } | {
-    type: "BOSS_INTERRUPT";
-    targetId: JumpableStateId;
-    bossIntent: string;
+    readonly type: 'BOSS_INTERRUPT';
+    readonly targetId: 'independentProposals';
+    /** The new topic both proposal players receive. */
+    readonly callerTopic: string;
 } | {
-    type: "BOSS_REPLY";
-    questionId?: ResumableStateId;
-    answer: string;
-}, {
-    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<JsonValue | undefined, PlaybookInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | undefined;
+    readonly type: 'BOSS_INTERRUPT';
+    readonly targetId: 'synthesizeCommit';
+} | {
+    readonly type: 'BOSS_REPLY';
+    readonly questionId: string;
+    readonly answer: string;
+};
+/** Exactly the catalog's public `decide` output interface. */
+export type DecideOutput = {
+    readonly decideCommit: string;
+    readonly evaluatedRevision: string;
+    readonly noUnsettledFindings: true;
+} | {
+    readonly lastDecideCommit: string;
+    readonly noUnsettledFindings: false;
+    readonly reviewStatus: ReviewStatus;
+    readonly error?: CompactError;
+};
+/**
+ * Recognizes an authored rejected child result: a validated public result
+ * whose status is `aborted` or `error`, or `ok` at the child's authored
+ * failure terminal. Anything else is a control-plane error.
+ */
+export declare function authoredChildResult(error: unknown, expectedPlaybookId: string): PlaybookCallResult | undefined;
+export declare const decideMachine: import("xstate").StateMachine<DecideContext, import("xstate").AnyEventObject, {
+    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | undefined;
 }, {
     src: "playbook";
-    logic: import("xstate").PromiseActorLogic<JsonValue | undefined, PlaybookInput, import("xstate").EventObject>;
+    logic: import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>;
     id: string | undefined;
 } | {
     src: "player";
@@ -145,21 +201,33 @@ export declare const decideMachine: import("xstate").StateMachine<DecideContext,
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "rememberBossReply";
-    params: import("xstate").NonReducibleUnknown;
+    params: {
+        readonly stateId: ResumableStateId;
+    };
 } | {
-    type: "clearBossReplyContext";
+    type: "rememberMalformedPlayerOutput";
+    params: {
+        readonly sourceItem: DecideSourceItem;
+    };
+} | {
+    type: "rememberAuthoredReviewFailure";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "setPendingBossQuestion";
-    params: PendingBossQuestionParams;
+    params: {
+        readonly stateId: ResumableStateId;
+    };
 } | {
-    type: "rememberMalformedBossReply";
+    type: "restartFromInterrupt";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "copyInterruptedTopic";
+    type: "rememberEmptyBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "copyStartTopic";
+    type: "rememberUnknownBossReply";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "startDecide";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "stageCoderProposal";
@@ -174,52 +242,71 @@ export declare const decideMachine: import("xstate").StateMachine<DecideContext,
     type: "rememberCommit";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberReviewSuccess";
+    type: "rememberReviewApproval";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberReviewFailure";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberReviewProtocolFailure";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberMalformedActorOutput";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "clearBranchBossReplyContext";
-    params: {
-        stateId: ResumableStateId;
-    };
-} | {
-    type: "clearProposalRoundContext";
+    type: "rememberUnestablishedReview";
     params: import("xstate").NonReducibleUnknown;
 }, {
-    type: "authoredReviewFailure";
+    type: "needsBossReply";
     params: unknown;
 } | {
-    type: "needsBossReplyWithQuestion";
+    type: "authoredReviewFailure";
     params: unknown;
 } | {
     type: "committed";
     params: unknown;
 } | {
+    type: "interruptTargets";
+    params: {
+        readonly targetId: JumpableStateId;
+    };
+} | {
+    type: "bossReplyIsEmpty";
+    params: {
+        readonly stateId: ResumableStateId;
+    };
+} | {
+    type: "bossReplyResumes";
+    params: {
+        readonly stateId: ResumableStateId;
+    };
+} | {
+    type: "bossReplyNamesNoPendingQuestion";
+    params: unknown;
+} | {
+    type: "validStartTopic";
+    params: unknown;
+} | {
+    type: "coderProposedJoining";
+    params: unknown;
+} | {
     type: "coderProposed";
+    params: unknown;
+} | {
+    type: "reviewerProposedJoining";
     params: unknown;
 } | {
     type: "reviewerProposed";
     params: unknown;
 } | {
-    type: "needsBossReplyWithoutQuestion";
+    type: "reviewApproved";
     params: unknown;
-} | {
-    type: "validReviewSuccess";
-    params: unknown;
-}, never, "done" | "failed" | "ready" | "awaitBossReply" | "commitCoderProposal" | "reviewCommit" | "reportedReviewFailure" | {
+}, never, "done" | "failed" | "ready" | "awaitBossReply" | "synthesizeCommit" | "reviewCommit" | "reportedReviewFailure" | {
     independentProposals: {
-        coder: "complete" | "working" | "waiting";
-        reviewer: "complete" | "working" | "waiting";
+        coderProposalRegion: "askCoderProposal" | "awaitCoderProposalReply" | "coderProposalStaged";
+        reviewerProposalRegion: "askReviewerProposal" | "awaitReviewerProposalReply" | "reviewerProposalStaged";
     };
-}, string, Readonly<Record<string, never>>, DecideSuccessOutput | DecideFailureOutput, import("xstate").EventObject, import("xstate").MetaObject, {
+}, string, Readonly<Record<string, never>>, {
+    readonly decideCommit: string;
+    readonly evaluatedRevision: string;
+    readonly noUnsettledFindings: true;
+} | {
+    readonly lastDecideCommit: string;
+    readonly noUnsettledFindings: false;
+    readonly reviewStatus: ReviewStatus;
+    readonly error?: CompactError;
+}, import("xstate").EventObject, import("xstate").MetaObject, {
     id: "decide";
     states: {
         readonly ready: {
@@ -228,32 +315,38 @@ export declare const decideMachine: import("xstate").StateMachine<DecideContext,
         readonly independentProposals: {
             id: "independentProposals";
             states: {
-                readonly coder: {
+                readonly coderProposalRegion: {
+                    id: "coderProposalRegion";
                     states: {
-                        readonly working: {
+                        readonly askCoderProposal: {
                             id: "askCoderProposal";
                         };
-                        readonly waiting: {
-                            id: "waitCoderProposalReply";
+                        readonly awaitCoderProposalReply: {
+                            id: "awaitCoderProposalReply";
                         };
-                        readonly complete: {};
+                        readonly coderProposalStaged: {
+                            id: "coderProposalStaged";
+                        };
                     };
                 };
-                readonly reviewer: {
+                readonly reviewerProposalRegion: {
+                    id: "reviewerProposalRegion";
                     states: {
-                        readonly working: {
+                        readonly askReviewerProposal: {
                             id: "askReviewerProposal";
                         };
-                        readonly waiting: {
-                            id: "waitReviewerProposalReply";
+                        readonly awaitReviewerProposalReply: {
+                            id: "awaitReviewerProposalReply";
                         };
-                        readonly complete: {};
+                        readonly reviewerProposalStaged: {
+                            id: "reviewerProposalStaged";
+                        };
                     };
                 };
             };
         };
-        readonly commitCoderProposal: {
-            id: "commitCoderProposal";
+        readonly synthesizeCommit: {
+            id: "synthesizeCommit";
         };
         readonly awaitBossReply: {
             id: "awaitBossReply";
