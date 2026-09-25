@@ -1109,6 +1109,35 @@ function proseRejection(
   return undefined;
 }
 
+/**
+ * CAPTAIN-9: a prose call answered with the routing envelope of a `respond`
+ * selection — exactly `{"action": "respond", "text": <string>}`, with nothing
+ * but whitespace around it — said its prose in the decision shape, so the
+ * prose is that `text`, which then passes the same validation as any reply.
+ * Refusing the envelope instead spends the one corrective re-ask on a shape
+ * whose meaning is unambiguous, and a model that answers the same way twice
+ * costs the Boss the whole reply. Any other JSON stays control JSON.
+ */
+function respondEnvelopeText(reply: string | undefined): string | undefined {
+  const trimmed = reply?.trim();
+  if (trimmed === undefined || !trimmed.startsWith('{')) return reply;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return reply;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return reply;
+  }
+  const members = parsed as Record<string, unknown>;
+  return Object.keys(members).length === 2 &&
+    members.action === 'respond' &&
+    typeof members.text === 'string'
+    ? members.text
+    : reply;
+}
+
 type CaptainToolIsolation = 'provider-enforced' | 'prompt-only';
 
 // DR-013 A1: adapters with no provider-enforced tool-restriction surface.
@@ -6864,7 +6893,7 @@ export function createPlaybookCaptainShell(
     outcome: DurableCallOutcome,
     compose: (options: { reseedDigest?: string; proseRejection?: string }) => string,
   ): Promise<void> => {
-    let text = outcome.finalText;
+    let text = respondEnvelopeText(outcome.finalText);
     const rejection = replyRejection(text);
     if (rejection !== undefined) {
       // DR-028 §26: the reseed already was this call's single corrective, so a
@@ -6876,7 +6905,7 @@ export function createPlaybookCaptainShell(
       const reasked = await durableCall(context, (options) =>
         compose({ ...options, proseRejection: rejection }),
       );
-      text = reasked.finalText;
+      text = respondEnvelopeText(reasked.finalText);
       const second = replyRejection(text);
       if (second !== undefined) {
         throw markControlFailure(new CaptainProseError(second));
@@ -7756,11 +7785,12 @@ export function createPlaybookCaptainShell(
       journalAction({ action: 'respond' });
       const reask = decisionCall;
       if (reask === undefined) {
-        const rejection = replyRejection(selection.text);
+        const text = respondEnvelopeText(selection.text);
+        const rejection = replyRejection(text);
         if (rejection !== undefined) {
           throw markControlFailure(new CaptainProseError(rejection));
         }
-        await surfaceSettlement({ context, text: selection.text });
+        await surfaceSettlement({ context, text: text! });
       } else {
         await surfaceProse(
           context,

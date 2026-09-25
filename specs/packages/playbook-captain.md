@@ -588,6 +588,7 @@ not be surfaced, and the shell shall read all three identifier sets
 from live shell state and from its own record of what it composed this
 turn rather than from a fixed list, so an identifier minted or
 recompiled later is covered without one.
+Before that validation, the shell shall read a reply that is exactly one JSON object `{"action": "respond", "text": <string>}`, with no other member and nothing but whitespace around it, as that `text`, so prose returned in the routing shape is validated and surfaced as prose while every other reply carrying control JSON stays refused.
 The state-identifier duty holds only because the grounding no longer
 depends on the identifier: the digest's state line supplies the
 runtime's published state description
@@ -1772,6 +1773,7 @@ The suite shall fail unless that corrective re-ask is a real call for
 a model-decided `respond` too: the captured re-ask shall resume the
 decision call's own pinned token and carry the rejection reason, and a
 clean second answer shall be the surfaced captain speech.
+The suite shall fail unless a closing reply returned as exactly the `respond` routing envelope surfaces its `text` as the turn's captain speech on the first call, with no corrective re-ask, no failure reply, and no envelope syntax on the Boss surface.
 The suite shall fail unless a reply carrying an engagement's live
 generated session id is refused with one corrective re-ask naming the
 leaked identifier, that id never reaching the Boss surface.

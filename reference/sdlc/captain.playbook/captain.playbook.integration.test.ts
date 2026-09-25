@@ -6315,6 +6315,36 @@ describe('CAPTAIN-40 injection and prose validation', () => {
     expect(JSON.stringify(harness.surfaced)).not.toContain('"action"');
   });
 
+  // CAPTAIN-9: prose returned in the `respond` routing shape is prose. A live
+  // closing reply answered as that envelope twice, spending the one re-ask and
+  // then the whole reply, so the shell reads exactly that shape as its `text`
+  // and the first call's words reach the Boss.
+  it('surfaces a closing reply given as the respond envelope as its text', async () => {
+    const text = 'CODE is working on the parser fix now.';
+    const code = shellEntry('code', 'code');
+    const harness = makeShellHarness(
+      [code],
+      [
+        {
+          status: 'ok',
+          finalText: `\n  ${JSON.stringify({ action: 'respond', text })}  \n`,
+        },
+      ],
+    );
+    await harness.init();
+    await harness.turn('/code fix the parser', 1);
+
+    expect(harness.captainCalls).toHaveLength(1);
+    expect(harness.closingPrompts()).toHaveLength(1);
+    expect(
+      harness.captainCalls.filter((call) =>
+        call.prompt.includes('[Reply rejected]'),
+      ),
+    ).toEqual([]);
+    expect(harness.surfaced).toEqual([text]);
+    expect(JSON.stringify(harness.surfaced)).not.toContain('"action"');
+  });
+
   // CAPTAIN-9's live-session-identifier duty: the rejectable set is read from
   // shell state, so a session id the shell minted at engagement time is
   // refused without any literal appearing in the shell source.

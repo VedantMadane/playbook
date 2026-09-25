@@ -410,6 +410,36 @@ function proseRejection(prose, liveSessionIds = [], liveStateIds = [], suppliedI
     }
     return undefined;
 }
+/**
+ * CAPTAIN-9: a prose call answered with the routing envelope of a `respond`
+ * selection — exactly `{"action": "respond", "text": <string>}`, with nothing
+ * but whitespace around it — said its prose in the decision shape, so the
+ * prose is that `text`, which then passes the same validation as any reply.
+ * Refusing the envelope instead spends the one corrective re-ask on a shape
+ * whose meaning is unambiguous, and a model that answers the same way twice
+ * costs the Boss the whole reply. Any other JSON stays control JSON.
+ */
+function respondEnvelopeText(reply) {
+    const trimmed = reply?.trim();
+    if (trimmed === undefined || !trimmed.startsWith('{'))
+        return reply;
+    let parsed;
+    try {
+        parsed = JSON.parse(trimmed);
+    }
+    catch {
+        return reply;
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        return reply;
+    }
+    const members = parsed;
+    return Object.keys(members).length === 2 &&
+        members.action === 'respond' &&
+        typeof members.text === 'string'
+        ? members.text
+        : reply;
+}
 // DR-013 A1: adapters with no provider-enforced tool-restriction surface.
 // Cligent's Codex, Kimi, and OpenCode adapters reject any `allowedTools`
 // value — including the empty list that expresses tool-free — because their
@@ -4627,7 +4657,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
     // Captain speech (DR-029): all durable calls are hidden; the shell
     // validates the returned prose and surfaces it through `emitReply`.
     const surfaceProse = async (context, outcome, compose) => {
-        let text = outcome.finalText;
+        let text = respondEnvelopeText(outcome.finalText);
         const rejection = replyRejection(text);
         if (rejection !== undefined) {
             // DR-028 §26: the reseed already was this call's single corrective, so a
@@ -4637,7 +4667,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             }
             // DR-028's single corrective re-ask on the same durable conversation.
             const reasked = await durableCall(context, (options) => compose({ ...options, proseRejection: rejection }));
-            text = reasked.finalText;
+            text = respondEnvelopeText(reasked.finalText);
             const second = replyRejection(text);
             if (second !== undefined) {
                 throw markControlFailure(new CaptainProseError(second));
@@ -5375,11 +5405,12 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             journalAction({ action: 'respond' });
             const reask = decisionCall;
             if (reask === undefined) {
-                const rejection = replyRejection(selection.text);
+                const text = respondEnvelopeText(selection.text);
+                const rejection = replyRejection(text);
                 if (rejection !== undefined) {
                     throw markControlFailure(new CaptainProseError(rejection));
                 }
-                await surfaceSettlement({ context, text: selection.text });
+                await surfaceSettlement({ context, text: text });
             }
             else {
                 await surfaceProse(context, { ...reask.outcome, finalText: selection.text }, reask.compose);
