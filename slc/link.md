@@ -38,15 +38,20 @@ The link compiler shall not modify the FSM artifact and shall not re-derive Capt
 
 ## Optional deterministic materialization
 
-For an ordinary flat workflow using only `player` and `script` actors,
-the supported prompt profile below, shared remaining strategies, and primitive configured options, the linker may
+For an ordinary workflow using only `player` and `script` actors — flat, or
+with root parallel groups of the [Parallel groups](gears2fsm.md#parallel-groups)
+shape — the supported prompt profile below, shared remaining strategies, and primitive configured options, the linker may
 use the adjacent `materialize-link.mjs` tool to emit the thin module.
 The complete definition below remains binding; the tool replaces repetitive
 module generation, not semantic analysis or emitted conformance verification.
 Read the actual FSM and supply every erased or authored contract exactly.
 Do not use `flat-defaults` or `flat-quoted-relays` when another custom composer, classifier, required-field
 extractor, session-derived input mapping, controller strategy, nested call,
-parallel state, or compound state is needed.
+or compound state other than such a parallel group is needed.
+Despite their names, every profile accepts those parallel groups: the tool
+takes each region working leaf's role and label under its stable state id
+like any other player state, declares nothing further, and leaves the
+compiled shape to the factory preflight, which rejects any other form.
 
 Invoke the tool with the actual definition directory, source FSM, and declared
 target; supply a JSON descriptor on standard input:
@@ -131,8 +136,9 @@ correct the identified problem before treating linking as successful.
 
 ### Experimental labelled-string and nested-call profile
 
-`flat-labelled-relays` is an unmeasured candidate for flat single-region
-machines with delegated players, scripts, and nested `playbook` calls. It
+`flat-labelled-relays` is an unmeasured candidate for machines with flat
+root states or root parallel groups of that shape, whose delegated players,
+scripts, and nested `playbook` calls it supports. It
 requires the installed shared `composePlayerContinuation` API. It leaves
 nested input composition, child targets, result guards, recovery, and terminal
 semantics in the unchanged FSM; the shared factory provides the nested bridge.
@@ -160,8 +166,8 @@ source tokens. Undeclared empty relay lines retain their authored text.
 The emitted verification composer has the same identity and optional third
 resume arguments as the runtime; the shared helper owns fresh/resumed Q&A.
 Structured rendering, custom classifiers/extractors/controllers, direct
-Captain actors, compound/parallel topology, and constrained/nonprimitive
-options remain unsupported. Source-derived metadata and all existing
+Captain actors, compound topology other than such a parallel group, and
+constrained/nonprimitive options remain unsupported. Source-derived metadata and all existing
 conformance checks remain mandatory. This profile changes no runtime bridge,
 workflow semantics, or measured performance claim.
 

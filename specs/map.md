@@ -83,7 +83,7 @@ meta.md       The spec of specs
 | [DR-055](decisions/055-public-workflow-contracts.md) | 055-public-workflow-contracts.md | Public builtin output interfaces as separately packaged compiler inputs, without maintained implementation artifacts |
 | [DR-056](decisions/056-shared-child-result-validation.md) | 056-shared-child-result-validation.md | Reuse the existing pure child-result validator in FSMs without runner binding |
 | [DR-057](decisions/057-public-linked-option-validator.md) | 057-public-linked-option-validator.md | Pure public artifact option validation for deterministic entries without engine changes |
-| [DR-058](decisions/058-link-materialization-tool.md) | 058-link-materialization-tool.md | Optional thin-module materializer retained for measured flat quoted-relay linking and one accepted labelled CODE comparison |
+| [DR-058](decisions/058-link-materialization-tool.md) | 058-link-materialization-tool.md | Optional thin-module materializer retained for measured flat quoted-relay linking and one accepted labelled CODE comparison, extended to the compiled parallel shape |
 | [DR-059](decisions/059-helper-backed-compact-link.md) | 059-helper-backed-compact-link.md | Rejected helper-backed compact recipe: no measured speed improvement |
 | [DR-060](decisions/060-compact-link-definition.md) | 060-compact-link-definition.md | Rejected compact link-definition experiment: no demonstrated successful compilation improvement |
 | [DR-061](decisions/061-dev-analyst-plans-the-path.md) | 061-dev-analyst-plans-the-path.md | DEV's Analyst plans the path: a bounded planning note, a route-changing Boss question only, and analysis, design, and implementation left to the called playbooks |
@@ -115,7 +115,7 @@ meta.md       The spec of specs
 | [git.md](packages/git.md) | Commit preparation, message format, and AI co-authorship |
 | [licensing.md](packages/licensing.md) | SPDX header scope, requirements, and repository checks |
 | [link-experiments.md](packages/link-experiments.md) | Isolated matched Playbook 13.2 compiler-definition experiments and frozen input identity |
-| [link-materialization.md](packages/link-materialization.md) | Optional link materialization, supported labelled/nested CODE profile, strict descriptor, atomic emission, and semantic closure |
+| [link-materialization.md](packages/link-materialization.md) | Optional link materialization, supported labelled/nested CODE profile, compiled parallel shape, strict descriptor, atomic emission, and semantic closure |
 | [playbook.md](packages/playbook.md) | CODE, REVIEW, DECIDE, DEV, BRANCH, and PR source, GEARS, FSM, prompt, transition, nesting, script-state, and terminal conformance |
 | [playbook-captain.md](packages/playbook-captain.md) | Registry, routing, explicit role binding, Captain-session player continuity, engagement stack, and host lifecycle |
 | [playbook-cli.md](packages/playbook-cli.md) | Interactive and headless launch, player config, durable session reopening, provisioning, persistence, the shared session store, replay stream, and worktree host-capabilities facade, and checks |

@@ -235,27 +235,46 @@ function validateDescriptor(value, engine) {
 function inspectMachine(machine, engine, labelled = false) {
   const config = machine?.config;
   if (!config || typeof config !== 'object' || !config.states) throw new TypeError('FSM export must be an XState machine');
-  if (config.type === 'parallel' || config.invoke) throw new UnsupportedLinkProfile('root parallel states or invocations require ordinary linking');
+  if (config.type === 'parallel' || config.invoke) throw new UnsupportedLinkProfile('a parallel machine root or root invocation requires ordinary linking');
   const descriptions = engine.stateDescriptionsFromMachine(machine);
   const roleStates = Object.create(null);
   let hasScript = false;
-  for (const [key, state] of Object.entries(config.states)) {
+  const children = (value) => value && typeof value === 'object' ? Object.entries(value) : [];
+  const inspectState = (key, state) => {
     if (RESERVED_KEYS.has(key)) throw new UnsupportedLinkProfile(`state ${key} requires ordinary linking`);
     if (!state || typeof state !== 'object') throw new TypeError(`state ${key} must be an object`);
-    if (state.states || (state.type !== undefined && !['atomic', 'final'].includes(state.type))) {
-      throw new UnsupportedLinkProfile(`state ${key} is outside the flat single-region profile`);
-    }
     const invokes = Array.isArray(state.invoke) ? state.invoke : state.invoke ? [state.invoke] : [];
     if (invokes.length > 1) throw new UnsupportedLinkProfile(`state ${key} has multiple actors`);
     for (const invoke of invokes) {
       if (!(labelled ? ['player', 'script', 'playbook'] : ['player', 'script']).includes(invoke.src)) throw new UnsupportedLinkProfile(`state ${key} actor ${String(invoke.src)} requires ordinary linking`);
       if (invoke.src === 'script') hasScript = true;
       else if (invoke.src === 'player') {
-        const role = nonempty(state.meta?.playbook?.role, `state ${key} role`);
-        const label = nonempty(descriptions.get(key), `state ${key} description`);
-        roleStates[key] = { role, label };
+        // The engine keys a player state by its stable playbook id, which a
+        // parallel region's leaf carries distinct from its local key.
+        const stateId = typeof state.meta?.playbook?.stateId === 'string' ? state.meta.playbook.stateId
+          : typeof state.id === 'string' ? state.id : key;
+        if (RESERVED_KEYS.has(stateId)) throw new UnsupportedLinkProfile(`state ${stateId} requires ordinary linking`);
+        const role = nonempty(state.meta?.playbook?.role, `state ${stateId} role`);
+        const label = nonempty(descriptions.get(stateId), `state ${stateId} description`);
+        roleStates[stateId] = { role, label };
       }
     }
+  };
+  for (const [key, state] of Object.entries(config.states)) {
+    if (RESERVED_KEYS.has(key)) throw new UnsupportedLinkProfile(`state ${key} requires ordinary linking`);
+    if (!state || typeof state !== 'object') throw new TypeError(`state ${key} must be an object`);
+    if (state.type === 'parallel') {
+      // DR-067: walk a root parallel state's region leaves; the engine's
+      // construction preflight below owns validation of the compiled shape.
+      for (const [, region] of children(state.states)) {
+        for (const [leafKey, leaf] of children(region?.states)) inspectState(leafKey, leaf);
+      }
+      continue;
+    }
+    if (state.states || (state.type !== undefined && !['atomic', 'final'].includes(state.type))) {
+      throw new UnsupportedLinkProfile(`state ${key} is outside the flat single-region profile`);
+    }
+    inspectState(key, state);
   }
   return { roleStates, hasScript };
 }
