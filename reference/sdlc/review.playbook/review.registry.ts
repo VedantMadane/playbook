@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import createPlaybookRuntime, {
-  type ReviewPlaybookHostCapabilities,
+  type PlaybookHostCapabilities,
   type PlaybookRuntime,
 } from './review.playbook.js';
+import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
 
 export interface PlaybookSummaryPolicy {
   stateCountLabels: Readonly<Record<string, string>>;
@@ -33,20 +34,23 @@ export interface ReviewPlaybookRegistryEntry {
   concurrentRoleSets: readonly [];
   summaryPolicy: PlaybookSummaryPolicy;
   validateOptions(optionSlice: unknown): ReviewOptions;
+  // The linked module types live authority as opaque (link-materialization);
+  // the Captain entry binds its own construction capabilities here.
   createRuntime(
     options: ReviewOptions,
-    hostCapabilities: ReviewPlaybookHostCapabilities,
+    hostCapabilities: PlaybookHostConstructionCapabilities &
+      PlaybookHostCapabilities,
   ): PlaybookRuntime;
 }
 
 export const reviewStateCountLabels = {
-  reviewInitial: 'review round',
+  reviewFirstRound: 'review round',
   reviewAfterCommit: 'review round',
-  reviewAfterRebuttal: 'rebuttal',
+  reviewAfterRejection: 'rebuttal',
 } as const;
 
 export const reviewCopyPasteGuardNames = [
-  'hasFindings',
+  'findings',
   'committed',
   'rejectedAll',
 ] as const;

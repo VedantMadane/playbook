@@ -178,13 +178,13 @@ export declare const devMachine: import("xstate").StateMachine<DevContext, {
     type: "rememberMalformedPlayerOutput";
     params: import("xstate").NonReducibleUnknown;
 } | {
+    type: "rememberMalformedBossReply";
+    params: import("xstate").NonReducibleUnknown;
+} | {
     type: "setPendingBossQuestion";
     params: PendingBossQuestionParams;
 } | {
     type: "clearBossReplyContext";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberMalformedBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "startDev";

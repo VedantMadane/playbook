@@ -3,14 +3,17 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { createActor, fromPromise, waitFor } from 'xstate';
 
 import { parseGearsContract } from '../../../scripts/check-slc-source-gears.mjs';
 import { ACCEPTED_OUTCOME_ACTION_TYPE } from '../../../src/accepted-outcome.js';
 import {
+  concurrentRoleSets,
   reviewMachine,
   type PlayerInput,
   type ReviewContext,
 } from './review.fsm.js';
+import { reviewPlaybookRegistryEntry } from './review.registry.js';
 
 interface RawState {
   tags?: readonly string[];
@@ -25,6 +28,7 @@ interface RawState {
 }
 
 interface RawMachineConfig {
+  on?: Record<string, RawTransition | readonly RawTransition[]>;
   states?: Record<string, RawState>;
 }
 
@@ -35,7 +39,8 @@ interface RawTransition {
 }
 
 interface TransitionFixture {
-  guard: string;
+  // `undefined` names the unguarded malformed-output fallback arm.
+  guard: string | undefined;
   target: string;
   context: ReviewContext;
   event: unknown;
@@ -47,15 +52,16 @@ const gears = new Map(
   ).map((item) => [item.id, item]),
 );
 
-const states = (
+const machineConfig = (
   reviewMachine as unknown as { config: RawMachineConfig }
-).config.states ?? {};
+).config;
+const states = machineConfig.states ?? {};
 
 const expected = [
-  ['reviewInitial', 'REVIEW-1'],
-  ['addressFindings', 'REVIEW-2'],
+  ['reviewFirstRound', 'REVIEW-1'],
+  ['fixFindings', 'REVIEW-2'],
   ['reviewAfterCommit', 'REVIEW-3'],
-  ['reviewAfterRebuttal', 'REVIEW-4'],
+  ['reviewAfterRejection', 'REVIEW-4'],
 ] as const;
 
 const context: ReviewContext = {
@@ -73,14 +79,16 @@ const done = (output: unknown) => ({
 
 const pendingContext = (
   stateId:
-    | 'reviewInitial'
-    | 'addressFindings'
+    | 'reviewFirstRound'
+    | 'fixFindings'
     | 'reviewAfterCommit'
-    | 'reviewAfterRebuttal',
+    | 'reviewAfterRejection',
   sourceItem: 'REVIEW-1' | 'REVIEW-2' | 'REVIEW-3' | 'REVIEW-4',
   roleId: 'coder' | 'reviewer',
+  extra: ReviewContext = {},
 ): ReviewContext => ({
   ...context,
+  ...extra,
   pendingBossQuestion: {
     questionId: stateId,
     resumeStateId: stateId,
@@ -90,34 +98,74 @@ const pendingContext = (
   },
 });
 
+const interrupt = (targetId: string) => ({
+  type: 'BOSS_INTERRUPT',
+  targetId,
+  bossIntent: 'Redo this round.',
+});
+
 const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
-  'reviewInitial.invoke.onDone': [
+  // Each Boss jump is guarded by its target id and by the typed context the
+  // target round needs, so no round is entered without its evidence.
+  'root.on.BOSS_INTERRUPT': [
     {
-      guard: 'hasFindings',
-      target: '#addressFindings',
-      context,
-      event: done({ guard: 'hasFindings', reviewerOutput: 'Finding 1' }),
+      guard: 'canInterruptTo',
+      target: '#reviewFirstRound',
+      context: { callerInput: 'Initial request' },
+      event: interrupt('reviewFirstRound'),
     },
     {
-      guard: 'noFindings',
-      target: '#done',
+      guard: 'canInterruptTo',
+      target: '#fixFindings',
+      context,
+      event: interrupt('fixFindings'),
+    },
+    {
+      guard: 'canInterruptTo',
+      target: '#reviewAfterCommit',
+      context: { ...context, coderOutcome: 'committed' },
+      event: interrupt('reviewAfterCommit'),
+    },
+    {
+      guard: 'canInterruptTo',
+      target: '#reviewAfterRejection',
+      context: { ...context, coderOutcome: 'rejectedAll' },
+      event: interrupt('reviewAfterRejection'),
+    },
+  ],
+  'reviewFirstRound.invoke.onDone': [
+    {
+      guard: 'isFindings',
+      target: 'fixFindings',
+      context,
+      event: done({ guard: 'findings', reviewerOutput: 'Finding 1' }),
+    },
+    {
+      guard: 'isClean',
+      target: 'done',
       context,
       event: done({
-        guard: 'noFindings',
+        guard: 'clean',
         evaluatedRevision: '3333333333333333333333333333333333333333',
       }),
     },
     {
       guard: 'needsBossReply',
-      target: '#awaitBossReply',
+      target: 'awaitBossReply',
       context,
       event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
     },
-  ],
-  'addressFindings.invoke.onDone': [
     {
-      guard: 'committed',
-      target: '#reviewAfterCommit',
+      guard: undefined,
+      target: 'failed',
+      context,
+      event: done({ guard: 'findings' }),
+    },
+  ],
+  'fixFindings.invoke.onDone': [
+    {
+      guard: 'isCommitted',
+      target: 'reviewAfterCommit',
       context,
       event: done({
         guard: 'committed',
@@ -126,8 +174,8 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       }),
     },
     {
-      guard: 'rejectedAll',
-      target: '#reviewAfterRebuttal',
+      guard: 'isRejectedAll',
+      target: 'reviewAfterRejection',
       context,
       event: done({
         guard: 'rejectedAll',
@@ -136,84 +184,116 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
     },
     {
       guard: 'needsBossReply',
-      target: '#awaitBossReply',
+      target: 'awaitBossReply',
       context,
       event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
+    },
+    {
+      // A commit claim without the receipt-derived commit identity accepts
+      // no arm and fails closed.
+      guard: undefined,
+      target: 'failed',
+      context,
+      event: done({ guard: 'committed', coderOutput: 'Committed.' }),
     },
   ],
   'reviewAfterCommit.invoke.onDone': [
     {
-      guard: 'hasFindings',
-      target: '#addressFindings',
+      guard: 'isFindings',
+      target: 'fixFindings',
       context,
-      event: done({ guard: 'hasFindings', reviewerOutput: 'Finding 2' }),
+      event: done({ guard: 'findings', reviewerOutput: 'Finding 2' }),
     },
     {
-      guard: 'noFindings',
-      target: '#done',
+      guard: 'isClean',
+      target: 'done',
       context,
       event: done({
-        guard: 'noFindings',
+        guard: 'clean',
         evaluatedRevision: '3333333333333333333333333333333333333333',
       }),
     },
     {
       guard: 'needsBossReply',
-      target: '#awaitBossReply',
+      target: 'awaitBossReply',
       context,
       event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
     },
-  ],
-  'reviewAfterRebuttal.invoke.onDone': [
     {
-      guard: 'hasFindings',
-      target: '#addressFindings',
+      guard: undefined,
+      target: 'failed',
       context,
-      event: done({ guard: 'hasFindings', reviewerOutput: 'Finding remains' }),
+      event: done({ guard: 'clean' }),
+    },
+  ],
+  'reviewAfterRejection.invoke.onDone': [
+    {
+      guard: 'isFindings',
+      target: 'fixFindings',
+      context,
+      event: done({ guard: 'findings', reviewerOutput: 'Finding remains' }),
     },
     {
-      guard: 'noFindings',
-      target: '#done',
+      guard: 'isClean',
+      target: 'done',
       context,
       event: done({
-        guard: 'noFindings',
+        guard: 'clean',
         evaluatedRevision: '3333333333333333333333333333333333333333',
       }),
     },
     {
       guard: 'needsBossReply',
-      target: '#awaitBossReply',
+      target: 'awaitBossReply',
       context,
       event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
     },
+    {
+      guard: undefined,
+      target: 'failed',
+      context,
+      event: done({ guard: 'needsBossReply', question: '  ' }),
+    },
   ],
+  // A resume also requires the typed context its round needs, so each
+  // follow-up round's fixture carries the Coder disposition that entered it.
   'awaitBossReply.on.BOSS_REPLY': [
     {
       guard: 'emptyBossReply',
       target: '#failed',
-      context: pendingContext('reviewInitial', 'REVIEW-1', 'reviewer'),
-      event: { type: 'BOSS_REPLY', questionId: 'reviewInitial', answer: '  ' },
-    },
-    {
-      guard: 'resumeReviewInitial',
-      target: '#reviewInitial',
-      context: pendingContext('reviewInitial', 'REVIEW-1', 'reviewer'),
-      event: { type: 'BOSS_REPLY', questionId: 'reviewInitial', answer: 'Answer' },
-    },
-    {
-      guard: 'resumeAddressFindings',
-      target: '#addressFindings',
-      context: pendingContext('addressFindings', 'REVIEW-2', 'coder'),
+      context: pendingContext('reviewFirstRound', 'REVIEW-1', 'reviewer'),
       event: {
         type: 'BOSS_REPLY',
-        questionId: 'addressFindings',
+        questionId: 'reviewFirstRound',
+        answer: '  ',
+      },
+    },
+    {
+      guard: 'resumesState',
+      target: '#reviewFirstRound',
+      context: pendingContext('reviewFirstRound', 'REVIEW-1', 'reviewer'),
+      event: {
+        type: 'BOSS_REPLY',
+        questionId: 'reviewFirstRound',
         answer: 'Answer',
       },
     },
     {
-      guard: 'resumeReviewAfterCommit',
+      guard: 'resumesState',
+      target: '#fixFindings',
+      context: pendingContext('fixFindings', 'REVIEW-2', 'coder'),
+      event: {
+        type: 'BOSS_REPLY',
+        questionId: 'fixFindings',
+        answer: 'Answer',
+      },
+    },
+    {
+      guard: 'resumesState',
       target: '#reviewAfterCommit',
-      context: pendingContext('reviewAfterCommit', 'REVIEW-3', 'reviewer'),
+      context: pendingContext('reviewAfterCommit', 'REVIEW-3', 'reviewer', {
+        coderOutcome: 'committed',
+      }),
       event: {
         type: 'BOSS_REPLY',
         questionId: 'reviewAfterCommit',
@@ -221,12 +301,14 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       },
     },
     {
-      guard: 'resumeReviewAfterRebuttal',
-      target: '#reviewAfterRebuttal',
-      context: pendingContext('reviewAfterRebuttal', 'REVIEW-4', 'reviewer'),
+      guard: 'resumesState',
+      target: '#reviewAfterRejection',
+      context: pendingContext('reviewAfterRejection', 'REVIEW-4', 'reviewer', {
+        coderOutcome: 'rejectedAll',
+      }),
       event: {
         type: 'BOSS_REPLY',
-        questionId: 'reviewAfterRebuttal',
+        questionId: 'reviewAfterRejection',
         answer: 'Answer',
       },
     },
@@ -238,6 +320,11 @@ function orderedTransitions(
   parent = '',
 ): Map<string, readonly RawTransition[]> {
   const found = new Map<string, readonly RawTransition[]>();
+  if (parent === '') {
+    for (const [event, transitions] of Object.entries(machineConfig.on ?? {})) {
+      if (Array.isArray(transitions)) found.set(`root.on.${event}`, transitions);
+    }
+  }
   for (const [key, state] of Object.entries(current)) {
     const path = parent === '' ? key : `${parent}.${key}`;
     if (Array.isArray(state.invoke?.onDone)) {
@@ -265,6 +352,12 @@ function guardName(guard: unknown): string | undefined {
   return typeof type === 'string' ? type : undefined;
 }
 
+function guardParams(guard: unknown): unknown {
+  return typeof guard === 'object' && guard !== null
+    ? (guard as { params?: unknown }).params
+    : undefined;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -289,6 +382,12 @@ function acceptedOutcomeMarkers(
 describe('REVIEW GEARS to FSM compilation', () => {
   it('maps every REVIEW item once with its canonical role and exact prompt', () => {
     expect([...gears.keys()]).toEqual(expected.map(([, item]) => item));
+    // playbook-1: the FSM export and the registry manifest agree on the
+    // (empty) ordered concurrent role sets.
+    expect(concurrentRoleSets).toEqual([]);
+    expect(concurrentRoleSets).toEqual(
+      reviewPlaybookRegistryEntry.concurrentRoleSets,
+    );
     for (const [stateId, sourceItem] of expected) {
       const item = gears.get(sourceItem);
       const input = states[stateId]?.invoke?.input?.({ context });
@@ -322,6 +421,33 @@ describe('REVIEW GEARS to FSM compilation', () => {
     }
   });
 
+  it('tells the adjudicator in every Reviewer outcome that a progress report supports none', () => {
+    // compiler-results-13 / playbook-21: the adjudicator reads only each
+    // outcome's result description, so the Source's qualification that a
+    // progress report, status update, or promise of a later result supports
+    // no review outcome sits in every Reviewer result the judge selects from.
+    const qualification =
+      'a progress report, status update, or promise of a later result does not support this outcome';
+    for (const [stateId, sourceItem] of expected) {
+      const input = states[stateId]?.invoke?.input?.({ context });
+      if (input?.role !== 'reviewer') continue;
+      expect(Object.keys(input.result), stateId).toEqual([
+        'findings',
+        'clean',
+        'needsBossReply',
+      ]);
+      for (const guard of ['findings', 'clean']) {
+        expect(input.result[guard], `${stateId}.${guard}`).toContain(
+          qualification,
+        );
+      }
+      for (const { guard, description } of gears.get(sourceItem)?.results ??
+        []) {
+        expect(description, `${sourceItem}.${guard}`).toContain(qualification);
+      }
+    }
+  });
+
   it('has one load-bearing fixture for every ordered transition arm', () => {
     const actual = orderedTransitions(states);
     expect([...actual.keys()]).toEqual(Object.keys(transitionFixtures));
@@ -347,7 +473,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
             ? true
             : guards[name](
                 { context: fixture.context, event: fixture.event },
-                undefined,
+                guardParams(arm.guard),
               );
         });
         expect(evaluations, `${location}[${index}]`).toEqual([
@@ -361,40 +487,40 @@ describe('REVIEW GEARS to FSM compilation', () => {
   it('marks all twelve governed outcomes with stable identities', () => {
     const governed = [
       {
-        stateId: 'reviewInitial',
+        stateId: 'reviewFirstRound',
         expected: [
           {
-            source: 'reviewInitial',
-            target: 'addressFindings',
-            acceptedOutcome: 'hasFindings',
+            source: 'reviewFirstRound',
+            target: 'fixFindings',
+            acceptedOutcome: 'findings',
           },
           {
-            source: 'reviewInitial',
+            source: 'reviewFirstRound',
             target: 'done',
-            acceptedOutcome: 'noFindings',
+            acceptedOutcome: 'clean',
           },
           {
-            source: 'reviewInitial',
+            source: 'reviewFirstRound',
             target: 'awaitBossReply',
             acceptedOutcome: 'needsBossReply',
           },
         ],
       },
       {
-        stateId: 'addressFindings',
+        stateId: 'fixFindings',
         expected: [
           {
-            source: 'addressFindings',
+            source: 'fixFindings',
             target: 'reviewAfterCommit',
             acceptedOutcome: 'committed',
           },
           {
-            source: 'addressFindings',
-            target: 'reviewAfterRebuttal',
+            source: 'fixFindings',
+            target: 'reviewAfterRejection',
             acceptedOutcome: 'rejectedAll',
           },
           {
-            source: 'addressFindings',
+            source: 'fixFindings',
             target: 'awaitBossReply',
             acceptedOutcome: 'needsBossReply',
           },
@@ -405,13 +531,13 @@ describe('REVIEW GEARS to FSM compilation', () => {
         expected: [
           {
             source: 'reviewAfterCommit',
-            target: 'addressFindings',
-            acceptedOutcome: 'hasFindings',
+            target: 'fixFindings',
+            acceptedOutcome: 'findings',
           },
           {
             source: 'reviewAfterCommit',
             target: 'done',
-            acceptedOutcome: 'noFindings',
+            acceptedOutcome: 'clean',
           },
           {
             source: 'reviewAfterCommit',
@@ -421,20 +547,20 @@ describe('REVIEW GEARS to FSM compilation', () => {
         ],
       },
       {
-        stateId: 'reviewAfterRebuttal',
+        stateId: 'reviewAfterRejection',
         expected: [
           {
-            source: 'reviewAfterRebuttal',
-            target: 'addressFindings',
-            acceptedOutcome: 'hasFindings',
+            source: 'reviewAfterRejection',
+            target: 'fixFindings',
+            acceptedOutcome: 'findings',
           },
           {
-            source: 'reviewAfterRebuttal',
+            source: 'reviewAfterRejection',
             target: 'done',
-            acceptedOutcome: 'noFindings',
+            acceptedOutcome: 'clean',
           },
           {
-            source: 'reviewAfterRebuttal',
+            source: 'reviewAfterRejection',
             target: 'awaitBossReply',
             acceptedOutcome: 'needsBossReply',
           },
@@ -446,17 +572,20 @@ describe('REVIEW GEARS to FSM compilation', () => {
       const onDone = states[stateId]?.invoke?.onDone;
       expect(Array.isArray(onDone), stateId).toBe(true);
       const arms = onDone as readonly RawTransition[];
-      expect(arms).toHaveLength(expected.length);
+      // The trailing unguarded malformed-output fallback accepts no outcome
+      // and so carries no marker.
+      expect(arms).toHaveLength(expected.length + 1);
       expect(
         arms.map((arm) => acceptedOutcomeMarkers(arm)),
         stateId,
-      ).toEqual(expected.map((marker) => [marker]));
+      ).toEqual([...expected.map((marker) => [marker]), []]);
+      expect(arms.at(-1)?.guard, stateId).toBeUndefined();
     }
   });
 
   it('keeps every round relay quoted, ordered, and receipt- or player-owned', () => {
     // Every round relays the complete caller input (original intent, review
-    // scope, and context) before the round-specific evidence.
+    // scope, and context) ahead of the round-specific evidence.
     expect(gears.get('REVIEW-1')?.prompt).toContain('> Original request: <caller-input>');
     expect(gears.get('REVIEW-2')?.prompt).toEqual(
       expect.arrayContaining(['> Original request: <caller-input>', '> Reviewer findings: <reviewer-output>']),
@@ -484,6 +613,17 @@ describe('REVIEW GEARS to FSM compilation', () => {
     expect(review3.indexOf('> Latest commit: <latest-commit>')).toBeLessThan(
       review3.indexOf('> Coder output: <coder-output>'),
     );
+    // DR-065: the prefix pass moved every relay block after the last
+    // instruction line, and the provenance section lists each moved item.
+    for (const [id, item] of gears) {
+      const firstRelay = item.prompt.findIndex((line) => line.startsWith('> '));
+      expect(firstRelay, id).toBeGreaterThan(0);
+      expect(item.prompt[firstRelay - 1], id).toBe('');
+      expect(
+        item.prompt.slice(firstRelay).every((line) => line.startsWith('> ')),
+        id,
+      ).toBe(true);
+    }
 
     const text = readFileSync(
       new URL('./review.gears.md', import.meta.url),
@@ -497,6 +637,125 @@ describe('REVIEW GEARS to FSM compilation', () => {
     // verbatim player text: it is receipt-owned effect evidence.
     expect(text).toContain('`latestCommit: <commit identity>`');
     expect(text).not.toContain('`latestCommit: <verbatim final text>`');
+    expect(text.trimEnd().endsWith(
+      [
+        '## Prefixed prompts',
+        '',
+        '- REVIEW-1: relays → tail',
+        '- REVIEW-2: relays → tail',
+        '- REVIEW-3: relays → tail',
+        '- REVIEW-4: relays → tail',
+      ].join('\n'),
+    )).toBe(true);
+  });
+
+  // playbook-13/-15: a resumed call that fails leaves its working state
+  // without suspending for its own question, so the failure exit clears the
+  // pending question and reply rather than parking them in `failed`.
+  it.each(
+    (
+      [
+        ['reviewFirstRound', []],
+        ['fixFindings', [{ guard: 'findings', reviewerOutput: '1. Finding' }]],
+        [
+          'reviewAfterCommit',
+          [
+            { guard: 'findings', reviewerOutput: '1. Finding' },
+            {
+              guard: 'committed',
+              latestCommit: '2222222222222222222222222222222222222222',
+              coderOutput: 'Fixed.',
+            },
+          ],
+        ],
+        [
+          'reviewAfterRejection',
+          [
+            { guard: 'findings', reviewerOutput: '1. Finding' },
+            { guard: 'rejectedAll', coderOutput: 'Rejected with evidence.' },
+          ],
+        ],
+      ] as const
+    ).flatMap(([stateId, before]) =>
+      (['actor error', 'malformed output'] as const).map(
+        (failure) => [stateId, failure, before] as const,
+      ),
+    ),
+  )(
+    'clears the Boss reply when resumed %s fails with %s',
+    async (stateId, failure, before) => {
+      const inputs: PlayerInput[] = [];
+      const script: unknown[] = [
+        ...before,
+        { guard: 'needsBossReply', question: 'Which release applies?' },
+        failure === 'actor error'
+          ? new Error('player is down')
+          : stateId === 'fixFindings'
+            ? { guard: 'committed', coderOutput: 'Committed.' }
+            : { guard: 'findings' },
+      ];
+      const actor = createActor(
+        reviewMachine.provide({
+          actors: {
+            player: fromPromise(async ({ input }: { input: PlayerInput }) => {
+              inputs.push(input);
+              const next = script.shift();
+              if (next instanceof Error) throw next;
+              return next as never;
+            }),
+          },
+        }),
+      ).start();
+      actor.send({ type: 'START_REVIEW', callerInput: 'Review the release.' });
+      await waitFor(actor, (snapshot) => snapshot.matches('awaitBossReply'));
+      expect(actor.getSnapshot().context.pendingBossQuestion).toMatchObject({
+        resumeStateId: stateId,
+      });
+
+      actor.send({ type: 'BOSS_REPLY', answer: 'Use 6.0.' });
+      const failed = await waitFor(actor, (snapshot) =>
+        snapshot.matches('failed'),
+      );
+
+      // The resumed call carried the question and reply it answers ...
+      expect(inputs.at(-1)).toMatchObject({
+        stateId,
+        pendingBossQuestion: { question: 'Which release applies?' },
+        bossReply: 'Use 6.0.',
+      });
+      // ... and its failure keeps neither.
+      expect(failed.context.lastError).toBeDefined();
+      expect(failed.context.pendingBossQuestion).toBeUndefined();
+      expect(failed.context.bossReply).toBeUndefined();
+      expect(script).toEqual([]);
+      actor.stop();
+    },
+  );
+
+  it('refuses a Boss jump into a round whose typed context is missing', () => {
+    const guards = reviewMachine.implementations.guards as unknown as Record<
+      string,
+      (
+        args: { context: ReviewContext; event: unknown },
+        params: unknown,
+      ) => boolean
+    >;
+    const enterable = (probe: ReviewContext) =>
+      expected
+        .map(([targetId]) => targetId)
+        .filter((targetId) =>
+          guards.canInterruptTo(
+            { context: probe, event: interrupt(targetId) },
+            { targetId },
+          ),
+        );
+    expect(enterable({})).toEqual([]);
+    expect(enterable({ callerInput: 'Initial request' })).toEqual([
+      'reviewFirstRound',
+    ]);
+    // Findings and a Coder disposition exist, but no disposition is recorded,
+    // so neither follow-up round can be entered.
+    expect(enterable(context)).toEqual(['reviewFirstRound', 'fixFindings']);
   });
 
   it('requires receipt-derived identities before accepting commit or completion', () => {
@@ -508,7 +767,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
       ) => boolean
     >;
     expect(
-      guards.committed(
+      guards.isCommitted(
         {
           context,
           event: done({ guard: 'committed', coderOutput: 'Committed.' }),
@@ -517,7 +776,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
       ),
     ).toBe(false);
     expect(
-      guards.committed(
+      guards.isCommitted(
         {
           context,
           event: done({
@@ -531,16 +790,16 @@ describe('REVIEW GEARS to FSM compilation', () => {
     ).toBe(false);
     // DR-045: completion equally requires the receipt-observed revision.
     expect(
-      guards.noFindings(
-        { context, event: done({ guard: 'noFindings' }) },
+      guards.isClean(
+        { context, event: done({ guard: 'clean' }) },
         undefined,
       ),
     ).toBe(false);
     expect(
-      guards.noFindings(
+      guards.isClean(
         {
           context,
-          event: done({ guard: 'noFindings', evaluatedRevision: ' ' }),
+          event: done({ guard: 'clean', evaluatedRevision: ' ' }),
         },
         undefined,
       ),

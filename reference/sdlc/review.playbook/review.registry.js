@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 import createPlaybookRuntime from './review.playbook.js';
 export const reviewStateCountLabels = {
-    reviewInitial: 'review round',
+    reviewFirstRound: 'review round',
     reviewAfterCommit: 'review round',
-    reviewAfterRebuttal: 'rebuttal',
+    reviewAfterRejection: 'rebuttal',
 };
 export const reviewCopyPasteGuardNames = [
-    'hasFindings',
+    'findings',
     'committed',
     'rejectedAll',
 ];

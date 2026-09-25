@@ -13,7 +13,7 @@ import { catalog } from "../scripts/test-support/workflow-contracts.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const types = {
-  review: "ReviewOutput",
+  review: "ReviewPlaybookOutput",
   decide: "DecideOutput",
   code: "CodePlaybookOutput",
   branch: "BranchPlaybookOutput",
