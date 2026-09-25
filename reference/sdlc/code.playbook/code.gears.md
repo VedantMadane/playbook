@@ -108,8 +108,3 @@ When `review` passes a nonfinal IR-task phase, Captain continues with the next u
 When `review` passes the final IR-task phase, `code` is complete and returns to its caller the exact last `code`-owned commit, the exact final evaluated repository revision, and the fact that every phase's review passed with no unsettled findings.
 When `review` returns an authored abort or failure, or a terminal result that does not establish that the supplied scope was evaluated with no unsettled findings, `code` starts no further phase and reports the failure and the last `code`-owned commit to its caller.
 When the nested `review` call fails outside that authored result contract, `code` parks as failed and retains the control-plane error instead of reporting an authored review outcome.
-
-## Prefixed prompts
-
-- CODE-1: relays → tail
-- CODE-3: relays → tail

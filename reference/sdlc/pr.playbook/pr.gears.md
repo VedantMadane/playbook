@@ -150,7 +150,3 @@ Results:
 - PR-5: captain → script
 - PR-6: captain → script
 - PR-7: captain → script
-
-## Prefixed prompts
-
-- PR-1: relays → tail

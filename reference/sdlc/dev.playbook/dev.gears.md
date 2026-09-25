@@ -132,7 +132,3 @@ The branch and base revision come from `branch`'s canonical structured result, a
 If `pr` returns an authored abort or failure, or a terminal result that does not prove the success required for the selected path, `dev` shall relay that canonical result; a `pr` failure ends `dev` under this rule.
 If the `pr` call fails outside its authored result contract, `dev` shall park as failed and retain the control-plane error.
 `dev` shall consume commit, revision, branch, and pull-request identities only from each child's canonical structured result, never from player prose.
-
-## Prefixed prompts
-
-- DEV-1: relays → tail

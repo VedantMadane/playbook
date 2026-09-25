@@ -152,10 +152,3 @@ When Coder rejects every finding and makes no commit, at the start of the next r
 Results:
 - `findings`: Reviewer kept or raised one or more findings that remain unsettled. The outcome depends on the substance of Reviewer's reply, not on finding numbers or any fixed presentation format; a progress report, status update, or promise of a later result does not support this outcome. Output shall include `reviewerOutput: <verbatim final text>`.
 - `clean`: Reviewer affirmatively reported that the requested review is complete and no unsettled findings remain. The outcome depends on the substance of Reviewer's reply, not on finding numbers or any fixed presentation format; a progress report, status update, or promise of a later result does not support this outcome. The review workflow then returns the exact repository revision at which the review scope was evaluated, taken from repository authority rather than from either player's prose, and the fact that no unsettled findings remain within that scope. Output shall include `evaluatedRevision: <repository revision>`.
-
-## Prefixed prompts
-
-- REVIEW-1: relays → tail
-- REVIEW-2: relays → tail
-- REVIEW-3: relays → tail
-- REVIEW-4: relays → tail

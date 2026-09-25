@@ -64,10 +64,8 @@ const CODE_4_OUTCOMES = [
 
 function gearsSection(id: 'CODE-2' | 'CODE-4'): string {
   const start = gearsText.indexOf(`### ${id}`);
-  const end = gearsText.indexOf(
-    id === 'CODE-2' ? '### CODE-3' : '## Prefixed prompts',
-    start,
-  );
+  const end =
+    id === 'CODE-2' ? gearsText.indexOf('### CODE-3', start) : gearsText.length;
   return gearsText.slice(start, end);
 }
 
@@ -134,7 +132,7 @@ describe('CODE Source, GEARS, and FSM agreement', () => {
       expect(input.result.needsBossReply).toContain('question:');
     }
     // DR-065: the prefix pass moved each Coder item's relays after its last
-    // instruction line and recorded that rewrite as provenance.
+    // instruction line; the layout itself records that rewrite.
     expect(byId.get('CODE-1')?.prompt[0]).toBe(
       'First determine whether the coding request starts a new coding intent or continues an existing IR with unfinished work.',
     );
@@ -150,9 +148,15 @@ describe('CODE Source, GEARS, and FSM agreement', () => {
       '> IR number: <ir-number>',
       '> Run results: <run-results>',
     ]);
-    expect(gearsText).toMatch(
-      /\n## Prefixed prompts\n\n- CODE-1: relays → tail\n- CODE-3: relays → tail\n$/,
-    );
+    for (const [id, relays] of [['CODE-1', 2], ['CODE-3', 3]] as const) {
+      const prompt = byId.get(id)?.prompt ?? [];
+      expect(prompt.at(-relays - 1), id).toBe('');
+      expect(
+        prompt.slice(0, -relays).some((line) => line.startsWith('> ')),
+        id,
+      ).toBe(false);
+    }
+    expect(gearsText).not.toMatch(/^## Prefixed prompts$/m);
   });
 
   it('does not ask Coder to encode repository evidence in response prose', () => {

@@ -324,8 +324,7 @@ describe('PR Source, GEARS, and FSM agreement', () => {
     const start = gearsText.indexOf(marker);
     expect(start).toBeGreaterThan(gearsText.lastIndexOf('### PR-7'));
     expect(gearsText.indexOf(marker, start + 1)).toBe(-1);
-    // The section runs to the next `## ` heading, such as a later pass's own
-    // provenance section (slc/prefix.md), or to the end of the file.
+    // The section runs to the next `## ` heading or to the end of the file.
     const bullets = gearsText
       .slice(start + marker.length)
       .replace(/\n## [\s\S]*$/, '')

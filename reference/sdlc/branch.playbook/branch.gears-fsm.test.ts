@@ -147,14 +147,16 @@ describe('BRANCH Source, GEARS, and FSM agreement', () => {
       'refused',
     ]);
     // DR-065: the prefix pass moved the relayed request after the last
-    // instruction line and recorded that rewrite as provenance.
+    // instruction line; the layout itself records that rewrite.
     expect(item?.prompt[0]).toBe(
       'Prepare a new branch for this work without changing any file or making any commit.',
     );
-    expect(item?.prompt.at(-1)).toBe('> Original request: <caller-input>');
-    expect(gearsText).toMatch(
-      /\n## Prefixed prompts\n\n- BRANCH-1: relays → tail\n$/,
-    );
+    const prompt = item?.prompt ?? [];
+    const firstRelay = prompt.findIndex((line) => line.startsWith('> '));
+    expect(prompt[firstRelay - 1]).toBe('');
+    expect(prompt.slice(firstRelay)).toEqual(['> Original request: <caller-input>']);
+    expect(prompt.slice(0, firstRelay).some((line) => line.startsWith('> '))).toBe(false);
+    expect(gearsText).not.toMatch(/^## Prefixed prompts$/m);
     // The base revision is annotated as a repository revision, not verbatim
     // player text: it is receipt-owned effect evidence (DR-045).
     expect(gearsText).toContain(

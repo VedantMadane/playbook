@@ -88,8 +88,3 @@ When Coder has committed, Captain shall call playbook `review`:
 `decide` is complete only when `review` returns a result that applies to the supplied review scope, gives the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain; `decide` shall then return the `decide`-owned commit and that evaluated revision to its caller.
 When `review` returns an authored abort or failure, or a terminal result that does not establish those facts, `decide` shall report the failure and the last `decide`-owned commit to its caller.
 When the nested `review` call fails outside that authored result contract, `decide` shall park as failed and retain the control-plane error instead of reporting an authored review outcome.
-
-## Prefixed prompts
-
-- DECIDE-1: relays → tail
-- DECIDE-2: relays → tail

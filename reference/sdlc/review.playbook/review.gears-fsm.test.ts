@@ -614,7 +614,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
       review3.indexOf('> Coder output: <coder-output>'),
     );
     // DR-065: the prefix pass moved every relay block after the last
-    // instruction line, and the provenance section lists each moved item.
+    // instruction line; the layout itself records each move.
     for (const [id, item] of gears) {
       const firstRelay = item.prompt.findIndex((line) => line.startsWith('> '));
       expect(firstRelay, id).toBeGreaterThan(0);
@@ -637,16 +637,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
     // verbatim player text: it is receipt-owned effect evidence.
     expect(text).toContain('`latestCommit: <commit identity>`');
     expect(text).not.toContain('`latestCommit: <verbatim final text>`');
-    expect(text.trimEnd().endsWith(
-      [
-        '## Prefixed prompts',
-        '',
-        '- REVIEW-1: relays → tail',
-        '- REVIEW-2: relays → tail',
-        '- REVIEW-3: relays → tail',
-        '- REVIEW-4: relays → tail',
-      ].join('\n'),
-    )).toBe(true);
+    expect(text).not.toMatch(/^## Prefixed prompts$/m);
   });
 
   // playbook-13/-15: a resumed call that fails leaves its working state

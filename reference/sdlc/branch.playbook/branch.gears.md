@@ -32,7 +32,3 @@ Where every outcome keeps the repository exact, so that a new branch at the curr
 Results:
 - `branched`: Coder affirmatively reported that it created the new branch from the current commit and checked it out, with the exact branch name and a concise summary of the issue and its comments, or of the request when no issue is named; the absence of a reported obstacle is not support. The branch workflow is then complete and returns the exact branch name, the exact base revision taken from repository authority, and the issue summary to its caller. Output shall include `branch: <exact branch name>`, `baseRevision: <exact base revision from repository authority, not from Coder's prose>`, and `issueSummary: <concise summary of the issue and its comments, or of the request when no issue is named>`.
 - `refused`: Coder affirmatively reported that it created no branch and gave the failure with its reason, such as a working tree that is not clean, gh not being authenticated, a named issue that does not exist or cannot be read, or a branch with that name already existing locally or on the remote. The branch workflow then fails and reports Coder's complete result with its reason to its caller; no branch was created. Output shall include `coderOutput: <verbatim final text>`.
-
-## Prefixed prompts
-
-- BRANCH-1: relays → tail
