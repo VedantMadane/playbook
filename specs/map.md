@@ -93,6 +93,7 @@ meta.md       The spec of specs
 | [DR-065](decisions/065-prompt-prefix-pass.md) | 065-prompt-prefix-pass.md | The prompt-prefix pass: a second GEARS pass moves each prompt's relayed runtime values after its instructions so repeated runs share a cacheable prefix, realized by a deterministic tool, recording nothing beside the prompts, and accepted by the fidelity checker from each prompt's layout |
 | [DR-066](decisions/066-compiled-builtins-keep-their-public-interface.md) | 066-compiled-builtins-keep-their-public-interface.md | A builtin compiled under one of the catalog's ids keeps the catalog's output interface — result properties named by it, the terminal output exactly it — and a result declares only consumed properties; `text2gears` reads the catalog |
 | [DR-067](decisions/067-parallel-proposals-through-the-shared-factory.md) | 067-parallel-proposals-through-the-shared-factory.md | The shared factory interprets the compiled parallel proposal shape — one all-`unchanged` cohort, keyed pending questions, per-call aborts — so DECIDE links as a thin module and no maintained artifact keeps bespoke machinery; the engine's semantics replace the bespoke runtime's drift |
+| [DR-068](decisions/068-labelled-section-placeholders.md) | 068-labelled-section-placeholders.md | A Source may define a placeholder as a labelled section of a relayed text, bounded by the labels it names: `text2gears` keeps the definition and declares no producer, and each compiled FSM derives the section deterministically where it stores the text, reading away the caller's quote layer and falling back to the whole text |
 
 ## Packages
 
@@ -102,7 +103,7 @@ meta.md       The spec of specs
 | [cross-references.md](packages/cross-references.md) | Relative Markdown link and GitHub-anchor resolution plus repository checks |
 | [compiler-optimization.md](packages/compiler-optimization.md) | Exact environmental predicate and resource-location preservation in mechanical optimization |
 | [compiler-prompt-prefix.md](packages/compiler-prompt-prefix.md) | Prefix-first prompt layout: relayed values after instructions, the deterministic tool, legacy-section removal, and layout-based fidelity acceptance |
-| [compiler-prompt-relays.md](packages/compiler-prompt-relays.md) | Source-authored runtime relays through prompt placeholders and typed actor inputs |
+| [compiler-prompt-relays.md](packages/compiler-prompt-relays.md) | Source-authored runtime relays through prompt placeholders and typed actor inputs, including placeholders derived from a labelled section of a relayed text |
 | [compiler-results.md](packages/compiler-results.md) | GEARS acting-result boundaries, terminal return obligations, authored Boss-question fields, and unambiguous output guidance |
 | [compiler-nested-tags.md](packages/compiler-nested-tags.md) | Nested-playbook call tagging aligned with runtime busy and suspended settlement |
 | [compiler-nested-calls.md](packages/compiler-nested-calls.md) | Nested-playbook call syntax and child-output routing duties |

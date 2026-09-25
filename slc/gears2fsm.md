@@ -141,9 +141,11 @@ generic Captain forms, wire `<boss-intent>` from `bossIntent`,
 `remainingPlan`, and `<completed-call-results>` from
 `completedCallResults`. Other non-identity placeholders shall retain the
 semantic typed field established by Source (for example `<#>` from
-`irNumber`). Leaving an ordinary runtime-value placeholder literal, replacing
-it with an empty default because its field was omitted, or making the linker
-recover it from untyped context is malformed.
+`irNumber`); a created-commit or labelled-section placeholder binds as
+[Context and prompts](#context-and-prompts) states. Leaving an ordinary
+runtime-value placeholder literal, replacing it with an empty default because
+its field was omitted, or making the linker recover it from untyped context is
+malformed.
 The corresponding `invoke.input` object shall include that field beside `prompt`; storing it only in machine context does not satisfy the actor-input contract.
 When Source declares a placeholder as the current identity of a local acting
 role, preserve the placeholder literal in the FSM prompt and do not add any
@@ -616,6 +618,31 @@ mapping, assigned from that call's accepted `latestCommit`, the effect-owned
 property the runtime fills from the repository receipt
 ([text2gears](text2gears.md#result-contracts)); the actor input carries the
 field beside the prompt like any other relayed value.
+A placeholder the GEARS defines as a labelled section of another relayed
+text binds to a typed context field named by its canonical mapping. The
+definition names the label that opens the section and the labels that end it —
+`<original-intent>` as the `Original intent:` section of the caller's request,
+which runs to the `Review scope:` line or to the end of the request. The
+machine derives the field deterministically in the entry action or transition
+that stores the text and again in every action that replaces it, such as a
+fresh entry directive or an interrupt that restarts with new text:
+
+- the text as read is the text itself, except that where every non-blank line
+  begins with `>`, each line is read without that marker and one optional space
+  after it, the literal quote layer a quoted relay adds;
+- the section is the lines of the text as read from the first line that
+  begins with the opening label, the label removed, through the line before the
+  first later line that begins with an ending label, or through the last line,
+  with the result trimmed; a line that merely looks labelled, such as `Note:`
+  or `Constraints:`, stays in the section;
+- where no line begins with the opening label, or the section is empty once
+  trimmed — its label directly followed by an ending label or by the end of
+  the text — the field is the whole text as read, trimmed, so the request is
+  never lost.
+
+The derived field is ordinary context that actor inputs relay, never a player
+or judge output.
+
 Prompts shall pass only the **specific extracted fields** the player needs.
 The compiler shall not dump `JSON.stringify(lastResult)` or any opaque blob: it leaks internal `guard` strings, wastes tokens, and confuses the LLM.
 

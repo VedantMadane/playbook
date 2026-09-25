@@ -5,7 +5,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { assign, createActor, fromPromise, setup, waitFor } from "xstate";
 import { defaultComposePlayerPrompt } from "./xstate-runtime.js";
+import { _internal as reviewModule } from "../reference/sdlc/review.playbook/review.playbook.js";
 
 const compiler = process.env.PLAYBOOK_EXPERIMENT_COMPILER;
 const exactEvidence =
@@ -143,3 +145,187 @@ describe.runIf(compiler !== undefined)(
     );
   },
 );
+
+// compiler-prompt-relays-9: the derivation a compiled FSM carries for a
+// placeholder defined as a labelled section, exactly as gears2fsm states it;
+// the definition names the opening label and the labels that end the section.
+function labelledSection(text: string, label: string, endings: readonly string[]): string {
+  const raw = text.split("\n");
+  const quoted = raw.every((line) => line.trim() === "" || line.startsWith(">"));
+  const lines = quoted ? raw.map((line) => line.replace(/^> ?/, "")) : raw;
+  const whole = lines.join("\n").trim();
+  const start = lines.findIndex((line) => line.startsWith(label));
+  if (start === -1) return whole;
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => endings.some((ending) => line.startsWith(ending)));
+  const section = [lines[start]!.slice(label.length), ...(end === -1 ? rest : rest.slice(0, end))]
+    .join("\n")
+    .trim();
+  return section === "" ? whole : section;
+}
+
+it("derives a Source-defined labelled section wherever the relayed text is stored", async () => {
+  const producer = collapseWhitespace(text2gearsDefinition);
+  const fsm = collapseWhitespace(gears2fsmDefinition);
+  // compiler-prompt-relays-7: kept verbatim, named as authored, no producer.
+  expect(producer).toContain(
+    "A placeholder the Source defines as a labelled section of another relayed value, naming the label that opens the section and the labels that end it — `<original-intent>` as the `Original intent:` section of the caller's request, which runs to the `Review scope:` line or to the end of the request, for instance — is derived, not produced: text2gears shall keep that defining sentence verbatim in the package introduction, or in the item's prose where the Source states it there, name the placeholder as the Source does, and declare no result property for it",
+  );
+  // compiler-prompt-relays-9: the rule, cited where placeholder binding is
+  // described.
+  expect(fsm).toContain(
+    "a created-commit or labelled-section placeholder binds as [Context and prompts](#context-and-prompts) states",
+  );
+  for (const clause of [
+    "A placeholder the GEARS defines as a labelled section of another relayed text binds to a typed context field named by its canonical mapping.",
+    "The definition names the label that opens the section and the labels that end it",
+    "The machine derives the field deterministically in the entry action or transition that stores the text and again in every action that replaces it",
+    "the text as read is the text itself, except that where every non-blank line begins with `>`, each line is read without that marker and one optional space after it",
+    "the section is the lines of the text as read from the first line that begins with the opening label, the label removed, through the line before the first later line that begins with an ending label, or through the last line, with the result trimmed; a line that merely looks labelled, such as `Note:` or `Constraints:`, stays in the section",
+    "where no line begins with the opening label, or the section is empty once trimmed — its label directly followed by an ending label or by the end of the text — the field is the whole text as read, trimmed",
+    "The derived field is ordinary context that actor inputs relay, never a player or judge output",
+  ]) {
+    expect(fsm).toContain(clause);
+  }
+
+  type Input = {
+    stateId: string;
+    role: string;
+    sourceItem: string;
+    prompt: string;
+    result: Record<string, string>;
+    callerInput?: string;
+    originalIntent?: string;
+  };
+  const FIRST = "Review the scope.\n\n> Original request: <caller-input>";
+  const LATER = "Review the latest fix.\n\n> Original intent: <original-intent>";
+  // The maintained REVIEW module's labelled-relay composer, which quotes every
+  // continuation line of a value it inserts into a quoted prompt line.
+  const compose = (input: Input) =>
+    reviewModule.composePlayerPrompt(input, (role: string) => {
+      throw new Error(`no identity placeholder is authored here: ${role}`);
+    });
+  const quoted = (value: string) => value.replace(/\n/g, "\n> ");
+  const inputs: Input[] = [];
+  const machine = setup({
+    types: {
+      context: {} as { callerInput: string; originalIntent: string },
+      events: {} as { type: "START_REVIEW"; callerInput: string },
+    },
+    actors: {
+      player: fromPromise<{ guard: "done" }, Input>(async ({ input }) => {
+        inputs.push(input);
+        return { guard: "done" };
+      }),
+    },
+    actions: {
+      startReview: assign(({ event }) => ({
+        callerInput: event.callerInput,
+        originalIntent: labelledSection(event.callerInput, "Original intent:", ["Review scope:"]),
+      })),
+    },
+  }).createMachine({
+    context: { callerInput: "", originalIntent: "" },
+    initial: "idle",
+    states: {
+      idle: {
+        tags: ["playbook.parked"],
+        on: { START_REVIEW: { target: "firstRound", actions: "startReview" } },
+      },
+      firstRound: {
+        invoke: {
+          src: "player",
+          input: ({ context }): Input => ({
+            stateId: "firstRound",
+            role: "reviewer",
+            sourceItem: "REVIEW-1",
+            prompt: FIRST,
+            result: { done: "Reviewed." },
+            callerInput: context.callerInput,
+          }),
+          onDone: "laterRound",
+        },
+      },
+      laterRound: {
+        invoke: {
+          src: "player",
+          input: ({ context }): Input => ({
+            stateId: "laterRound",
+            role: "reviewer",
+            sourceItem: "REVIEW-2",
+            prompt: LATER,
+            result: { done: "Reviewed." },
+            originalIntent: context.originalIntent,
+          }),
+          onDone: "idle",
+        },
+      },
+    },
+  });
+  const cases = [
+    {
+      name: "a caller's quoted labelled request",
+      text:
+        "> Original intent: Fix the bug.\n" +
+        "> Review scope: the commit abc123 from this coding phase and its resulting repository state.\n" +
+        "> Coder output: Committed the change.",
+      section: "Fix the bug.",
+    },
+    {
+      name: "a multi-line quoted section whose look-alike labelled lines stay in it",
+      text:
+        "> Original intent: Ship the parser.\n> Constraints: keep the grammar stable.\n>\n" +
+        "> Note: docs follow.\n> Review scope: the commit def456.\n> Coder output: Done.\n\n" +
+        "> Current IR task: Task 2.",
+      section: "Ship the parser.\nConstraints: keep the grammar stable.\n\nNote: docs follow.",
+    },
+    {
+      name: "an unquoted request whose section runs to the end and keeps its quoted lines",
+      text:
+        "Context: see IR-070.\nOriginal intent:\n  Rename the flag.\n> Error: flag unknown\n" +
+        "Run results: suite passed.\n",
+      section: "Rename the flag.\n> Error: flag unknown\nRun results: suite passed.",
+    },
+    {
+      name: "an empty section",
+      text: "> Original intent:\n> Review scope: the commit abc123.",
+      section: "Original intent:\nReview scope: the commit abc123.",
+    },
+    {
+      name: "an unlabelled request",
+      text: "  Review the latest commit.\n",
+      section: "Review the latest commit.",
+    },
+    {
+      name: "an unlabelled quoted request",
+      text: "> Review the branch.\n> Mind the docs.",
+      section: "Review the branch.\nMind the docs.",
+    },
+  ];
+  const actor = createActor(machine).start();
+  try {
+    for (const [index, { name, text, section }] of cases.entries()) {
+      // Each fresh entry replaces the text, so the section is derived again.
+      actor.send({ type: "START_REVIEW", callerInput: text });
+      await waitFor(
+        actor,
+        (snapshot) => snapshot.matches("idle") && inputs.length === 2 * (index + 1),
+      );
+      expect(actor.getSnapshot().context.originalIntent, name).toBe(section);
+      const [first, later] = inputs.slice(2 * index);
+      expect(first!.callerInput, name).toBe(text);
+      expect(later!.originalIntent, name).toBe(section);
+      const prompts = [compose(first!), compose(later!)];
+      expect(prompts, name).toEqual([
+        `Review the scope.\n\n> Original request: ${quoted(text)}`,
+        `Review the latest fix.\n\n> Original intent: ${quoted(section)}`,
+      ]);
+      // No relayed line escapes its quote.
+      for (const prompt of prompts) {
+        expect(prompt.split("\n").slice(2).every((line) => line.startsWith(">")), name).toBe(true);
+      }
+    }
+  } finally {
+    actor.stop();
+  }
+});

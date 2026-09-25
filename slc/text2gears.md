@@ -205,6 +205,15 @@ whatever placeholder a later prompt reads it through — `<code-commit>` or
 property from the repository receipt rather than from the player, and
 [gears2fsm](gears2fsm.md#context-and-prompts) binds the Source's placeholder
 to the retained commit.
+A placeholder the Source defines as a labelled section of another relayed
+value, naming the label that opens the section and the labels that end it —
+`<original-intent>` as the `Original intent:` section of the caller's request,
+which runs to the `Review scope:` line or to the end of the request, for
+instance — is derived, not produced: text2gears shall keep that defining
+sentence verbatim in the package introduction, or in the item's prose where the
+Source states it there, name the placeholder as the Source does, and declare no
+result property for it, because no player produces the value and
+[gears2fsm](gears2fsm.md#context-and-prompts) derives it from the relayed text.
 
 Where a later prompt relays a delegated player's whole final response as quoted context, the producer shall declare that property in the exact annotated form `` `<field>: <verbatim final text>` ``.
 The annotation makes the field runtime-owned: the adjudicator selects the result guard, while the linked runtime carries the player's canonical final text into that field instead of asking a judge to reproduce it.
