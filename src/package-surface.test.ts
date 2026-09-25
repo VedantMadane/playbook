@@ -1331,7 +1331,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'reviewSummaryPolicy',
       'validateReviewOptions',
     ],
-    './decide/playbook': ['_internal', 'default'],
+    './decide/playbook': ['_internal', 'default', 'validateOptions'],
     './decide/registry': [
       'decideCopyPasteGuardNames',
       'decidePlaybookRegistryEntry',
@@ -1765,8 +1765,6 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
     './decide/playbook': [
       'CaptainCallOptions',
       'CaptainResult',
-      'DecidePlaybookHostCapabilities',
-      'DecidePlaybookOptions',
       'JsonValue',
       'NormalizedError',
       'PlaybookCallRequest',
@@ -1774,11 +1772,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1790,6 +1790,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerSessionStore',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './decide/registry': [
       'DecideOptions',
@@ -2443,7 +2444,9 @@ import type { PlaybookHostCapabilities as CodePlaybookHostCapabilities } from '@
 import { reviewPlaybookRegistryEntry } from '@sublang/playbook/review/registry';
 import type { PlaybookHostCapabilities as ReviewPlaybookHostCapabilities } from '@sublang/playbook/review/playbook';
 import { decidePlaybookRegistryEntry } from '@sublang/playbook/decide/registry';
-import type { DecidePlaybookHostCapabilities } from '@sublang/playbook/decide/playbook';
+import type { PlaybookHostCapabilities as DecideModuleHostCapabilities } from '@sublang/playbook/decide/playbook';
+type DecidePlaybookHostCapabilities = PlaybookHostConstructionCapabilities &
+  DecideModuleHostCapabilities;
 import { devPlaybookRegistryEntry } from '@sublang/playbook/dev/registry';
 import type { PlaybookHostCapabilities as DevPlaybookHostCapabilities } from '@sublang/playbook/dev/playbook';
 import { branchPlaybookRegistryEntry } from '@sublang/playbook/branch/registry';

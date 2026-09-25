@@ -3,6 +3,7 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { createActor, fromPromise, waitFor } from 'xstate';
 
 import { parseGearsContract } from '../../../scripts/check-slc-source-gears.mjs';
 import {
@@ -59,12 +60,22 @@ const machineConfig = (
 ).config;
 const states = machineConfig.states;
 
+// The compiled context is typed and total: every field has its `''`,
+// `false`, `null`, or empty-record default rather than being optional.
 const CONTEXT: DecideContext = {
   callerTopic: 'Choose a durable design.',
-  coderProposal: 'Coder proposes package items.',
+  stagedCoderProposed: false,
+  stagedReviewerProposal: '',
+  coderProposed: true,
   reviewerProposal: 'Reviewer proposes one DR.',
-  latestCommit: 'abc123',
   coderOutput: 'Committed the synthesized design.',
+  decideCommit: 'abc123',
+  evaluatedRevision: '',
+  reviewStatus: null,
+  reviewError: null,
+  lastError: null,
+  pendingBossQuestions: {},
+  bossReplies: {},
 };
 
 const NEEDS_BOSS_REPLY_DESCRIPTION =
@@ -75,41 +86,45 @@ const done = (output: unknown) => ({
   output,
 });
 
-const actorDoneFixtures = (
+// A proposal branch finishing after its sibling has staged completes the
+// join, so its arm is ordered first and marks `synthesizeCommit` as target.
+const proposalDoneFixtures = (
+  joiningGuard: string,
   successGuard: string,
-  successTarget: string,
+  stagedTarget: string,
   successOutput: unknown,
+  siblingStaged: Partial<DecideContext>,
   questionTarget: string,
-  failureTarget: string,
+  fallbackOutput: unknown,
 ): readonly TransitionFixture[] => [
   {
-    guard: 'needsBossReplyWithQuestion',
+    guard: joiningGuard,
+    target: stagedTarget,
+    context: { ...CONTEXT, ...siblingStaged },
+    event: done(successOutput),
+  },
+  {
+    guard: successGuard,
+    target: stagedTarget,
+    context: CONTEXT,
+    event: done(successOutput),
+  },
+  {
+    guard: 'needsBossReply',
     target: questionTarget,
     context: CONTEXT,
     event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
   },
   {
-    guard: 'needsBossReplyWithoutQuestion',
-    target: failureTarget,
-    context: CONTEXT,
-    event: done({ guard: 'needsBossReply', question: '  ' }),
-  },
-  {
-    guard: successGuard,
-    target: successTarget,
-    context: CONTEXT,
-    event: done(successOutput),
-  },
-  {
     guard: '<fallback>',
-    target: failureTarget,
+    target: '#failed',
     context: CONTEXT,
-    event: done({ guard: successGuard }),
+    event: done(fallbackOutput),
   },
 ];
 
 const pendingContext = (
-  stateId: 'askCoderProposal' | 'askReviewerProposal' | 'commitCoderProposal',
+  stateId: 'askCoderProposal' | 'askReviewerProposal' | 'synthesizeCommit',
   sourceItem: 'DECIDE-1' | 'DECIDE-2' | 'DECIDE-3',
   roleId: 'coder' | 'reviewer',
 ): DecideContext => ({
@@ -126,23 +141,21 @@ const pendingContext = (
 });
 
 const bossReplyFixtures = (
-  stateId: 'askCoderProposal' | 'askReviewerProposal' | 'commitCoderProposal',
+  stateId: 'askCoderProposal' | 'askReviewerProposal' | 'synthesizeCommit',
   sourceItem: 'DECIDE-1' | 'DECIDE-2' | 'DECIDE-3',
   roleId: 'coder' | 'reviewer',
-  emptyTarget: string,
-  answerTarget: string,
 ): readonly TransitionFixture[] => {
   const pending = pendingContext(stateId, sourceItem, roleId);
   return [
     {
-      guard: '<inline>',
-      target: emptyTarget,
+      guard: 'bossReplyIsEmpty',
+      target: '#failed',
       context: pending,
       event: { type: 'BOSS_REPLY', questionId: stateId, answer: '  ' },
     },
     {
-      guard: '<inline>',
-      target: answerTarget,
+      guard: 'bossReplyResumes',
+      target: `#${stateId}`,
       context: pending,
       event: { type: 'BOSS_REPLY', questionId: stateId, answer: 'Answer' },
     },
@@ -156,65 +169,91 @@ const authoredFailure = Object.assign(new Error('REVIEW aborted'), {
 const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   'root.on.BOSS_INTERRUPT': [
     {
-      guard: '<inline>',
+      guard: 'interruptTargets',
       target: '#independentProposals',
       context: CONTEXT,
       event: {
         type: 'BOSS_INTERRUPT',
         targetId: 'independentProposals',
-        bossIntent: 'Reconsider this topic.',
+        callerTopic: 'Reconsider this topic.',
       },
     },
+    {
+      // Synthesis restarts from the promoted proposals under the same topic.
+      guard: 'interruptTargets',
+      target: '#synthesizeCommit',
+      context: CONTEXT,
+      event: { type: 'BOSS_INTERRUPT', targetId: 'synthesizeCommit' },
+    },
   ],
-  'independentProposals.coder.working.invoke.onDone': actorDoneFixtures(
-    'coderProposed',
-    'complete',
-    { guard: 'proposed', coderProposal: 'Coder proposal' },
-    'waiting',
-    '#failed',
-  ),
-  'independentProposals.coder.waiting.on.BOSS_REPLY': bossReplyFixtures(
-    'askCoderProposal',
-    'DECIDE-1',
-    'coder',
-    '#failed',
-    'working',
-  ),
-  'independentProposals.reviewer.working.invoke.onDone': actorDoneFixtures(
-    'reviewerProposed',
-    'complete',
-    { guard: 'proposed', reviewerProposal: 'Reviewer proposal' },
-    'waiting',
-    '#failed',
-  ),
-  'independentProposals.reviewer.waiting.on.BOSS_REPLY': bossReplyFixtures(
-    'askReviewerProposal',
-    'DECIDE-2',
-    'reviewer',
-    '#failed',
-    'working',
-  ),
-  'commitCoderProposal.invoke.onDone': actorDoneFixtures(
-    'committed',
-    'reviewCommit',
+  'independentProposals.coderProposalRegion.askCoderProposal.invoke.onDone':
+    proposalDoneFixtures(
+      'coderProposedJoining',
+      'coderProposed',
+      'coderProposalStaged',
+      // DECIDE-1 declares no `coderProposal`: nothing relays Coder's own
+      // proposal, so the bare outcome is the complete result.
+      { guard: 'proposed' },
+      { stagedReviewerProposal: 'Reviewer proposal' },
+      'awaitCoderProposalReply',
+      { guard: 'needsBossReply', question: '  ' },
+    ),
+  'independentProposals.coderProposalRegion.awaitCoderProposalReply.on.BOSS_REPLY':
+    bossReplyFixtures('askCoderProposal', 'DECIDE-1', 'coder'),
+  'independentProposals.reviewerProposalRegion.askReviewerProposal.invoke.onDone':
+    proposalDoneFixtures(
+      'reviewerProposedJoining',
+      'reviewerProposed',
+      'reviewerProposalStaged',
+      { guard: 'proposed', reviewerProposal: 'Reviewer proposal' },
+      { stagedCoderProposed: true },
+      'awaitReviewerProposalReply',
+      { guard: 'proposed' },
+    ),
+  'independentProposals.reviewerProposalRegion.awaitReviewerProposalReply.on.BOSS_REPLY':
+    bossReplyFixtures('askReviewerProposal', 'DECIDE-2', 'reviewer'),
+  'synthesizeCommit.invoke.onDone': [
     {
       guard: 'committed',
-      coderOutput: 'Committed proposal.',
-      latestCommit: 'abc123',
+      target: 'reviewCommit',
+      context: CONTEXT,
+      event: done({
+        guard: 'committed',
+        coderOutput: 'Committed proposal.',
+        latestCommit: 'abc123',
+      }),
     },
-    'awaitBossReply',
-    'failed',
-  ),
-  'awaitBossReply.on.BOSS_REPLY': bossReplyFixtures(
-    'commitCoderProposal',
-    'DECIDE-3',
-    'coder',
-    'failed',
-    '#commitCoderProposal',
-  ),
+    {
+      guard: 'needsBossReply',
+      target: 'awaitBossReply',
+      context: CONTEXT,
+      event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
+    },
+    {
+      guard: '<fallback>',
+      target: 'failed',
+      context: CONTEXT,
+      event: done({ guard: 'committed' }),
+    },
+  ],
+  'awaitBossReply.on.BOSS_REPLY': [
+    {
+      // The root wait fails a reply naming no pending question before any
+      // resume arm can read it.
+      guard: 'bossReplyNamesNoPendingQuestion',
+      target: '#failed',
+      context: pendingContext('synthesizeCommit', 'DECIDE-3', 'coder'),
+      event: {
+        type: 'BOSS_REPLY',
+        questionId: 'askCoderProposal',
+        answer: 'Answer',
+      },
+    },
+    ...bossReplyFixtures('synthesizeCommit', 'DECIDE-3', 'coder'),
+  ],
   'reviewCommit.invoke.onDone': [
     {
-      guard: 'validReviewSuccess',
+      guard: 'reviewApproved',
       target: 'done',
       context: CONTEXT,
       event: done({ evaluatedRevision: 'def456', noUnsettledFindings: true }),
@@ -249,18 +288,18 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
 
 const expectedPlayerStates = [
   {
-    path: 'independentProposals.coder.working',
+    path: 'independentProposals.coderProposalRegion.askCoderProposal',
     stateId: 'askCoderProposal',
     sourceItem: 'DECIDE-1',
   },
   {
-    path: 'independentProposals.reviewer.working',
+    path: 'independentProposals.reviewerProposalRegion.askReviewerProposal',
     stateId: 'askReviewerProposal',
     sourceItem: 'DECIDE-2',
   },
   {
-    path: 'commitCoderProposal',
-    stateId: 'commitCoderProposal',
+    path: 'synthesizeCommit',
+    stateId: 'synthesizeCommit',
     sourceItem: 'DECIDE-3',
   },
 ] as const;
@@ -356,9 +395,14 @@ function evaluateGuard(
       params: unknown,
     ) => boolean
   >;
+  // Parameterized compiled guards carry their params on the arm.
+  const params =
+    typeof guard === 'object' && guard !== null
+      ? (guard as { params?: unknown }).params
+      : undefined;
   return implementations[name](
     { context: fixture.context, event: fixture.event },
-    undefined,
+    params,
   );
 }
 
@@ -366,7 +410,7 @@ describe('DECIDE GEARS to FSM compilation', () => {
   it('declares local roles without source-level player bindings', () => {
     expect(sourceText).toContain('\nRoles:\n\n- Coder\n- Reviewer\n');
     expect(sourceText).not.toContain('\nPlayers:\n');
-    expect(gearsText).toContain('\n## Roles\n\n- Coder\n- Reviewer\n');
+    expect(gearsText).toContain('\nRoles:\n\n- Coder\n- Reviewer\n');
     expect(gearsText).not.toContain('\n## Players\n');
   });
 
@@ -419,17 +463,17 @@ describe('DECIDE GEARS to FSM compilation', () => {
       })),
     ).toEqual([
       {
-        path: 'independentProposals.coder.working',
+        path: 'independentProposals.coderProposalRegion.askCoderProposal',
         actor: 'player',
         sourceItem: 'DECIDE-1',
       },
       {
-        path: 'independentProposals.reviewer.working',
+        path: 'independentProposals.reviewerProposalRegion.askReviewerProposal',
         actor: 'player',
         sourceItem: 'DECIDE-2',
       },
       {
-        path: 'commitCoderProposal',
+        path: 'synthesizeCommit',
         actor: 'player',
         sourceItem: 'DECIDE-3',
       },
@@ -443,14 +487,29 @@ describe('DECIDE GEARS to FSM compilation', () => {
     const parallel = states.independentProposals;
     expect(parallel?.id).toBe('independentProposals');
     expect(parallel?.type).toBe('parallel');
-    expect(Object.keys(parallel?.states ?? {})).toEqual(['coder', 'reviewer']);
-    expect(parallel?.states?.coder?.initial).toBe('working');
-    expect(parallel?.states?.reviewer?.initial).toBe('working');
-    expect(parallel?.states?.coder?.states?.complete?.type).toBe('final');
-    expect(parallel?.states?.reviewer?.states?.complete?.type).toBe('final');
+    expect(Object.keys(parallel?.states ?? {})).toEqual([
+      'coderProposalRegion',
+      'reviewerProposalRegion',
+    ]);
+    const coderRegion = parallel?.states?.coderProposalRegion;
+    const reviewerRegion = parallel?.states?.reviewerProposalRegion;
+    expect(coderRegion?.initial).toBe('askCoderProposal');
+    expect(reviewerRegion?.initial).toBe('askReviewerProposal');
+    expect(Object.keys(coderRegion?.states ?? {})).toEqual([
+      'askCoderProposal',
+      'awaitCoderProposalReply',
+      'coderProposalStaged',
+    ]);
+    expect(Object.keys(reviewerRegion?.states ?? {})).toEqual([
+      'askReviewerProposal',
+      'awaitReviewerProposalReply',
+      'reviewerProposalStaged',
+    ]);
+    expect(coderRegion?.states?.coderProposalStaged?.type).toBe('final');
+    expect(reviewerRegion?.states?.reviewerProposalStaged?.type).toBe('final');
     expect(
-      Array.isArray(parallel?.onDone) ? undefined : parallel?.onDone?.target,
-    ).toBe('commitCoderProposal');
+      Array.isArray(parallel?.onDone) ? undefined : parallel?.onDone,
+    ).toEqual({ target: 'synthesizeCommit', actions: 'promoteProposals' });
   });
 
   it('preserves each delegated role, prompt, and result contract exactly', () => {
@@ -495,9 +554,9 @@ describe('DECIDE GEARS to FSM compilation', () => {
       text: byId
         .get('DECIDE-4')
         ?.prompt.join('\n')
-        .replaceAll('<caller-topic>', CONTEXT.callerTopic ?? '')
-        .replaceAll('<decide-commit>', CONTEXT.latestCommit ?? '')
-        .replaceAll('<coder-output>', CONTEXT.coderOutput ?? ''),
+        .replaceAll('<caller-topic>', CONTEXT.callerTopic)
+        .replaceAll('<decide-commit>', CONTEXT.decideCommit)
+        .replaceAll('<coder-output>', CONTEXT.coderOutput),
     });
     expect(tagsOf(state ?? {})).toContain('playbook.suspended');
     expect(state?.meta).toEqual({
@@ -519,13 +578,13 @@ describe('DECIDE GEARS to FSM compilation', () => {
     }
     const reviewSection = gearsText.slice(gearsText.indexOf('### DECIDE-4'));
     expect(reviewSection).toContain(
-      '`decide` is complete only when `review` returns a result that applies to the supplied review scope, gives the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain; `decide` then returns the `decide`-owned commit and that evaluated revision to the caller.',
+      '`decide` is complete only when `review` returns a result that applies to the supplied review scope, gives the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain; `decide` shall then return the `decide`-owned commit and that evaluated revision to its caller.',
     );
     expect(reviewSection).toContain(
-      'An authored `review` abort or failure, or a terminal result that does not establish those facts, terminates with the failure and the last `decide`-owned commit reported to the caller.',
+      'When `review` returns an authored abort or failure, or a terminal result that does not establish those facts, `decide` shall report the failure and the last `decide`-owned commit to its caller.',
     );
     expect(reviewSection).toContain(
-      'Any other nested-call error parks `decide` as failed and retains the control-plane error.',
+      'When the nested `review` call fails outside that authored result contract, `decide` shall park as failed and retain the control-plane error instead of reporting an authored review outcome.',
     );
 
     const review = states.reviewCommit?.invoke;
@@ -547,19 +606,19 @@ describe('DECIDE GEARS to FSM compilation', () => {
       ),
     }).toEqual({
       approved: {
-        guard: 'validReviewSuccess',
+        guard: 'reviewApproved',
         target: 'done',
-        actions: 'rememberReviewSuccess',
+        actions: 'rememberReviewApproval',
       },
       invalid: {
         guard: '<fallback>',
         target: 'reportedReviewFailure',
-        actions: 'rememberReviewProtocolFailure',
+        actions: 'rememberUnestablishedReview',
       },
       authoredFailure: {
         guard: 'authoredReviewFailure',
         target: 'reportedReviewFailure',
-        actions: 'rememberReviewFailure',
+        actions: 'rememberAuthoredReviewFailure',
       },
       controlFailure: {
         guard: '<fallback>',
@@ -616,15 +675,19 @@ describe('DECIDE GEARS to FSM compilation', () => {
 
     // Every arm entering a terminal state carries that state's own outcome, so
     // the description a host quotes holds however the run arrived there.
-    expect(entering.get('done')).toEqual(['rememberReviewSuccess']);
+    expect(entering.get('done')).toEqual(['rememberReviewApproval']);
     expect(entering.get('reportedReviewFailure')?.sort()).toEqual([
-      'rememberReviewFailure',
-      'rememberReviewProtocolFailure',
+      'rememberAuthoredReviewFailure',
+      'rememberUnestablishedReview',
     ]);
-    expect(states.done?.description).toContain('approved commit');
-    expect(states.reportedReviewFailure?.description).toContain('reports REVIEW');
+    expect(states.done?.description).toContain(
+      'REVIEW established no unsettled findings',
+    );
+    expect(states.reportedReviewFailure?.description).toContain(
+      "reported REVIEW's abort, failure, or unestablished result",
+    );
     expect(states.reportedReviewFailure?.description).not.toContain(
-      'approved commit',
+      'established no unsettled findings',
     );
   });
 
@@ -656,6 +719,187 @@ describe('DECIDE GEARS to FSM compilation', () => {
     }
   });
 
+  it('stages each proposal in its branch and promotes both only at the join', async () => {
+    const inputs: PlayerInput[] = [];
+    const settle: Partial<Record<string, (output: unknown) => void>> = {};
+    const actor = createActor(
+      decideMachine.provide({
+        actors: {
+          player: fromPromise(
+            ({ input }: { input: PlayerInput }) =>
+              new Promise((resolve) => {
+                inputs.push(input);
+                settle[input.stateId] = resolve as (output: unknown) => void;
+              }) as never,
+          ),
+        },
+      }),
+    ).start();
+    const initial = { ...CONTEXT, coderProposed: false, reviewerProposal: '' };
+    expect(actor.getSnapshot().context).toEqual({
+      ...initial,
+      callerTopic: '',
+      coderOutput: '',
+      decideCommit: '',
+    });
+
+    actor.send({ type: 'START_DECIDE', callerTopic: 'Choose a durable design.' });
+    await waitFor(actor, () => inputs.length === 2);
+    // Neither proposal call carries the other's proposal.
+    expect(inputs.map(({ stateId }) => stateId).sort()).toEqual([
+      'askCoderProposal',
+      'askReviewerProposal',
+    ]);
+    for (const input of inputs) {
+      expect(input).not.toHaveProperty('reviewerProposal');
+      expect(input).toMatchObject({ callerTopic: 'Choose a durable design.' });
+    }
+
+    settle.askCoderProposal?.({ guard: 'proposed' });
+    const staged = await waitFor(actor, (snapshot) =>
+      snapshot.matches({
+        independentProposals: { coderProposalRegion: 'coderProposalStaged' },
+      }),
+    );
+    expect(staged.context).toMatchObject({
+      stagedCoderProposed: true,
+      coderProposed: false,
+      reviewerProposal: '',
+    });
+
+    settle.askReviewerProposal?.({
+      guard: 'proposed',
+      reviewerProposal: 'Reviewer proposes one DR.',
+    });
+    const joined = await waitFor(actor, (snapshot) =>
+      snapshot.matches('synthesizeCommit'),
+    );
+    expect(joined.context).toEqual({
+      ...initial,
+      coderProposed: true,
+      reviewerProposal: 'Reviewer proposes one DR.',
+      coderOutput: '',
+      decideCommit: '',
+    });
+    expect(inputs.at(-1)).toMatchObject({
+      stateId: 'synthesizeCommit',
+      callerTopic: 'Choose a durable design.',
+      reviewerProposal: 'Reviewer proposes one DR.',
+    });
+    actor.stop();
+  });
+
+  it.each([
+    ['actor error', new Error('player is down'), 'Error', 'player is down'],
+    [
+      'malformed output',
+      { guard: 'needsBossReply', question: '  ' },
+      'PlayerOutputError',
+      'Player result for DECIDE-1 did not match a declared outcome.',
+    ],
+  ] as const)(
+    'clears the sibling question and staged results when a proposal fails with %s',
+    async (_label, failure, name, message) => {
+      let settleCoder: (() => void) | undefined;
+      const actor = createActor(
+        decideMachine.provide({
+          actors: {
+            player: fromPromise(async ({ input }: { input: PlayerInput }) => {
+              if (input.stateId === 'askReviewerProposal') {
+                return { guard: 'needsBossReply', question: 'Which scope?' };
+              }
+              await new Promise<void>((resolve) => {
+                settleCoder = resolve;
+              });
+              if (failure instanceof Error) throw failure;
+              return failure as never;
+            }),
+          },
+        }),
+      ).start();
+      actor.send({ type: 'START_DECIDE', callerTopic: 'Choose a design.' });
+      // The reviewer parks its question while the coder is still working.
+      const parked = await waitFor(actor, (snapshot) =>
+        snapshot.matches({
+          independentProposals: {
+            reviewerProposalRegion: 'awaitReviewerProposalReply',
+          },
+        }),
+      );
+      expect(Object.keys(parked.context.pendingBossQuestions)).toEqual([
+        'askReviewerProposal',
+      ]);
+      settleCoder?.();
+      const failed = await waitFor(actor, (snapshot) => snapshot.matches('failed'));
+
+      expect(failed.context.pendingBossQuestions).toEqual({});
+      expect(failed.context.bossReplies).toEqual({});
+      expect(failed.context).toMatchObject({
+        stagedCoderProposed: false,
+        stagedReviewerProposal: '',
+        lastError: { name, message },
+      });
+      // A JSON-safe record, never the thrown value itself.
+      expect(failed.context.lastError).not.toBeInstanceOf(Error);
+      expect(JSON.parse(JSON.stringify(failed.context.lastError))).toEqual(
+        failed.context.lastError,
+      );
+      actor.stop();
+    },
+  );
+
+  it('clears the Boss reply when the resumed synthesis fails', async () => {
+    const inputs: PlayerInput[] = [];
+    const script: unknown[] = [
+      { guard: 'needsBossReply', question: 'Which package owns it?' },
+      new Error('player is down'),
+    ];
+    const actor = createActor(
+      decideMachine.provide({
+        actors: {
+          player: fromPromise(async ({ input }: { input: PlayerInput }) => {
+            inputs.push(input);
+            if (input.stateId === 'askCoderProposal') return { guard: 'proposed' };
+            if (input.stateId === 'askReviewerProposal') {
+              return { guard: 'proposed', reviewerProposal: 'Reviewer proposal' };
+            }
+            const next = script.shift();
+            if (next instanceof Error) throw next;
+            return next as never;
+          }),
+        },
+      }),
+    ).start();
+    actor.send({ type: 'START_DECIDE', callerTopic: 'Choose a design.' });
+    await waitFor(actor, (snapshot) => snapshot.matches('awaitBossReply'));
+    expect(actor.getSnapshot().context.pendingBossQuestions).toMatchObject({
+      synthesizeCommit: { resumeStateId: 'synthesizeCommit', sourceItem: 'DECIDE-3' },
+    });
+
+    actor.send({
+      type: 'BOSS_REPLY',
+      questionId: 'synthesizeCommit',
+      answer: 'The runtime package.',
+    });
+    const failed = await waitFor(actor, (snapshot) => snapshot.matches('failed'));
+
+    // The resumed call carried the question and reply it answers ...
+    expect(inputs.at(-1)).toMatchObject({
+      stateId: 'synthesizeCommit',
+      pendingBossQuestion: { question: 'Which package owns it?' },
+      bossReply: 'The runtime package.',
+    });
+    // ... and its failure keeps neither.
+    expect(failed.context.pendingBossQuestions).toEqual({});
+    expect(failed.context.bossReplies).toEqual({});
+    expect(failed.context.lastError).toMatchObject({
+      name: 'Error',
+      message: 'player is down',
+    });
+    expect(script).toEqual([]);
+    actor.stop();
+  });
+
   it('rejects a textless control-action probe without throwing', () => {
     const interrupt = orderedTransitions(machineConfig, 'root').get(
       'root.on.BOSS_INTERRUPT',
@@ -663,7 +907,7 @@ describe('DECIDE GEARS to FSM compilation', () => {
     expect(interrupt).toBeDefined();
     expect(
       evaluateGuard(interrupt?.guard, {
-        guard: '<inline>',
+        guard: 'interruptTargets',
         target: '#independentProposals',
         context: CONTEXT,
         event: {

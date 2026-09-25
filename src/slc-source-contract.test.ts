@@ -106,7 +106,9 @@ const linkedWorkflows = [
       import.meta.url,
     ),
     linkedFields: decideInternal.VERBATIM_PAYLOAD_FIELDS,
-    expectedFields: ['coderProposal', 'reviewerProposal', 'coderOutput'],
+    // DECIDE-1 declares no `coderProposal`: nothing relays Coder's own
+    // proposal, so only consumed payloads stay verbatim (DR-066).
+    expectedFields: ['reviewerProposal', 'coderOutput'],
     unfinishedFinalStateIds: decideInternal.UNFINISHED_FINAL_STATE_IDS,
     expectedUnfinishedFinalStateIds: ['reportedReviewFailure'],
   },

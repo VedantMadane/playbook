@@ -62,7 +62,7 @@ import { _internal as devArtifact } from '../reference/sdlc/dev.playbook/dev.pla
 import { decideMachine } from '../reference/sdlc/decide.playbook/decide.fsm.js';
 import createDecidePlaybookRuntime, {
   _internal as decideArtifact,
-  type DecidePlaybookHostCapabilities,
+  type PlaybookHostCapabilities as DecidePlaybookHostCapabilities,
 } from '../reference/sdlc/decide.playbook/decide.playbook.js';
 import { prMachine } from '../reference/sdlc/pr.playbook/pr.fsm.js';
 import { _internal as prArtifact } from '../reference/sdlc/pr.playbook/pr.playbook.js';

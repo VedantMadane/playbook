@@ -3753,11 +3753,12 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(runtime.describe).toBeTypeOf('function');
     expect(runtime.apply).toBeTypeOf('function');
     expect(runtime.describe!()).toMatchObject({
-      stateDescription: 'DECIDE failed and is waiting for a new topic.',
+      stateDescription: 'DECIDE failed and is waiting for Boss to recover it.',
       actions: [
         {
           id: 'retry:START_DECIDE',
-          label: 'Retry: Coder and Reviewer prepare independent proposals.',
+          label:
+            'Retry: Coder and Reviewer independently propose designs for the topic in parallel.',
           standing: 'ready',
         },
       ],
@@ -3767,7 +3768,9 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     await harness.turn('Where are we right now?', 2);
 
     const digest = harness.decisionPrompts().at(-1) ?? '';
-    expect(digest).toContain('DECIDE failed and is waiting for a new topic.');
+    expect(digest).toContain(
+      'DECIDE failed and is waiting for Boss to recover it.',
+    );
     expect(advertisedActionIds(digest)).toEqual(['retry:START_DECIDE']);
     // The status question settled `respond` on the published control view:
     // no delivery, no FSM event, no apply.
@@ -3793,7 +3796,8 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       label: 'approval-backed completion',
       reviewResult: 'approved' as const,
       terminalId: 'done',
-      meaning: 'DECIDE completed with an approved commit.',
+      meaning:
+        'DECIDE completed: REVIEW established no unsettled findings for the decide-owned commit at the reported evaluated revision.',
       hiddenOutputKeys: [
         'decideCommit',
         'evaluatedRevision',
@@ -3804,7 +3808,8 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       label: 'REVIEW failure report',
       reviewResult: 'aborted' as const,
       terminalId: 'reportedReviewFailure',
-      meaning: 'DECIDE reports REVIEW’s failure and its last commit.',
+      meaning:
+        "DECIDE reported REVIEW's abort, failure, or unestablished result to its caller with the last decide-owned commit.",
       hiddenOutputKeys: [
         'lastDecideCommit',
         'noUnsettledFindings',
