@@ -2567,6 +2567,7 @@ export function assertPlaybookRuntimeSnapshot(
       'retainedEffectSourceSessionId',
       'retainedEffectReconciliation',
       'failedEffectAttempt',
+      'recoveryCheckpoint',
       'suspendedCall',
     ],
     'runtime snapshot',
@@ -2854,6 +2855,24 @@ export function assertPlaybookRuntimeSnapshot(
     }
     failedEffectAttempt = Object.freeze({ boundaryPrefix, attemptId });
   }
+  let recoveryCheckpoint: PlaybookRuntimeSnapshot['recoveryCheckpoint'];
+  if (own(snapshot, 'recoveryCheckpoint')) {
+    const checkpoint = snapshot.recoveryCheckpoint;
+    if (state.stateId !== 'failed' || !isRecord(checkpoint)) {
+      throw new TypeError('runtime recoveryCheckpoint requires a failed state and an object');
+    }
+    rejectUnknownKeys(checkpoint, ['stateId', 'prompt', 'machine', 'boundaryPrefix'], 'runtime recoveryCheckpoint');
+    const stateId = requireNonEmptyString(checkpoint.stateId, 'recoveryCheckpoint.stateId');
+    const prompt = requireNonEmptyString(checkpoint.prompt, 'recoveryCheckpoint.prompt');
+    const boundaryPrefix = checkpoint.boundaryPrefix;
+    if (!Number.isSafeInteger(boundaryPrefix) || typeof boundaryPrefix !== 'number' ||
+        boundaryPrefix < 0 || boundaryPrefix > effectLedger.boundaries.length ||
+        !isRecord(checkpoint.machine) || checkpoint.machine.status !== 'active' ||
+        checkpoint.machine.value !== stateId) {
+      throw new TypeError('runtime recoveryCheckpoint has an invalid machine or boundary prefix');
+    }
+    recoveryCheckpoint = Object.freeze({stateId, prompt, boundaryPrefix, machine: snapshotJsonValue(checkpoint.machine)});
+  }
   const fields = {
     playbookId,
     machine,
@@ -2871,6 +2890,7 @@ export function assertPlaybookRuntimeSnapshot(
     ...(failedEffectAttempt === undefined
       ? {}
       : { failedEffectAttempt }),
+    ...(recoveryCheckpoint === undefined ? {} : { recoveryCheckpoint }),
   };
   return Object.freeze({
     schemaVersion: 4,

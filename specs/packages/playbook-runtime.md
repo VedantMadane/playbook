@@ -909,7 +909,8 @@ for each registered resumable
 state id whose explicit-state-jump event (`BOSS_INTERRUPT` with that
 `targetId` and optional textual fields omitted) the live snapshot
 accepts, guards included, it shall advertise `jump:<stateId>`.
-The retry event shall come from the artifact's entry-event declaration
+A valid interrupted-invocation checkpoint shall instead advertise and execute the step retry under [[recovery-3](recovery.md#recovery-3)].
+The fallback retry event shall come from the artifact's entry-event declaration
 where that declaration names the FSM context member the machine's entry
 action copies the exact Boss text into: the runtime shall build the
 deterministic entry event from that member of the live snapshot,

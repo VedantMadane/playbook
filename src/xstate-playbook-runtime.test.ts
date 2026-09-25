@@ -6367,7 +6367,7 @@ describe('parked-session snapshot over the shared factory', () => {
         key: 'target-retry',
         signal: new AbortController().signal,
       }),
-    ).toMatchObject({ disposition: 'rejected' });
+    ).toMatchObject({ disposition: 'failed' });
     const targetApplyTraces = telemetry
       .map(({ payload }) => payload as PlaybookTraceEvent)
       .filter(
@@ -7559,7 +7559,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it('advertises no retry when the failure state refuses the recorded event', async () => {
+  it('retries the captured step when the failure state refuses the recorded event', async () => {
     let playerCalls = 0;
     const { ports } = makeRecordingPorts({
       callPlayer: async () => {
@@ -7581,12 +7581,12 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     const failedRun = await runtime.handleBossInput(turn('use sqlite'));
     expect(failedRun.outcome).toBe('failed');
 
-    // The recorded last classified event is BOSS_REPLY, which the failure
-    // state does not accept — no retry entry, no invented substitute.
+    // The recorded BOSS_REPLY is refused by failed; the captured invocation
+    // still retries the exact continuation, including its answer.
     const view = runtime.describe!();
     expect(view.state.stateId).toBe('failed');
     expect(view.lastError).toMatchObject({ message: 'resume crashed' });
-    expect(view.actions.map(({ id }) => id)).toEqual(['jump:implement']);
+    expect(view.actions.map(({ id }) => id)).toEqual(['retry:START', 'jump:implement']);
     await runtime.dispose();
   });
 
@@ -7615,8 +7615,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       { id: 'jump:implement', label: 'Resume from: implement state', standing: 'ready' },
     ]);
 
-    // The recovery input rides the machine snapshot the host already
-    // persists, so nothing is added to the snapshot for it.
+    // DR-066 adds the interrupted invocation beside the parked machine.
     const snapshot = source.exportSnapshot!()!;
     expect(Object.keys(snapshot).sort()).toEqual([
       'effectLedger',
@@ -7624,6 +7623,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       'machine',
       'pendingBossQuestions',
       'playbookId',
+      'recoveryCheckpoint',
       'roleResumeTokens',
       'schemaVersion',
       'sequences',
@@ -7673,9 +7673,8 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       });
     };
 
-    // The recorded event is the reply that resumed the work, which the
-    // failure state refuses — so the recorded source advertises no retry at
-    // all, in its own live process.
+    // The invocation checkpoint recovers even when the recorded reply is
+    // not accepted by the failure state.
     const { ports: recordedPorts } = makePorts();
     const recorded = createWorkflowRuntime({});
     await recorded.init(makeSession(recordedPorts));
@@ -7687,6 +7686,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       'failed',
     );
     expect(recorded.describe!().actions.map(({ id }) => id)).toEqual([
+      'retry:START',
       'jump:implement',
     ]);
     // The answered question the failure state retains in context is not
@@ -7774,7 +7774,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it('excludes the declared retry when its member holds no text instead of falling back to the record', async () => {
+  it('recovers the captured invocation without inventing a missing entry payload', async () => {
     const createUnsourcedRuntime = createXStatePlaybookRuntime(workflowMachine, {
       ...workflowSpec,
       label: 'unsourced-workflow',
@@ -7795,10 +7795,10 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     expect((await runtime.handleBossInput(turn('build it'))).outcome).toBe(
       'failed',
     );
-    // The recorded event would have produced `retry:START` here; a declared
-    // source that cannot be read excludes the candidate rather than
-    // reaching for a record a restored process would not have.
+    // The invocation checkpoint supplies the original input independently
+    // of the absent entry context field; no replacement text is invented.
     expect(runtime.describe!().actions.map(({ id }) => id)).toEqual([
+      'retry:START',
       'jump:implement',
     ]);
     await runtime.dispose();
@@ -7819,6 +7819,8 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       'jump:implement',
     ]);
     const snapshot = source.exportSnapshot!()!;
+    // Older snapshots retain the original process-local fallback contract.
+    delete snapshot.recoveryCheckpoint;
     await source.dispose();
 
     const restored = createWorkflowRuntime({}, snapshot.effectLedger);
@@ -8841,12 +8843,12 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     const failed = await runtime.handleBossInput(turn('take the second route'));
     expect(failed.outcome).toBe('failed');
     expect(runtime.describe!().actions).toContainEqual({
-      id: 'retry:BOSS_INTERRUPT',
+      id: 'retry:step',
       label: 'Retry: secondRoute state',
       standing: 'ready',
     });
     expect(runtime.describe!().actions).not.toContainEqual({
-      id: 'retry:BOSS_INTERRUPT',
+      id: 'retry:step',
       label: 'Retry: firstRoute state',
       standing: 'ready',
     });

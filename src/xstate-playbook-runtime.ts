@@ -3527,6 +3527,7 @@ export function createXStatePlaybookRuntime<
         `${label} current host effect ledger`,
       );
     let effectLedgerMirror = currentEffectLedger();
+    let recoveryCheckpoint: PlaybookRuntimeSnapshot['recoveryCheckpoint'];
     let retainedEffectSourceSessionId: string | undefined;
     let retainedEffectReconciliation:
       | PlaybookRuntimeSnapshot['retainedEffectReconciliation']
@@ -5600,6 +5601,55 @@ export function createXStatePlaybookRuntime<
       );
     }
 
+    function captureRecoveryCheckpoint(stateId: string, prompt: string): void {
+      // Capture after the entry emissions drain: the invocation is now a
+      // real active child in XState's persisted snapshot, before host work.
+      recoveryCheckpoint = undefined;
+      if (!actor || currentState().stateId !== stateId) return;
+      try {
+        const current = currentEffectLedger();
+        recoveryCheckpoint = deepFreeze({
+          stateId,
+          prompt,
+          machine: detachPersistedMachineSnapshot(actor.getPersistedSnapshot()),
+          boundaryPrefix: current.boundaries.length,
+        });
+      } catch {
+        // An in-memory-only context is still executable; it simply cannot
+        // promise a durable step retry. Keep the legacy control behavior.
+      }
+    }
+
+    function stepReplayIsSafe(): boolean {
+      if (!recoveryCheckpoint || hasUnresolvedReconciliation()) return false;
+      const current = currentEffectLedger();
+      return current.boundaries.slice(recoveryCheckpoint.boundaryPrefix).every(
+        (boundary) => runtimeBoundaryIsOwned(boundary) &&
+          boundary.logicalOperationId === undefined &&
+          boundary.physicalReceipt?.classification === 'unchanged',
+      );
+    }
+
+    function validateRecoveryCheckpoint(
+      checkpoint: PlaybookRuntimeSnapshot['recoveryCheckpoint'],
+    ): void {
+      if (!checkpoint) return;
+      const node = machine.root.states[checkpoint.stateId];
+      const persisted = checkpoint.machine as Record<string, JsonValue>;
+      const children = persisted.children;
+      if (!node || node.invoke.length !== 1 ||
+          !['player', 'captain'].includes(String(node.invoke[0]!.src)) ||
+          !isPlainObject(children) || Object.keys(children).length !== 1) {
+        throw new TypeError(`${label} recovery checkpoint does not name one current invocation`);
+      }
+      const child = children[node.invoke[0]!.id] as Record<string, JsonValue> | undefined;
+      if (!child || child.src !== node.invoke[0]!.src ||
+          !isPlainObject(child.snapshot) || child.snapshot.status !== 'active' ||
+          !isPlainObject(child.snapshot.input) || child.snapshot.input.stateId !== checkpoint.stateId) {
+        throw new TypeError(`${label} recovery checkpoint invocation is incompatible`);
+      }
+    }
+
     function captureEffectLedgerPrefixSequence(): number | undefined {
       if (!hasGovernedPlayerStates) return undefined;
       try {
@@ -5682,6 +5732,7 @@ export function createXStatePlaybookRuntime<
         // State-entry telemetry/status must precede the call they describe.
         await drainEmissions();
         signal.throwIfAborted();
+        captureRecoveryCheckpoint(input.stateId, freshPrompt);
         const deferredContinuation = activeDeferredContinuation;
         const reconstructed = takeReconstructedGovernedPlayerResult(
           input,
@@ -6112,6 +6163,7 @@ export function createXStatePlaybookRuntime<
           signal.throwIfAborted();
           await drainEmissions();
           signal.throwIfAborted();
+          captureRecoveryCheckpoint(input.stateId, prompt);
           const turnId = activeTurnId;
           const callId = `captain-${++captainCallSequence}`;
           const visibility = callOptions?.visibility ?? 'visible';
@@ -6908,6 +6960,10 @@ export function createXStatePlaybookRuntime<
               latchRuntimeError(error);
             }
             if (state.stateId === 'failed') {
+              if (previousState?.stateId !== 'failed' &&
+                  previousState?.stateId !== recoveryCheckpoint?.stateId) {
+                recoveryCheckpoint = undefined;
+              }
               if (
                 previousState?.stateId !== 'failed' ||
                 activeGovernedBoundarySeen
@@ -7184,6 +7240,7 @@ export function createXStatePlaybookRuntime<
       deferInspectionEmissions = false;
       deferredInspectionEmissions = [];
       lastBossEvent = undefined;
+      recoveryCheckpoint = undefined;
       suppressInspectionEmissions = false;
       initialized = false;
       traceSequence = 0;
@@ -7205,6 +7262,7 @@ export function createXStatePlaybookRuntime<
       event?: EventObject;
       deferredRestoreOperationId?: string;
       unresolvedEffectAction?: 'reconcile' | 'abandon';
+      retryStep?: true;
     }
 
     function snapshotCan(snapshot: unknown, event: EventObject): boolean {
@@ -7250,6 +7308,19 @@ export function createXStatePlaybookRuntime<
       stateId: string | undefined,
     ): DerivedControlAction | undefined {
       if (stateId !== 'failed') return undefined;
+      if (recoveryCheckpoint !== undefined) {
+        const description = stateDescriptions.get(recoveryCheckpoint.stateId);
+        if (description === undefined || !stepReplayIsSafe()) return undefined;
+        const entry = spec.entryEvent;
+        const entryTarget = entry === undefined ? undefined :
+          firstTransitionTarget(machine, stateId, entry.type);
+        const id = entryTarget === recoveryCheckpoint.stateId
+          ? `retry:${entry!.type}` : 'retry:step';
+        return {
+          action: { id, label: `Retry: ${description}`, standing: 'ready' },
+          retryStep: true,
+        };
+      }
       if (!failedAttemptAllowsReplay()) return undefined;
       const retryEvent = retryEventFrom(snapshot);
       if (retryEvent === undefined) return undefined;
@@ -7510,6 +7581,7 @@ export function createXStatePlaybookRuntime<
         boundSession.playbookId,
         { allowSuspendedCall: true },
       );
+      validateRecoveryCheckpoint(boundSnapshot.recoveryCheckpoint);
       if (
         kind === 'adopt' &&
         effectLedgerCapability !== undefined &&
@@ -7617,6 +7689,7 @@ export function createXStatePlaybookRuntime<
       initInFlight = initialization;
       const initTask = (async () => {
         session = boundSession;
+        recoveryCheckpoint = boundSnapshot.recoveryCheckpoint;
         syncDeferredReconciliationOverlay();
         refreshUnresolvedSemanticReconciliation(effectLedgerMirror);
         prepareReconstructedGovernedDelivery(
@@ -8348,6 +8421,8 @@ export function createXStatePlaybookRuntime<
           ...(failedEffectAttempt === undefined
             ? {}
             : { failedEffectAttempt }),
+          ...(state.stateId === 'failed' && recoveryCheckpoint !== undefined
+            ? { recoveryCheckpoint } : {}),
           ...(suspendedCall === undefined ? {} : { suspendedCall }),
         };
       },
@@ -8657,6 +8732,14 @@ export function createXStatePlaybookRuntime<
                       ? 'no-action'
                       : 'quiescent',
                   );
+                } else if (candidate.retryStep) {
+                  const checkpoint = recoveryCheckpoint!;
+                  stopActor();
+                  actor = buildActor(runtimePorts!, checkpoint.machine);
+                  suppressInspectionEmissions = false;
+                  actor.start();
+                  await waitForPlaybookQuiescence(actor, { pendingCalls: nestedBridge });
+                  run = runResultFor(settledOutcome(signal));
                 } else {
                   actor.send(candidate.event!);
                   await waitForPlaybookQuiescence(actor, {

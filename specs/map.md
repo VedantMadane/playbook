@@ -92,6 +92,8 @@ meta.md       The spec of specs
 | [DR-064](decisions/064-the-config-directory-is-named-config.md) | 064-the-config-directory-is-named-config.md | The config directory is named config: `${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml`, the former `playbook/` location relocated ahead of the XDG one, the emptied former directory removed |
 | [DR-065](decisions/065-prompt-prefix-pass.md) | 065-prompt-prefix-pass.md | The prompt-prefix pass: a second GEARS pass moves each prompt's relayed runtime values after its instructions so repeated runs share a cacheable prefix, realized by a deterministic tool and accepted by the fidelity checker through its provenance section |
 
+| [DR-066](decisions/066-captain-prepares-step-recovery.md) | 066-captain-prepares-step-recovery.md | Bounded Captain preparation and runtime-owned interrupted-step recovery |
+
 ## Packages
 
 | File | Summary |
@@ -119,4 +121,5 @@ meta.md       The spec of specs
 | [playbook-cli.md](packages/playbook-cli.md) | Interactive and headless launch, player config, durable session reopening, provisioning, persistence, the shared session store, replay stream, and worktree host-capabilities facade, and checks |
 | [playbook-runtime.md](packages/playbook-runtime.md) | Role-local linked runtime ports, execution, composition, tracing, persistence, and control |
 | [session-storage.md](packages/session-storage.md) | Shared session files, recovery, replay context, hints, migration and deletion |
+| [recovery.md](packages/recovery.md) | Captain preparation and durable interrupted-step recovery |
 | [release.md](packages/release.md) | Versioning, package surfaces, release workflow, smoke, and live acceptance |

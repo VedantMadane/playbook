@@ -484,6 +484,12 @@ interface PlaybookRuntimeSnapshot {
     readonly boundaryPrefix: number;
     readonly attemptId: string | null;
   };
+  recoveryCheckpoint?: {
+    readonly stateId: string;
+    readonly prompt: string;
+    readonly machine: JsonValue;
+    readonly boundaryPrefix: number;
+  };
   suspendedCall?: PlaybookSuspendedCall;
 }
 

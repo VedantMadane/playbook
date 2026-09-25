@@ -774,7 +774,16 @@ export interface PlaybookRuntimeSnapshot {
     readonly boundaryPrefix: number;
     readonly attemptId: string | null;
   };
+  /** Interrupted invocation, captured before its external call (DR-066). */
+  recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
   suspendedCall?: PlaybookSuspendedCall;
+}
+
+export interface PlaybookRecoveryCheckpoint {
+  readonly stateId: string;
+  readonly prompt: string;
+  readonly machine: JsonValue;
+  readonly boundaryPrefix: number;
 }
 
 // DR-063 §3: what running an advertised action would do. `ready` is the only
