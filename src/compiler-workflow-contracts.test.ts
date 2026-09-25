@@ -212,7 +212,7 @@ it("holds a builtin compiled under its own id to the catalog's interface", () =>
     "shall take the interface's property name",
   );
   expect(text2gears).toContain(
-    "an effect-owned commit identity keeps its canonical per-call name",
+    "whether the value is semantic, presentation, or effect-owned, while the commit a call itself creates keeps the canonical `latestCommit`",
   );
   expect(text2gears).toContain(
     "report it as an incompatible compiler input rather than rename or invent",

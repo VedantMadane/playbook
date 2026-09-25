@@ -175,11 +175,12 @@ Where the selected pipeline supplies the
 [workflow contracts](workflow-contracts.json) catalog and the Source's basename
 is one of its `literalTargetBindings`, the compiled workflow is held to that
 builtin's declared output interface, because callers compiled against the
-catalog address it by that id: a semantic or presentation result property
-whose value that interface returns shall take the interface's property name —
-`branch`, `issueSummary`, and `coderOutput` for `branch`, for instance — while
-an effect-owned commit identity keeps its canonical per-call name for the FSM
-to project into the interface.
+catalog address it by that id: a result property whose value that interface
+returns shall take the interface's property name — `branch`, `issueSummary`,
+and `coderOutput` for `branch`; `evaluatedRevision` for the revision a clean
+review round evaluated — whether the value is semantic, presentation, or
+effect-owned, while the commit a call itself creates keeps the canonical
+`latestCommit` for the FSM to project into the interface's field.
 A Source placeholder that names such a value otherwise is an inconsistency
 between the Source and the catalog: leave the Target unwritten and report it
 as an incompatible compiler input rather than rename or invent.

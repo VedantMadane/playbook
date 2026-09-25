@@ -23,7 +23,7 @@ Everything else of that record stands.
 
 - Where the selected pipeline supplies the catalog and the compiled source's basename is one of its `literalTargetBindings`, the compiled workflow is held to that builtin's declared output interface: callers compiled against the catalog will address the artifact by that id, so the id reserves the interface.
 - `text2gears` reads the catalog as one of its semantic inputs.
-  A semantic or presentation result property whose value the declared interface returns takes the interface's property name; an effect-owned commit identity keeps its canonical per-call name, which the FSM projects into the interface's field as before.
+  A result property whose value the declared interface returns takes the interface's property name, whether the value is semantic, presentation, or effect-owned — `evaluatedRevision` for the revision a clean review round observes, `baseRevision` for the commit a branch was created from; only the commit a call itself creates keeps its canonical per-call name `latestCommit`, which the FSM projects into the interface's field (`lastCodeCommit`, `decideCommit`) as before.
   A Source placeholder that names such a value otherwise is an inconsistency between the source and the catalog, reported as an incompatible compiler input rather than resolved by renaming.
 - `gears2fsm` declares the terminal output of such a workflow as exactly the interface: its variants, `status` constants, property names, and requiredness, derived from typed context.
   Authored outcomes the interface cannot express are the same inconsistency, reported the same way; the definition invents no outcome and renames none.
