@@ -63,7 +63,7 @@ export interface RuntimeBoundaryCalls {
      * with the cause the boundary decided at the call itself, where the role,
      * the resolved player, and the reported error are known.
      */
-    markPlayerResultFailure?(error: Error): Error;
+    markPlayerResultFailure?(error: Error, result?: PlayerResult): Error;
     callJudge(purpose: JudgePurpose, stateId: string | undefined, prompt: string, signal: AbortSignal): Promise<string>;
     callCaptain?(input: PlaybookCaptainInput, prompt: string, signal: AbortSignal, callOptions?: XStateCaptainCallOptions): Promise<CaptainResult>;
 }
@@ -125,8 +125,8 @@ export declare function playerFailureCause(input: {
 /**
  * DR-063 §1: the cause of an unresolved governed settlement. A reconciled
  * mismatch supplies its own receipt-read cause; the reasons a runtime owns map
- * to adjudication, abort, and runtime-defect codes. Shared with DECIDE's
- * bespoke runtime, which decides the same reasons.
+ * to adjudication, abort, and runtime-defect codes. Exported so linked
+ * machinery of an artifact's own decides the same reasons.
  */
 export declare function governedSettlementCause(reason: string, error: unknown, aborted: boolean, supplied: PlaybookFailureCause | undefined): PlaybookFailureCause;
 /**
@@ -195,6 +195,17 @@ interface XStateRepositoryDeferredRestoreResult {
     readonly effectLedger: PlaybookEffectLedger;
 }
 type XStateEffectBoundarySeed = Omit<PlaybookEffectBoundaryStart, 'playbookId' | 'canonicalWorktree' | 'baseline' | 'cohortId'>;
+/** One member's completion inside a repository cohort (DR-067 §1). */
+type XStateRepositoryCohortCompletion<T> = XStateRepositoryExclusiveCompletion<T> & {
+    readonly roleId: string;
+};
+interface XStateRepositoryCohortResult<T> {
+    readonly baseline: PlaybookRepositoryReceipt['baseline'];
+    readonly invocationId: string;
+    readonly operations: Readonly<Record<string, XStateRepositoryOperationSettlement<T> | XStateRepositoryOperationRejection>>;
+    readonly receipts: Readonly<Record<string, PlaybookRepositoryReceipt>>;
+    readonly effectLedger: PlaybookEffectLedger;
+}
 export interface XStateRepositoryCapability {
     runExclusive<T>(options: {
         readonly signal: AbortSignal;
@@ -222,6 +233,27 @@ export interface XStateRepositoryCapability {
         readonly signal: AbortSignal;
         readonly operationId: string;
     }): Promise<XStateRepositoryDeferredParked | XStateRepositoryDeferredRestoreResult>;
+    /**
+     * DR-067 §1 / PBRT-73: one repository claim over the working leaves of a
+     * parallel state entered together — every member an `unchanged` boundary
+     * of one cohort, the operations run concurrently under that claim, and
+     * one completion callback per member. Required for an artifact that
+     * declares a parallel state.
+     */
+    runCohort?<T>(options: {
+        readonly signal: AbortSignal;
+        readonly invocationId: string;
+        readonly roleIds: readonly string[];
+        readonly dispositionsByRole: Readonly<Record<string, readonly ['unchanged']>>;
+        readonly effectBoundaries: Readonly<Record<string, XStateEffectBoundarySeed>>;
+        readonly operations: Readonly<Record<string, (context: {
+            readonly baseline: PlaybookRepositoryReceipt['baseline'];
+            readonly identity: unknown;
+            readonly invocationId: string;
+            readonly roleId: string;
+        }) => Promise<T>>>;
+        readonly completeEffectBoundary: (completion: XStateRepositoryCohortCompletion<T>) => XStateRepositoryCompletionEvidence | Promise<XStateRepositoryCompletionEvidence>;
+    }): Promise<XStateRepositoryCohortResult<T>>;
 }
 /** The runtime ABI this engine implements (DR-022). */
 export declare const RUNTIME_ABI = 1;
@@ -458,8 +490,8 @@ export declare function defaultBuildJudgePrompt(input: PlaybookPlayerInput, fina
  * so the judge omits it. Rendering the clause verbatim asked the judge for
  * `question`, `planningResult`, or `evaluatedRevision`, which the reconciler
  * rejects as a structural error, spending the single correction on a
- * self-inflicted defect. Exported so a bespoke linked runtime (DECIDE's
- * parallel machinery) renders the identical contract instead of restating it.
+ * self-inflicted defect. Exported so linked machinery of an artifact's own
+ * renders the identical contract instead of restating it.
  */
 export declare function renderGovernedOutcomeContract(guard: string, description: string, outcome: XStateGovernedOutcomeSpec | undefined): string[];
 export interface PlayerAdjudicationSpec {
@@ -495,7 +527,11 @@ export declare function defaultBuildCaptainJudgePrompt(input: {
     readonly sourceItem: string;
     readonly result: Readonly<Record<string, string>>;
 }, finalText: string): string;
-/** Targets of the FSM's `awaitBossReply` BOSS_REPLY transitions. */
+/**
+ * Targets of the FSM's `awaitBossReply` BOSS_REPLY transitions, plus — for
+ * the parallel shape gears2fsm compiles (DR-067) — the targets of each
+ * region wait leaf's branch-local BOSS_REPLY arms, resolved to state ids.
+ */
 export declare function resumableStateIdsFromMachine(machine: AnyStateMachine): ReadonlySet<string>;
 /**
  * Source state descriptions by state key, node id, and `meta.playbook`
@@ -524,10 +560,12 @@ export declare function terminalOutcomesFromMachine(machine: AnyStateMachine, la
  * the optional parked-session snapshot capability (DR-014) and the retained-
  * snapshot adoption capability (DR-038).
  *
- * Scope: flat single-region machines — no parallel state, no compound
- * child states, and every root state's `meta.playbook.stateId` equal to its
- * state key — so each snapshot exposes exactly one playbook state id.
- * Parallel-region FSMs keep their own linked runtimes.
+ * Scope: flat single-region machines — every root state's
+ * `meta.playbook.stateId` equal to its state key, so each snapshot exposes
+ * exactly one playbook state id — plus the parallel profile of DR-067: root
+ * `type: 'parallel'` states of the shape gears2fsm compiles, whose regions
+ * run as one all-`unchanged` repository cohort with keyed pending questions.
+ * A machine declaring a parallel state omits `adopt`.
  */
 export declare function createXStatePlaybookRuntime<TOptions, THostCapabilities extends object>(machine: AnyStateMachine, spec: XStatePlaybookRuntimeSpecV3<TOptions>): XStatePlaybookRuntimeFactory<XStatePlaybookRuntimeConstruction<TOptions, THostCapabilities>, 3>;
 export {};

@@ -117,8 +117,8 @@ export function playerFailureCause(input) {
 /**
  * DR-063 §1: the cause of an unresolved governed settlement. A reconciled
  * mismatch supplies its own receipt-read cause; the reasons a runtime owns map
- * to adjudication, abort, and runtime-defect codes. Shared with DECIDE's
- * bespoke runtime, which decides the same reasons.
+ * to adjudication, abort, and runtime-defect codes. Exported so linked
+ * machinery of an artifact's own decides the same reasons.
  */
 export function governedSettlementCause(reason, error, aborted, supplied) {
     if (supplied !== undefined)
@@ -242,7 +242,7 @@ function configuredOptionsFromFactoryInput(value, label) {
         effectLedger: effectLedger,
     };
 }
-function repositoryCapabilityFromHostCapabilities(hostCapabilities, label) {
+function repositoryCapabilityFromHostCapabilities(hostCapabilities, label, requireCohort = false) {
     const descriptor = hostCapabilities === undefined
         ? undefined
         : Object.getOwnPropertyDescriptor(hostCapabilities, 'repository');
@@ -256,8 +256,13 @@ function repositoryCapabilityFromHostCapabilities(hostCapabilities, label) {
         Array.isArray(repository) ||
         typeof repository.runExclusive !==
             'function' ||
-        typeof repository.runDeferred !== 'function') {
-        throw new TypeError(`${label} schema-3 factory input hostCapabilities.repository must be an own data property exposing runExclusive and runDeferred`);
+        typeof repository.runDeferred !==
+            'function' ||
+        (requireCohort &&
+            typeof repository.runCohort !== 'function')) {
+        throw new TypeError(requireCohort
+            ? `${label} schema-3 factory input hostCapabilities.repository must be an own data property exposing runExclusive, runCohort, and runDeferred`
+            : `${label} schema-3 factory input hostCapabilities.repository must be an own data property exposing runExclusive and runDeferred`);
     }
     return repository;
 }
@@ -448,7 +453,7 @@ export function normalizeErrorFull(err) {
 // slc/link.md §Abort: cancellation is causal identity with the applicable
 // signal's reason — never an `AbortError` name, never bare signal state. A
 // distinct failure observed while the signal is aborted stays a non-abort
-// control error and takes precedence (mirrors DECIDE's bespoke reference).
+// control error and takes precedence.
 function isAbortFailure(error, signal) {
     return signal.aborted && Object.is(error, signal.reason);
 }
@@ -479,7 +484,32 @@ function pendingBossQuestionForState(state, context) {
 }
 /** Read the FSM context's single pending Boss question, when well-formed. */
 export function pendingBossQuestionFromContext(context) {
-    const pending = context.pendingBossQuestion;
+    return pendingBossQuestionRecord(context.pendingBossQuestion);
+}
+/**
+ * DR-067 §1: the keyed form of gears2fsm's Boss-reply suspension. Each
+ * well-formed `context.pendingBossQuestions[stateId]` record whose own
+ * `questionId` equals its key counts only while a wait state that resumes
+ * its `resumeStateId` is active, so an answered question the context
+ * retains for the resumed prompt never reads as pending. Ordered by
+ * question id.
+ */
+function keyedPendingBossQuestions(context, resumesFromActiveWait) {
+    const keyed = context.pendingBossQuestions;
+    if (!isPlainObject(keyed))
+        return [];
+    const pending = [];
+    for (const [key, value] of Object.entries(keyed)) {
+        const record = pendingBossQuestionRecord(value);
+        if (record === undefined || record.questionId !== key)
+            continue;
+        if (!resumesFromActiveWait(record.resumeStateId))
+            continue;
+        pending.push(record);
+    }
+    return pending.sort((left, right) => left.questionId.localeCompare(right.questionId));
+}
+function pendingBossQuestionRecord(pending) {
     if (pending === undefined ||
         pending === null ||
         typeof pending !== 'object') {
@@ -851,8 +881,8 @@ export function defaultBuildJudgePrompt(input, finalText) {
  * so the judge omits it. Rendering the clause verbatim asked the judge for
  * `question`, `planningResult`, or `evaluatedRevision`, which the reconciler
  * rejects as a structural error, spending the single correction on a
- * self-inflicted defect. Exported so a bespoke linked runtime (DECIDE's
- * parallel machinery) renders the identical contract instead of restating it.
+ * self-inflicted defect. Exported so linked machinery of an artifact's own
+ * renders the identical contract instead of restating it.
  */
 export function renderGovernedOutcomeContract(guard, description, outcome) {
     const { meaning, clause } = splitOutputClause(description);
@@ -1040,7 +1070,7 @@ export function createPlayerBridge(spec, ports, getActiveSignal, boundary, onCon
         }
         if (result.status !== 'ok') {
             const failure = new Error(result.error ?? `captainBridge: callPlayer status "${result.status}"`);
-            throw boundary?.markPlayerResultFailure?.(failure) ?? failure;
+            throw boundary?.markPlayerResultFailure?.(failure, result) ?? failure;
         }
         const finalText = result.finalText ?? '';
         if (isEmptyFinalText(finalText)) {
@@ -1220,20 +1250,293 @@ function transitionTargets(transition) {
     }
     return targets;
 }
-/** Targets of the FSM's `awaitBossReply` BOSS_REPLY transitions. */
+function transitionArmTargets(transition) {
+    const arms = Array.isArray(transition) ? transition : [transition];
+    const targets = [];
+    for (const arm of arms) {
+        if (typeof arm === 'string') {
+            targets.push(arm);
+        }
+        else if (isPlainObject(arm) && typeof arm.target === 'string') {
+            targets.push(arm.target);
+        }
+    }
+    return targets;
+}
+function playbookStateIdOf(stateDef) {
+    if (!isPlainObject(stateDef) || !isPlainObject(stateDef.meta)) {
+        return undefined;
+    }
+    const playbook = stateDef.meta.playbook;
+    return isPlainObject(playbook) && typeof playbook.stateId === 'string'
+        ? playbook.stateId
+        : undefined;
+}
+function stateTagsOf(stateDef) {
+    const tags = stateDef.tags;
+    if (typeof tags === 'string')
+        return [tags];
+    return Array.isArray(tags)
+        ? tags.filter((tag) => typeof tag === 'string')
+        : [];
+}
+/** Every explicit node `id` in the config, mapped to its playbook state id. */
+function playbookStateIdsByNodeId(config) {
+    const byNodeId = new Map();
+    const visit = (stateDef) => {
+        if (!isPlainObject(stateDef))
+            return;
+        const stateId = playbookStateIdOf(stateDef);
+        if (typeof stateDef.id === 'string' && stateId !== undefined) {
+            byNodeId.set(stateDef.id, stateId);
+        }
+        if (isPlainObject(stateDef.states)) {
+            for (const child of Object.values(stateDef.states))
+                visit(child);
+        }
+    };
+    if (isPlainObject(config) && isPlainObject(config.states)) {
+        for (const child of Object.values(config.states))
+            visit(child);
+    }
+    return byNodeId;
+}
+/**
+ * One transition target written inside a parallel region, resolved to the
+ * playbook state id it names: an `#id` reference through the node ids, and a
+ * bare sibling key through the region's own leaves.
+ */
+function resolveRegionTarget(target, regionStates, byNodeId) {
+    if (target.startsWith('#')) {
+        const nodeId = target.slice(1);
+        return byNodeId.get(nodeId) ?? nodeId;
+    }
+    if (Object.prototype.hasOwnProperty.call(regionStates, target)) {
+        return playbookStateIdOf(regionStates[target]) ?? target;
+    }
+    return target;
+}
+/**
+ * Targets of the FSM's `awaitBossReply` BOSS_REPLY transitions, plus — for
+ * the parallel shape gears2fsm compiles (DR-067) — the targets of each
+ * region wait leaf's branch-local BOSS_REPLY arms, resolved to state ids.
+ */
 export function resumableStateIdsFromMachine(machine) {
     const config = machine.config;
     if (!isPlainObject(config) || !isPlainObject(config.states)) {
         return new Set();
     }
+    const resumable = new Set();
     const awaitState = config.states[BOSS_REPLY_WAIT_STATE_ID];
-    if (!isPlainObject(awaitState) || !isPlainObject(awaitState.on)) {
-        return new Set();
+    if (isPlainObject(awaitState) && isPlainObject(awaitState.on)) {
+        const bossReply = awaitState.on.BOSS_REPLY;
+        if (bossReply !== undefined) {
+            for (const target of transitionTargets(bossReply))
+                resumable.add(target);
+        }
     }
-    const bossReply = awaitState.on.BOSS_REPLY;
-    if (bossReply === undefined)
-        return new Set();
-    return new Set(transitionTargets(bossReply));
+    const byNodeId = playbookStateIdsByNodeId(config);
+    for (const stateDef of Object.values(config.states)) {
+        if (!isPlainObject(stateDef) ||
+            stateDef.type !== 'parallel' ||
+            !isPlainObject(stateDef.states)) {
+            continue;
+        }
+        for (const region of Object.values(stateDef.states)) {
+            if (!isPlainObject(region) || !isPlainObject(region.states))
+                continue;
+            const regionStates = region.states;
+            for (const leaf of Object.values(regionStates)) {
+                if (!isPlainObject(leaf) || !isPlainObject(leaf.on))
+                    continue;
+                const bossReply = leaf.on.BOSS_REPLY;
+                if (bossReply === undefined)
+                    continue;
+                for (const target of transitionArmTargets(bossReply)) {
+                    resumable.add(resolveRegionTarget(target, regionStates, byNodeId));
+                }
+            }
+        }
+    }
+    return resumable;
+}
+function malformedParallelState(label, key, reason) {
+    return new Error(`${label} parallel state ${key} is not the compiled parallel shape: ${reason}`);
+}
+/**
+ * DR-067 §1 / PBRT-52: the factory's domain is flat root states plus root
+ * `type: 'parallel'` states of the one shape gears2fsm compiles — each
+ * region a compound state with exactly one player-invoking `playbook.busy`
+ * working leaf, exactly one `playbook.parked` wait leaf whose BOSS_REPLY
+ * arms resume that working leaf, and exactly one final leaf, every leaf
+ * carrying a stable `meta.playbook.stateId` distinct from every other
+ * state's, and the parent's `onDone` the join. Any other compound state
+ * keeps the flat-domain rejection. Returns `undefined` for a flat machine.
+ */
+function parallelProfileFromMachine(machine, label) {
+    const config = machine.config;
+    if (!isPlainObject(config) || !isPlainObject(config.states)) {
+        return undefined;
+    }
+    const rootStates = config.states;
+    const parallelKeys = Object.entries(rootStates)
+        .filter(([, stateDef]) => isPlainObject(stateDef) && stateDef.type === 'parallel')
+        .map(([key]) => key);
+    for (const stateDef of Object.values(rootStates)) {
+        if (isPlainObject(stateDef) &&
+            stateDef.type !== 'parallel' &&
+            isPlainObject(stateDef.states) &&
+            Object.keys(stateDef.states).length > 0) {
+            throw new Error(`${label} declares a compound state; the shared runtime supports only flat single-region FSMs`);
+        }
+    }
+    if (parallelKeys.length === 0)
+        return undefined;
+    const byNodeId = playbookStateIdsByNodeId(config);
+    const seenStateIds = new Set();
+    for (const stateDef of Object.values(rootStates)) {
+        const stateId = playbookStateIdOf(stateDef);
+        if (stateId !== undefined)
+            seenStateIds.add(stateId);
+    }
+    const states = [];
+    const parallelStateByWorkingStateId = new Map();
+    const waitResumeTargets = new Map();
+    const transitionNodesByStateId = new Map();
+    for (const key of parallelKeys) {
+        const parent = rootStates[key];
+        if (parent.onDone === undefined) {
+            throw malformedParallelState(label, key, 'it declares no onDone join');
+        }
+        if (!isPlainObject(parent.states) || Object.keys(parent.states).length < 2) {
+            throw malformedParallelState(label, key, 'it must declare at least two regions');
+        }
+        const regions = [];
+        const roleIds = new Set();
+        for (const [regionKey, region] of Object.entries(parent.states)) {
+            const regionReason = (reason) => malformedParallelState(label, key, `region ${regionKey} ${reason}`);
+            if (!isPlainObject(region) ||
+                region.type === 'parallel' ||
+                region.type === 'final' ||
+                region.type === 'history' ||
+                !isPlainObject(region.states)) {
+                throw regionReason('must be a compound state of leaves');
+            }
+            const regionStates = region.states;
+            let working;
+            let wait;
+            let final;
+            for (const [leafKey, leaf] of Object.entries(regionStates)) {
+                if (!isPlainObject(leaf)) {
+                    throw regionReason(`leaf ${leafKey} must be a state object`);
+                }
+                if ((isPlainObject(leaf.states) && Object.keys(leaf.states).length > 0) ||
+                    leaf.type === 'parallel' ||
+                    leaf.type === 'history') {
+                    throw regionReason(`leaf ${leafKey} must be an atomic state`);
+                }
+                const leafStateId = playbookStateIdOf(leaf);
+                if (leafStateId === undefined || leafStateId.trim().length === 0) {
+                    throw regionReason(`leaf ${leafKey} must carry a string meta.playbook.stateId`);
+                }
+                if (seenStateIds.has(leafStateId)) {
+                    throw regionReason(`leaf ${leafKey} reuses playbook state id ${leafStateId}`);
+                }
+                seenStateIds.add(leafStateId);
+                const invoke = leaf.invoke;
+                const invokes = Array.isArray(invoke) ? invoke : invoke ? [invoke] : [];
+                const tags = stateTagsOf(leaf);
+                if (leaf.type === 'final') {
+                    if (final !== undefined)
+                        throw regionReason('declares two final leaves');
+                    final = [leafKey, leaf];
+                }
+                else if (invokes.length === 1 &&
+                    isPlainObject(invokes[0]) &&
+                    invokes[0].src === 'player' &&
+                    tags.includes('playbook.busy')) {
+                    if (working !== undefined) {
+                        throw regionReason('declares two working leaves');
+                    }
+                    working = [leafKey, leaf];
+                }
+                else if (invokes.length === 0 &&
+                    tags.includes('playbook.parked') &&
+                    isPlainObject(leaf.on) &&
+                    leaf.on.BOSS_REPLY !== undefined) {
+                    if (wait !== undefined)
+                        throw regionReason('declares two wait leaves');
+                    wait = [leafKey, leaf];
+                }
+                else {
+                    throw regionReason(`leaf ${leafKey} is neither its player-invoking playbook.busy working leaf, its playbook.parked BOSS_REPLY wait leaf, nor its final leaf`);
+                }
+            }
+            if (working === undefined || wait === undefined || final === undefined) {
+                throw regionReason('must hold exactly one working leaf, one wait leaf, and one final leaf');
+            }
+            if (region.initial !== working[0]) {
+                throw regionReason('must start in its working leaf');
+            }
+            const workingStateId = playbookStateIdOf(working[1]);
+            const waitStateId = playbookStateIdOf(wait[1]);
+            const finalStateId = playbookStateIdOf(final[1]);
+            const replyTargets = transitionArmTargets(wait[1].on.BOSS_REPLY).map((target) => resolveRegionTarget(target, regionStates, byNodeId));
+            const regionStateIds = new Set([waitStateId, finalStateId]);
+            if (!replyTargets.includes(workingStateId) ||
+                replyTargets.some((target) => regionStateIds.has(target))) {
+                throw regionReason('wait leaf BOSS_REPLY arms must resume its working leaf');
+            }
+            const workingMeta = working[1].meta
+                .playbook;
+            const roleId = workingMeta.role;
+            if (typeof roleId !== 'string' || roleId.trim().length === 0) {
+                throw regionReason('working leaf must declare meta.playbook.role');
+            }
+            if (roleIds.has(roleId)) {
+                throw malformedParallelState(label, key, `role ${roleId} works in more than one region`);
+            }
+            roleIds.add(roleId);
+            regions.push({
+                key: regionKey,
+                roleId,
+                workingStateId,
+                waitStateId,
+                finalStateId,
+            });
+            waitResumeTargets.set(waitStateId, new Set([workingStateId]));
+            for (const [, leaf] of [working, wait, final]) {
+                transitionNodesByStateId.set(playbookStateIdOf(leaf), [region, leaf]);
+            }
+        }
+        const parallelState = {
+            stateId: key,
+            regions: Object.freeze(regions),
+        };
+        states.push(parallelState);
+        for (const region of regions) {
+            parallelStateByWorkingStateId.set(region.workingStateId, parallelState);
+        }
+        transitionNodesByStateId.set(key, [parent]);
+    }
+    for (const [key, stateDef] of Object.entries(rootStates)) {
+        if (!isPlainObject(stateDef) || parallelKeys.includes(key))
+            continue;
+        transitionNodesByStateId.set(key, [stateDef]);
+    }
+    const rootWait = rootStates[BOSS_REPLY_WAIT_STATE_ID];
+    if (isPlainObject(rootWait) && isPlainObject(rootWait.on)) {
+        const bossReply = rootWait.on.BOSS_REPLY;
+        if (bossReply !== undefined) {
+            waitResumeTargets.set(BOSS_REPLY_WAIT_STATE_ID, new Set(transitionTargets(bossReply)));
+        }
+    }
+    return Object.freeze({
+        states: Object.freeze(states),
+        parallelStateByWorkingStateId,
+        waitResumeTargets,
+        transitionNodesByStateId,
+    });
 }
 // ---------------------------------------------------------------------------
 // DR-029 control surface: the FSM's explicit-state-jump event and the
@@ -1840,7 +2143,48 @@ function eventContractPrompt(contract) {
     ]);
     return `{ ${members.join(', ')} }${notes.length === 0 ? '' : ` (${notes.join('; ')})`}`;
 }
-function makeDefaultClassifyBossText(machine, entryEvent, bossEvents) {
+/**
+ * DR-067 §1: the questions pending in a parallel-declaring machine — the
+ * keyed records whose resume state an active wait state (a region wait leaf
+ * or the root reply wait) resumes.
+ */
+function parallelPendingBossQuestions(profile, activeStateIds, context) {
+    return keyedPendingBossQuestions(context, (resumeStateId) => activeStateIds.some((stateId) => profile.waitResumeTargets.get(stateId)?.has(resumeStateId) === true));
+}
+/** Event types the root and every active state node of a parallel machine configure. */
+function parallelConfiguredEventTypes(machine, profile, activeStateIds) {
+    const configured = new Set();
+    const config = machine.config;
+    if (!isPlainObject(config))
+        return configured;
+    if (isPlainObject(config.on)) {
+        for (const type of Object.keys(config.on))
+            configured.add(type);
+    }
+    for (const stateId of activeStateIds) {
+        for (const node of profile.transitionNodesByStateId.get(stateId) ?? []) {
+            if (!isPlainObject(node.on))
+                continue;
+            for (const type of Object.keys(node.on))
+                configured.add(type);
+        }
+    }
+    return configured;
+}
+function activeStateIdsOf(snapshotOrState) {
+    const listed = snapshotOrState
+        ?.activeStateIds;
+    if (Array.isArray(listed)) {
+        return listed.filter((stateId) => typeof stateId === 'string');
+    }
+    try {
+        return normalizePlaybookSnapshot(snapshotOrState).activeStateIds;
+    }
+    catch {
+        return [];
+    }
+}
+function makeDefaultClassifyBossText(machine, entryEvent, bossEvents, parallelProfile) {
     const contracts = defaultBossEventSpecs(machine, entryEvent, bossEvents);
     return async (text, ports, signal, snapshotOrState, boundary) => {
         const trimmed = text.trim();
@@ -1854,12 +2198,41 @@ function makeDefaultClassifyBossText(machine, entryEvent, bossEvents) {
         // is answered history, so the prompt must not present it as pending —
         // a judge told a question awaits at the failure state is steered toward
         // a reply it cannot select or toward no action at all.
-        const pending = stateId === BOSS_REPLY_WAIT_STATE_ID
-            ? pendingBossQuestionFromContext(state.context)
-            : undefined;
-        const configuredTypes = configuredEventTypesForState(machine, stateId);
-        const applicable = [...contracts.values()].filter((contract) => configuredTypes.has(contract.type) &&
-            (contract.type !== 'BOSS_REPLY' || pending !== undefined));
+        let pendingQuestions;
+        let configuredTypes;
+        if (parallelProfile === undefined) {
+            const pending = stateId === BOSS_REPLY_WAIT_STATE_ID
+                ? pendingBossQuestionFromContext(state.context)
+                : undefined;
+            pendingQuestions = pending === undefined ? [] : [pending];
+            configuredTypes = configuredEventTypesForState(machine, stateId);
+        }
+        else {
+            // DR-067 §1: every question pending in any active wait is offered, and
+            // the events of every active state node apply.
+            const activeStateIds = activeStateIdsOf(snapshotOrState);
+            pendingQuestions = parallelPendingBossQuestions(parallelProfile, activeStateIds, state.context);
+            configuredTypes = parallelConfiguredEventTypes(machine, parallelProfile, activeStateIds);
+        }
+        // Several pending questions: a reply must name the one it answers, and
+        // the classifier never guesses among them (gears2fsm §Parallel groups).
+        const severalPending = pendingQuestions.length > 1;
+        const applicable = [...contracts.values()]
+            .filter((contract) => configuredTypes.has(contract.type) &&
+            (contract.type !== 'BOSS_REPLY' || pendingQuestions.length > 0))
+            .map((contract) => contract.type === 'BOSS_REPLY' && severalPending
+            ? {
+                type: 'BOSS_REPLY',
+                fields: {
+                    questionId: {
+                        source: 'judge',
+                        required: true,
+                        values: pendingQuestions.map(({ questionId }) => questionId),
+                    },
+                    answer: { source: 'text', required: true },
+                },
+            }
+            : contract);
         const lines = [
             'Classify the following Boss message into exactly one event.',
             'Respond with one exact flat JSON object. Do not add fields that are not shown.',
@@ -1867,8 +2240,11 @@ function makeDefaultClassifyBossText(machine, entryEvent, bossEvents) {
             '',
             `Current state: ${currentState}`,
         ];
-        if (pending !== undefined) {
+        for (const pending of pendingQuestions) {
             lines.push(`Pending question id: ${pending.questionId}`, `Pending asker: ${askerLabel(pending.asker)}`, `Pending Boss question: ${pending.question}`);
+        }
+        if (severalPending) {
+            lines.push('Several Boss questions are pending: a BOSS_REPLY must name the questionId of the one question it answers.');
         }
         lines.push('', 'Allowed JSON objects:', '- { "type": "NO_ACTION" }');
         for (const contract of applicable) {
@@ -1940,16 +2316,19 @@ function makeDefaultClassifyBossText(machine, entryEvent, bossEvents) {
             event[field] = value;
         }
         if (eventType === 'BOSS_REPLY') {
-            if (pending === undefined) {
+            if (pendingQuestions.length === 0) {
                 await ports.emitStatus('Classifier returned BOSS_REPLY without a pending question');
                 return undefined;
             }
-            const questionId = event.questionId;
-            if (questionId !== undefined && questionId !== pending.questionId) {
-                await ports.emitStatus(`Classifier supplied unknown questionId for BOSS_REPLY: ${String(questionId)}`);
-                return undefined;
+            if (!severalPending) {
+                const pending = pendingQuestions[0];
+                const questionId = event.questionId;
+                if (questionId !== undefined && questionId !== pending.questionId) {
+                    await ports.emitStatus(`Classifier supplied unknown questionId for BOSS_REPLY: ${String(questionId)}`);
+                    return undefined;
+                }
+                event.questionId = pending.questionId;
             }
-            event.questionId = pending.questionId;
         }
         const can = snapshotOrState?.can;
         if (typeof can === 'function' &&
@@ -1959,33 +2338,6 @@ function makeDefaultClassifyBossText(machine, entryEvent, bossEvents) {
         }
         return event;
     };
-}
-function machineDeclaresParallelState(machine) {
-    const visit = (stateDef) => {
-        if (!isPlainObject(stateDef))
-            return false;
-        if (stateDef.type === 'parallel')
-            return true;
-        if (!isPlainObject(stateDef.states))
-            return false;
-        return Object.values(stateDef.states).some(visit);
-    };
-    return visit(machine.config);
-}
-// PBRT-52: the factory's domain is FLAT single-region machines — every
-// state a direct child of the root, so each snapshot exposes exactly one
-// playbook state id and every state-keyed lookup (deterministic entries,
-// retry, reply-wait pendingness, configured events, descriptions) indexes
-// one unambiguous identity. A compound child would be accepted and then
-// silently misbehave on all of those gates, so it is rejected up front
-// exactly like a parallel region.
-function machineDeclaresNestedState(machine) {
-    const config = machine.config;
-    if (!isPlainObject(config) || !isPlainObject(config.states))
-        return false;
-    return Object.values(config.states).some((stateDef) => isPlainObject(stateDef) &&
-        isPlainObject(stateDef.states) &&
-        Object.keys(stateDef.states).length > 0);
 }
 // PBRT-52: the factory's lookups index states by their root key, and the
 // published playbook identity is `meta.playbook.stateId` — the two must
@@ -2065,12 +2417,9 @@ export function createXStatePlaybookRuntime(machine, spec) {
     if (Object.prototype.hasOwnProperty.call(specDescriptors, 'resolvePlayerId')) {
         throw new TypeError(`${label} artifacts must not derive concrete player bindings`);
     }
-    if (machineDeclaresParallelState(machine)) {
-        throw new Error(`${label} uses a parallel state; the shared runtime supports only single-region FSMs`);
-    }
-    if (machineDeclaresNestedState(machine)) {
-        throw new Error(`${label} declares a compound state; the shared runtime supports only flat single-region FSMs`);
-    }
+    // DR-067 §1: a flat machine, or one whose only compound states are root
+    // parallel states of the compiled shape; everything else is rejected.
+    const parallelProfile = parallelProfileFromMachine(machine, label);
     assertFlatStateIdentity(machine, label);
     assertUnfinishedFinalStateIds(spec.unfinishedFinalStateIds, machine, label);
     const retainedGenerationMetadata = spec.unfinishedFinalStateIds === undefined
@@ -2098,6 +2447,17 @@ export function createXStatePlaybookRuntime(machine, spec) {
     const declaredRoleIds = Object.freeze([
         ...new Set([...roleStates.values()].map(({ role }) => role)),
     ]);
+    // DR-067 §1: the Boss-relevant states of a parallel-declaring machine —
+    // each player state, each wait state, and the failure state. A status is
+    // scheduled for each one newly entered, and a status trace names a
+    // `stateId` only while exactly one is active.
+    const bossRelevantStateIds = parallelProfile === undefined
+        ? undefined
+        : new Set([
+            ...roleStates.keys(),
+            ...parallelProfile.waitResumeTargets.keys(),
+            'failed',
+        ]);
     // PBRT-52: the artifact's own ControlView context projection. Nothing is
     // exported by default, so an FSM context member — including one added
     // after this artifact was linked — is private until named here. The two
@@ -2136,7 +2496,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
     // supplied `bossEvents`, and DR-019 §2 requires a conflicting duplicate to
     // fail factory construction whether or not this spec overrides the
     // classifier that would have consumed the contracts.
-    const derivedClassifyBossText = makeDefaultClassifyBossText(machine, spec.entryEvent, spec.bossEvents ?? []);
+    const derivedClassifyBossText = makeDefaultClassifyBossText(machine, spec.entryEvent, spec.bossEvents ?? [], parallelProfile);
     const classifyBossText = spec.classifyBossText ?? derivedClassifyBossText;
     const normalizeTransitionEvent = spec.normalizeTransitionEvent ??
         makeDefaultNormalizeTransitionEvent(spec.transitionEventFields ?? []);
@@ -2151,6 +2511,93 @@ export function createXStatePlaybookRuntime(machine, spec) {
             const cwd = options?.cwd;
             return typeof cwd === 'string' ? cwd : undefined;
         });
+    // DR-067 §1: the questions pending in a state — the singular reply-wait
+    // question of a flat machine, or a parallel machine's keyed questions
+    // whose own wait state is active.
+    const pendingBossQuestionsFor = (state, context) => {
+        if (parallelProfile === undefined) {
+            const pending = pendingBossQuestionForState(state, context);
+            return pending === undefined ? [] : [pending];
+        }
+        return parallelPendingBossQuestions(parallelProfile, state.activeStateIds, context);
+    };
+    const singlePendingBossQuestion = (state, context) => {
+        const pending = pendingBossQuestionsFor(state, context);
+        return pending.length === 1 ? pending[0] : undefined;
+    };
+    // DR-067 §1: a status trace names a `stateId` only while exactly one
+    // Boss-relevant state is active; a flat machine's is its one state.
+    const statusTraceStateId = (state) => {
+        if (bossRelevantStateIds === undefined)
+            return state.stateId;
+        const relevant = state.activeStateIds.filter((stateId) => bossRelevantStateIds.has(stateId));
+        return relevant.length === 1 ? relevant[0] : undefined;
+    };
+    // DR-067 §1: a parallel machine schedules statuses for each newly entered
+    // Boss-relevant state — a player state's role line, a wait state's
+    // question lines, and the failure line — diffed against the previous
+    // snapshot's active state ids, so a sibling still running is not
+    // announced again.
+    const parallelStatusesFor = (previousState, state, context) => {
+        const prior = new Set(previousState?.activeStateIds ?? []);
+        const statuses = [];
+        for (const stateId of state.activeStateIds) {
+            if (prior.has(stateId) || !bossRelevantStateIds.has(stateId))
+                continue;
+            const resumeTargets = parallelProfile.waitResumeTargets.get(stateId);
+            if (resumeTargets !== undefined) {
+                const questions = keyedPendingBossQuestions(context, (resumeStateId) => resumeTargets.has(resumeStateId));
+                if (questions.length === 0) {
+                    statuses.push({ message: 'Awaiting Boss reply.' });
+                    continue;
+                }
+                for (const pending of questions) {
+                    statuses.push({
+                        message: `${askerLabel(pending.asker)} asks: ${pending.question}`,
+                    }, {
+                        message: `◆ awaiting Boss reply · ${pending.resumeStateId} · ` +
+                            `${askerLabel(pending.asker)} · ${pending.sourceItem}`,
+                    });
+                }
+                continue;
+            }
+            if (stateId === 'failed') {
+                const lastError = normalizeErrorCompact(context.lastError);
+                statuses.push({
+                    message: '◆ workflow failed; awaiting Boss recovery.',
+                    ...(lastError === undefined
+                        ? {}
+                        : {
+                            data: snapshotJsonValue({ lastError }, 'failed status data'),
+                        }),
+                });
+                continue;
+            }
+            const roleState = roleStates.get(stateId);
+            if (roleState !== undefined) {
+                statuses.push({ message: `⤷ ${roleState.role}: ${roleState.label}` });
+            }
+        }
+        return statuses;
+    };
+    // DR-067 §1: each parallel state's region roles, in region order, are one
+    // concurrent role set the FSM exports; a host that forwards those sets in
+    // its schema-3 authority is held to them before any agent call.
+    const assertDeclaredCohorts = (hostCapabilities) => {
+        const authority = Object.getOwnPropertyDescriptor(hostCapabilities, 'authority')?.value;
+        if (!isPlainObject(authority) || !Array.isArray(authority.concurrentRoleSets)) {
+            return;
+        }
+        const declared = authority.concurrentRoleSets;
+        for (const parallelState of parallelProfile.states) {
+            const roles = parallelState.regions.map(({ roleId }) => roleId);
+            if (!declared.some((candidate) => Array.isArray(candidate) &&
+                candidate.length === roles.length &&
+                candidate.every((roleId, index) => roleId === roles[index]))) {
+                throw new TypeError(`${label} parallel state ${parallelState.stateId} roles [${roles.join(', ')}] are not a declared concurrent role set`);
+            }
+        }
+    };
     const createPlaybookRuntime = function createPlaybookRuntime(factoryOptions) {
         const construction = configuredOptionsFromFactoryInput(factoryOptions, label);
         const configuredOptions = construction.configuredOptions;
@@ -2166,8 +2613,11 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 Object.prototype.hasOwnProperty.call(declarations, acceptedOutcome));
         });
         const repositoryCapability = hasGovernedPlayerStates
-            ? repositoryCapabilityFromHostCapabilities(construction.hostCapabilities, label)
+            ? repositoryCapabilityFromHostCapabilities(construction.hostCapabilities, label, parallelProfile !== undefined)
             : undefined;
+        if (parallelProfile !== undefined) {
+            assertDeclaredCohorts(construction.hostCapabilities);
+        }
         const currentEffectLedger = () => assertPlaybookEffectLedger(effectLedgerCapability.snapshot(), `${label} current host effect ledger`);
         let effectLedgerMirror = currentEffectLedger();
         let retainedEffectSourceSessionId;
@@ -2202,9 +2652,11 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // mutable `activeSignal` alone cannot classify a late invocation reason.
         let activeAborts;
         // The bridge binds the provenance of a child result immediately before
-        // its promise actor settles. The next root snapshot/error consumes this
-        // one-shot so background settlement emissions retain their owner.
-        let actorSettlementAborts;
+        // its promise actor settles. The next root snapshot/error consumes it so
+        // background settlement emissions retain their owner. A flat machine has
+        // one settling actor at a time, so a later binding replaces an unconsumed
+        // one; a parallel machine's settlements queue in order (DR-067 §1).
+        const actorSettlementAborts = [];
         let actorSettlementErrorAborts;
         // Exact cancellation observed by an emission owned by the active
         // boundary. Ordinary runs settle from their signal/state; apply also
@@ -2240,6 +2692,23 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // publishes the cause decided for exactly that value, whatever turn reads
         // it.
         const failureCauses = createFailureCauseRetention();
+        // DR-063 §2 / DR-067 §1: the cause decided for each non-`ok` player
+        // result, keyed by the result itself, so concurrent region calls never
+        // lend one another the single slot above.
+        const resultFailureCauses = new WeakMap();
+        // DR-067 §1: the parallel profile's cohort bookkeeping. Every public
+        // boundary advances the sequence; a parallel state's working leaves run
+        // as one cohort at most once per boundary, and each cohort's semantic
+        // completions — which the host settles concurrently — reconcile one at a
+        // time so their durable correction-budget writes cannot race.
+        let publicBoundarySequence = 0;
+        const consumedCohortBoundaries = new Map();
+        const pendingCohorts = new Map();
+        const cohortCompletionQueue = new PQueue({ concurrency: 1 });
+        // DR-067 §1: every player, judge, and nested call a parallel machine
+        // starts, so a boundary's drain waits for a cancelled sibling whose port
+        // ignores its signal before it settles.
+        const activeBoundaryCalls = new Set();
         // Previous root-machine state for the inspect-driven telemetry /
         // status emitter. undefined before the first inspect firing.
         let priorState;
@@ -3015,7 +3484,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                         ...(descriptor !== undefined
                             ? {
                                 state: descriptor,
-                                ...stateIdentity(descriptor.stateId),
+                                ...stateIdentity(statusTraceStateId(descriptor)),
                             }
                             : {}),
                     }, activeTurnId !== undefined ? { turnId: activeTurnId } : {});
@@ -3048,9 +3517,12 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // its finish carries the receipt disposition and none of the
         // start-only fields, so it passes its own canonical pre-acceptance
         // base (slc/link.md §Playbook trace).
-        finishIdentity = identity) {
+        finishIdentity = identity, 
+        // DR-067 §1: the per-call abort classification a parallel machine's
+        // player pairs enqueue under; absent, the active boundary's.
+        aborts) {
             try {
-                await emitTrace(startedType, identity, position);
+                await emitTrace(startedType, identity, position, aborts);
             }
             catch (error) {
                 if (!isAbortFailure(error, signal))
@@ -3060,7 +3532,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                         ...finishIdentity,
                         status: isAbortFailure(error, signal) ? 'aborted' : 'error',
                         error: normalizeError(error),
-                    }, position);
+                    }, position, aborts);
                 }
                 catch {
                     // Preserve the start failure after one best-effort finish attempt.
@@ -3199,11 +3671,32 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 ...(semanticCandidate === undefined ? {} : { semanticCandidate }),
                 correctionBudget: { limit: 1, spent: true },
             };
+            // DR-067 §1 / PBRT-69: a cohort's shared receipt becomes visible for
+            // every member in one ledger revision — publishing only this member's
+            // spend would leave the invalid half-complete cohort the ledger admits
+            // nowhere.
+            const cohortMembers = current.cohortId === undefined
+                ? [current]
+                : currentLedger.boundaries.filter(({ cohortId }) => cohortId === current.cohortId);
+            const replacements = cohortMembers.map((member) => {
+                if (member.boundaryId === current.boundaryId) {
+                    return { expected: current, next };
+                }
+                if (member.physicalReceipt !== undefined &&
+                    !isDeepStrictEqual(member.physicalReceipt, receipt)) {
+                    throw new TypeError(`${label} correction budget cohort conflicts with its shared repository receipt`);
+                }
+                return {
+                    expected: member,
+                    next: {
+                        ...member,
+                        ...(receipt.after === undefined ? {} : { after: receipt.after }),
+                        physicalReceipt: receipt,
+                    },
+                };
+            });
             const acknowledged = assertPlaybookEffectLedger(await effectLedgerCapability.writeAhead([
-                {
-                    kind: 'replace-boundaries',
-                    replacements: [{ expected: current, next }],
-                },
+                { kind: 'replace-boundaries', replacements },
             ]), `${label} semantic correction budget acknowledgement`);
             effectLedgerMirror = acknowledged;
             refreshRetainedEffectReconciliation(acknowledged);
@@ -3508,7 +4001,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     governedOutput = undefined;
                 }
             }
-            else if (source === 'runExclusive' && value.deferredStatus !== undefined) {
+            else if (source !== 'runDeferred' && value.deferredStatus !== undefined) {
                 throw new TypeError(`${label} non-deferred settlement returned a deferred binding status`);
             }
             if (governedSettlement !== undefined) {
@@ -3643,6 +4136,269 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 : activeEffectLedgerPrefixSequence;
             failedGovernedAttemptId = attemptIds.values().next().value;
         }
+        // -----------------------------------------------------------------
+        // DR-067 §1: the parallel profile's repository cohort. The working
+        // leaves of one parallel state entered together run under one
+        // `runCohort` claim, each member an `unchanged` boundary: a member's
+        // result is adjudicated through the one reconciler in serial, a spent
+        // correction rewrites every member's boundary in one acknowledged batch,
+        // members are acknowledged and released in completion order, and a
+        // member's failure cancels its siblings and fails the cohort with the
+        // cause decided first.
+        // -----------------------------------------------------------------
+        function trackBoundaryCall(call) {
+            if (parallelProfile === undefined)
+                return call;
+            activeBoundaryCalls.add(call);
+            const forget = () => {
+                activeBoundaryCalls.delete(call);
+            };
+            void call.then(forget, forget);
+            return call;
+        }
+        async function drainBoundaryCalls() {
+            while (activeBoundaryCalls.size > 0) {
+                await Promise.allSettled([...activeBoundaryCalls]);
+            }
+        }
+        function cohortParallelStateFor(stateId) {
+            const parallelState = parallelProfile?.parallelStateByWorkingStateId.get(stateId);
+            if (parallelState === undefined)
+                return undefined;
+            if (consumedCohortBoundaries.get(parallelState.stateId) ===
+                publicBoundarySequence) {
+                return undefined;
+            }
+            const pending = pendingCohorts.get(parallelState.stateId);
+            if (pending !== undefined &&
+                pending.boundarySequence === publicBoundarySequence &&
+                !pending.started) {
+                return parallelState;
+            }
+            const active = currentState().activeStateIds;
+            return parallelState.regions.every(({ workingStateId }) => active.includes(workingStateId))
+                ? parallelState
+                : undefined;
+        }
+        function startCohort(parallelState, cohort) {
+            cohort.started = true;
+            consumedCohortBoundaries.set(parallelState.stateId, cohort.boundarySequence);
+            if (pendingCohorts.get(parallelState.stateId) === cohort) {
+                pendingCohorts.delete(parallelState.stateId);
+            }
+        }
+        async function joinCohort(parallelState, member) {
+            let cohort = pendingCohorts.get(parallelState.stateId);
+            if (cohort === undefined ||
+                cohort.boundarySequence !== publicBoundarySequence ||
+                cohort.started) {
+                cohort = {
+                    boundarySequence: publicBoundarySequence,
+                    members: new Map(),
+                    started: false,
+                };
+                pendingCohorts.set(parallelState.stateId, cohort);
+            }
+            const registered = cohort;
+            if (registered.members.has(member.region.key)) {
+                throw new Error(`${label} parallel state ${parallelState.stateId} registered region ${member.region.key} twice`);
+            }
+            registered.members.set(member.region.key, member);
+            // A member whose invocation stops before every sibling registered —
+            // its region exited, or the boundary aborted — leaves no cohort to
+            // run: each registered member settles with its own cancellation and
+            // the boundary's cohort is spent.
+            const withdraw = () => {
+                if (registered.started)
+                    return;
+                startCohort(parallelState, registered);
+                for (const candidate of registered.members.values()) {
+                    candidate.settled.reject(candidate.signal.aborted
+                        ? candidate.signal.reason
+                        : member.signal.reason);
+                }
+            };
+            if (member.signal.aborted) {
+                withdraw();
+            }
+            else {
+                member.signal.addEventListener('abort', withdraw, { once: true });
+            }
+            if (!registered.started &&
+                registered.members.size === parallelState.regions.length) {
+                startCohort(parallelState, registered);
+                void settleCohort(parallelState, registered);
+            }
+            return await member.settled.promise;
+        }
+        async function settleCohort(parallelState, cohort) {
+            const members = parallelState.regions.map(({ key }) => cohort.members.get(key));
+            const cancellation = new AbortController();
+            const completionOrder = [];
+            const decided = new Map();
+            let decisionSequence = 0;
+            // DR-063 §2: each member failure is one decision, ordered as it was
+            // decided, with the cause decided for exactly that value at that
+            // moment — so a value a sibling later rethrows cannot rename it.
+            const decide = (member, error, cause = failureCauses.causeOf(error)) => {
+                if (decided.has(member))
+                    return;
+                decided.set(member, { error, cause, sequence: ++decisionSequence });
+            };
+            const isCancellation = (error) => cancellation.signal.aborted &&
+                Object.is(error, cancellation.signal.reason) &&
+                !activeAborts?.isAbortReason(error);
+            const operationFor = (member) => async (context) => {
+                const callSignal = combineAbortSignals(member.signal, cancellation.signal);
+                try {
+                    if (activePlayerKeys.has(member.playerKey)) {
+                        await member.reportCollision(callSignal);
+                    }
+                    activePlayerKeys.add(member.playerKey);
+                    try {
+                        const result = await member.run(callSignal, cancellation.signal, effectAuthorizedPreExistingBlock(member.effectBoundary, context?.baseline));
+                        if (result.status !== 'ok' && !cancellation.signal.aborted) {
+                            // DR-063 §2: the failure built for a non-`ok` member result
+                            // carries the cause decided for exactly that result, and its
+                            // siblings are cancelled with it.
+                            const cause = resultFailureCauses.get(result) ??
+                                runtimeDefectCause(`callPlayer status ${JSON.stringify(result.status)}`);
+                            const failure = attachPlaybookFailureCause(markFsmResultFailure(new Error(result.error ??
+                                `captainBridge: callPlayer status "${result.status}"`)), cause);
+                            failureCauses.retain(failure, cause);
+                            decide(member, failure, cause);
+                            cancellation.abort(failure);
+                        }
+                        return result;
+                    }
+                    finally {
+                        activePlayerKeys.delete(member.playerKey);
+                    }
+                }
+                catch (error) {
+                    if (!isCancellation(error))
+                        decide(member, error);
+                    if (!cancellation.signal.aborted)
+                        cancellation.abort(error);
+                    throw error;
+                }
+                finally {
+                    completionOrder.push(member);
+                }
+            };
+            const completeEffectBoundary = (completion) => cohortCompletionQueue.add(async () => {
+                const member = members.find(({ roleId }) => roleId === completion.roleId);
+                if (member === undefined ||
+                    completion.boundary.boundaryId !== member.effectBoundary.boundaryId) {
+                    throw new TypeError(`${label} repository cohort completed an undeclared member`);
+                }
+                const evidence = await completionEvidenceFor(member.input, member.roleId, member.playerId, member.signal, undefined)(completion);
+                const settlement = governedSettlementsByBoundaryId.get(member.effectBoundary.boundaryId);
+                if (settlement?.status === 'unresolved') {
+                    decide(member, settlement.error);
+                }
+                return evidence;
+            });
+            const runSignal = activeSignal ?? members[0].signal;
+            const invocationId = randomUUID();
+            let settled;
+            try {
+                for (const member of members)
+                    member.signal.throwIfAborted();
+                settled = await repositoryCapability.runCohort({
+                    signal: runSignal,
+                    invocationId,
+                    roleIds: members.map(({ roleId }) => roleId),
+                    dispositionsByRole: Object.fromEntries(members.map(({ roleId }) => [roleId, ['unchanged']])),
+                    effectBoundaries: Object.fromEntries(members.map(({ roleId, effectBoundary }) => [
+                        roleId,
+                        effectBoundary,
+                    ])),
+                    operations: Object.fromEntries(members.map((member) => [member.roleId, operationFor(member)])),
+                    completeEffectBoundary,
+                });
+                if (!isPlainObject(settled) || settled.invocationId !== invocationId) {
+                    throw new TypeError(`${label} repository cohort changed its invocation identity`);
+                }
+            }
+            catch (error) {
+                for (const member of members) {
+                    governedSettlementsByBoundaryId.delete(member.effectBoundary.boundaryId);
+                    governedCompletionEvidenceByBoundaryId.delete(member.effectBoundary.boundaryId);
+                    refreshGovernedBoundaryStart(member.effectBoundary.boundaryId);
+                }
+                if (!isAbortFailure(error, runSignal))
+                    controlPlaneError ??= error;
+                for (const member of members)
+                    member.settled.reject(error);
+                return;
+            }
+            const releaseOrder = [
+                ...completionOrder,
+                ...members.filter((member) => !completionOrder.includes(member)),
+            ];
+            const acknowledged = new Map();
+            const failures = new Map();
+            for (const member of releaseOrder) {
+                const operation = isPlainObject(settled.operations)
+                    ? settled.operations[member.roleId]
+                    : undefined;
+                try {
+                    const result = acknowledgeGovernedPlayerResult({
+                        operation,
+                        receipt: isPlainObject(settled.receipts)
+                            ? settled.receipts[member.roleId]
+                            : undefined,
+                        effectLedger: settled.effectLedger,
+                    }, member.effectBoundary.boundaryId, 'runCohort');
+                    acknowledged.set(member, result);
+                    const settlement = governedPlayerSettlements.get(result);
+                    if (settlement?.status === 'unresolved') {
+                        failures.set(member, settlement.error);
+                    }
+                    else if (result.status !== 'ok') {
+                        failures.set(member, decided.get(member)?.error);
+                    }
+                }
+                catch (error) {
+                    failures.set(member, error);
+                    const operationReason = isPlainObject(operation) &&
+                        operation.status === 'rejected' &&
+                        Object.is(operation.reason, error);
+                    if (!operationReason) {
+                        // An acknowledgement the host could not prove is a control-plane
+                        // defect, exactly as on the exclusive path.
+                        if (!isAbortFailure(error, runSignal))
+                            controlPlaneError ??= error;
+                        decide(member, error);
+                    }
+                }
+                finally {
+                    governedSettlementsByBoundaryId.delete(member.effectBoundary.boundaryId);
+                    governedCompletionEvidenceByBoundaryId.delete(member.effectBoundary.boundaryId);
+                }
+            }
+            if (failures.size === 0) {
+                for (const member of releaseOrder) {
+                    member.settled.resolve(acknowledged.get(member));
+                }
+                return;
+            }
+            for (const result of acknowledged.values()) {
+                governedPlayerSettlements.delete(result);
+            }
+            const first = [...decided.values()].sort((left, right) => left.sequence - right.sequence)[0];
+            const failure = first?.error ??
+                failures.get(releaseOrder.find((member) => failures.has(member))) ??
+                markFsmResultFailure(new Error(`${label} parallel state ${parallelState.stateId} cohort failed`));
+            const cause = first?.cause ?? failureCauses.causeOf(failure);
+            if (cause !== undefined) {
+                failureCauses.retain(failure, cause);
+                attachPlaybookFailureCause(failure, cause);
+            }
+            for (const member of members)
+                member.settled.reject(failure);
+        }
         const boundary = {
             async callPlayer(input, roleId, freshPrompt, signal) {
                 // State-entry telemetry/status must precede the call they describe.
@@ -3687,126 +4443,173 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     callId,
                 };
                 const playerKey = continuationKey(roleId, playerId);
-                if (activePlayerKeys.has(playerKey)) {
+                const runTracedPlayerCall = async (resume = selectedResume, 
+                // DR-062 §4: composed from this call's own baseline observation,
+                // so the prompt the trace records is the prompt the player is sent.
+                preExistingBlock, 
+                // DR-067 §1: a cohort member's call signal also carries its
+                // cohort's sibling cancellation.
+                callSignal = signal, cohortCancellation) => {
+                    const identity = callIdentity(resume);
+                    // DR-067 §1: a parallel machine classifies aborts per call, so a
+                    // trace sink rejecting with a sibling's cancellation is forgiven
+                    // for that call alone.
+                    const traceAborts = parallelProfile === undefined
+                        ? undefined
+                        : abortReasonClassifier(callSignal, activeAborts);
+                    const withPreExisting = (text) => preExistingBlock === undefined
+                        ? text
+                        : `${text}\n\n${preExistingBlock}`;
+                    const callPrompt = withPreExisting(resume === false ? freshPrompt : prompt);
+                    const callFreshPrompt = withPreExisting(freshPrompt);
+                    await emitCallStarted('player.call.started', 'player.call.finished', { ...identity, prompt: callPrompt }, position, callSignal, undefined, traceAborts);
+                    let rawResult;
+                    try {
+                        // An abort may land while the awaited started emission drains
+                        // (e.g. fired from the trace sink itself); the host call must
+                        // never start after abort, so settle the already-started pair
+                        // as `aborted` through the catch below.
+                        callSignal.throwIfAborted();
+                        rawResult = await requireHostPorts().callPlayer(roleId, callPrompt, callSignal, {
+                            resume,
+                            ...(callPrompt === callFreshPrompt
+                                ? {}
+                                : { freshPrompt: callFreshPrompt }),
+                        });
+                        // A host promise is not required to honor cancellation. Do not
+                        // let a late result mutate continuity or publish a successful
+                        // finish.
+                        callSignal.throwIfAborted();
+                    }
+                    catch (error) {
+                        if (!isAbortFailure(error, callSignal))
+                            controlPlaneError ??= error;
+                        try {
+                            await emitTrace('player.call.finished', {
+                                ...identity,
+                                status: isAbortFailure(error, callSignal)
+                                    ? 'aborted'
+                                    : 'error',
+                                error: normalizeError(error),
+                            }, position, traceAborts);
+                        }
+                        catch {
+                            // The original non-abort port rejection remains authoritative.
+                        }
+                        // A thrown port call carries no authoritative result, so the
+                        // prior token remains available for a later explicit resume.
+                        throw decidePlayerCallFailure(error, roleId, playerId, callSignal, cohortCancellation);
+                    }
+                    let result;
+                    try {
+                        result = validatePlayerResult(rawResult);
+                    }
+                    catch (error) {
+                        if (!isAbortFailure(error, callSignal))
+                            controlPlaneError ??= error;
+                        try {
+                            await emitTrace('player.call.finished', { ...identity, status: 'error', error: normalizeError(error) }, position, traceAborts);
+                        }
+                        catch {
+                            // The malformed host result remains authoritative.
+                        }
+                        throw decidePlayerCallFailure(error, roleId, playerId, callSignal, cohortCancellation);
+                    }
+                    try {
+                        updatePlayerResume(roleId, playerId, result);
+                    }
+                    catch (error) {
+                        if (!isAbortFailure(error, callSignal))
+                            controlPlaneError ??= error;
+                        try {
+                            await emitTrace('player.call.finished', { ...identity, status: 'error', error: normalizeError(error) }, position, traceAborts);
+                        }
+                        catch {
+                            // The continuation-store failure remains authoritative.
+                        }
+                        throw error;
+                    }
+                    await emitTrace('player.call.finished', {
+                        ...identity,
+                        status: result.status,
+                        ...(result.finalText !== undefined
+                            ? { finalText: result.finalText }
+                            : {}),
+                        ...(result.error !== undefined
+                            ? { error: normalizeError(result.error) }
+                            : {}),
+                        ...(result.resumeToken !== undefined
+                            ? { resumeToken: result.resumeToken }
+                            : {}),
+                    }, position, traceAborts);
+                    // DR-063 §2: the player bridge builds the failure Error for a
+                    // non-`ok` result, so the cause is decided here, where the role,
+                    // the player, and the reported error are known, and a successful
+                    // result clears it so no later failure inherits it.
+                    if (result.status === 'ok') {
+                        pendingResultFailureCause = undefined;
+                    }
+                    else if (result.status === 'aborted') {
+                        pendingResultFailureCause = ABORTED_FAILURE_CAUSE;
+                    }
+                    else {
+                        pendingResultFailureCause = playerFailureCause({
+                            roleId,
+                            ...(playerId === undefined ? {} : { playerId }),
+                            error: result.error ??
+                                `callPlayer status ${JSON.stringify(result.status)}`,
+                        });
+                    }
+                    if (pendingResultFailureCause !== undefined) {
+                        resultFailureCauses.set(result, pendingResultFailureCause);
+                    }
+                    return result;
+                };
+                const reportPlayerKeyCollision = async (callSignal) => {
                     const error = new Error(`simultaneous calls to player key ${playerKey} are not allowed`);
-                    await emitCallStarted('player.call.started', 'player.call.finished', { ...callIdentity(selectedResume), prompt }, position, signal);
+                    const traceAborts = parallelProfile === undefined
+                        ? undefined
+                        : abortReasonClassifier(callSignal, activeAborts);
+                    await emitCallStarted('player.call.started', 'player.call.finished', { ...callIdentity(selectedResume), prompt }, position, callSignal, undefined, traceAborts);
                     await emitTrace('player.call.finished', {
                         ...callIdentity(selectedResume),
                         status: 'error',
                         error: normalizeError(error),
-                    }, position);
+                    }, position, traceAborts);
                     throw error;
+                };
+                // DR-067 §1: the working leaves of one parallel state entered
+                // together run as one all-`unchanged` repository cohort, at most once
+                // per public boundary; a corrective re-ask and a single region
+                // resuming after its Boss reply take the exclusive path below.
+                const cohortState = deferredContinuation === undefined
+                    ? cohortParallelStateFor(input.stateId)
+                    : undefined;
+                if (cohortState !== undefined) {
+                    const effectBoundary = governedBoundarySeed(input, roleId, callId, turnId);
+                    if (effectBoundary === undefined ||
+                        repositoryCapability?.runCohort === undefined) {
+                        throw new Error(`${label} parallel state ${cohortState.stateId} requires governed player states and repository.runCohort`);
+                    }
+                    activeGovernedBoundarySeen = true;
+                    return await joinCohort(cohortState, {
+                        region: cohortState.regions.find(({ workingStateId }) => workingStateId === input.stateId),
+                        input,
+                        roleId,
+                        playerId,
+                        playerKey,
+                        signal,
+                        effectBoundary,
+                        run: (callSignal, cohortCancellation, preExistingBlock) => runTracedPlayerCall(selectedResume, preExistingBlock, callSignal, cohortCancellation),
+                        reportCollision: reportPlayerKeyCollision,
+                        settled: deferredValue(),
+                    });
+                }
+                if (activePlayerKeys.has(playerKey)) {
+                    await reportPlayerKeyCollision(signal);
                 }
                 activePlayerKeys.add(playerKey);
                 try {
-                    const runTracedPlayerCall = async (resume = selectedResume, 
-                    // DR-062 §4: composed from this call's own baseline observation,
-                    // so the prompt the trace records is the prompt the player is sent.
-                    preExistingBlock) => {
-                        const identity = callIdentity(resume);
-                        const withPreExisting = (text) => preExistingBlock === undefined
-                            ? text
-                            : `${text}\n\n${preExistingBlock}`;
-                        const callPrompt = withPreExisting(resume === false ? freshPrompt : prompt);
-                        const callFreshPrompt = withPreExisting(freshPrompt);
-                        await emitCallStarted('player.call.started', 'player.call.finished', { ...identity, prompt: callPrompt }, position, signal);
-                        let rawResult;
-                        try {
-                            // An abort may land while the awaited started emission drains
-                            // (e.g. fired from the trace sink itself); the host call must
-                            // never start after abort, so settle the already-started pair
-                            // as `aborted` through the catch below.
-                            signal.throwIfAborted();
-                            rawResult = await requireHostPorts().callPlayer(roleId, callPrompt, signal, {
-                                resume,
-                                ...(callPrompt === callFreshPrompt
-                                    ? {}
-                                    : { freshPrompt: callFreshPrompt }),
-                            });
-                            // A host promise is not required to honor cancellation. Do not
-                            // let a late result mutate continuity or publish a successful
-                            // finish.
-                            signal.throwIfAborted();
-                        }
-                        catch (error) {
-                            if (!isAbortFailure(error, signal))
-                                controlPlaneError ??= error;
-                            try {
-                                await emitTrace('player.call.finished', {
-                                    ...identity,
-                                    status: isAbortFailure(error, signal) ? 'aborted' : 'error',
-                                    error: normalizeError(error),
-                                }, position);
-                            }
-                            catch {
-                                // The original non-abort port rejection remains authoritative.
-                            }
-                            // A thrown port call carries no authoritative result, so the
-                            // prior token remains available for a later explicit resume.
-                            throw decidePlayerCallFailure(error, roleId, playerId, signal);
-                        }
-                        let result;
-                        try {
-                            result = validatePlayerResult(rawResult);
-                        }
-                        catch (error) {
-                            if (!isAbortFailure(error, signal))
-                                controlPlaneError ??= error;
-                            try {
-                                await emitTrace('player.call.finished', { ...identity, status: 'error', error: normalizeError(error) }, position);
-                            }
-                            catch {
-                                // The malformed host result remains authoritative.
-                            }
-                            throw decidePlayerCallFailure(error, roleId, playerId, signal);
-                        }
-                        try {
-                            updatePlayerResume(roleId, playerId, result);
-                        }
-                        catch (error) {
-                            if (!isAbortFailure(error, signal))
-                                controlPlaneError ??= error;
-                            try {
-                                await emitTrace('player.call.finished', { ...identity, status: 'error', error: normalizeError(error) }, position);
-                            }
-                            catch {
-                                // The continuation-store failure remains authoritative.
-                            }
-                            throw error;
-                        }
-                        await emitTrace('player.call.finished', {
-                            ...identity,
-                            status: result.status,
-                            ...(result.finalText !== undefined
-                                ? { finalText: result.finalText }
-                                : {}),
-                            ...(result.error !== undefined
-                                ? { error: normalizeError(result.error) }
-                                : {}),
-                            ...(result.resumeToken !== undefined
-                                ? { resumeToken: result.resumeToken }
-                                : {}),
-                        }, position);
-                        // DR-063 §2: the player bridge builds the failure Error for a
-                        // non-`ok` result, so the cause is decided here, where the role,
-                        // the player, and the reported error are known, and a successful
-                        // result clears it so no later failure inherits it.
-                        if (result.status === 'ok') {
-                            pendingResultFailureCause = undefined;
-                        }
-                        else if (result.status === 'aborted') {
-                            pendingResultFailureCause = ABORTED_FAILURE_CAUSE;
-                        }
-                        else {
-                            pendingResultFailureCause = playerFailureCause({
-                                roleId,
-                                ...(playerId === undefined ? {} : { playerId }),
-                                error: result.error ??
-                                    `callPlayer status ${JSON.stringify(result.status)}`,
-                            });
-                        }
-                        return result;
-                    };
                     const effectBoundary = governedBoundarySeed(input, roleId, callId, turnId);
                     if (deferredContinuation !== undefined) {
                         if (effectBoundary === undefined ||
@@ -3875,11 +4678,13 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     activePlayerKeys.delete(playerKey);
                 }
             },
-            markPlayerResultFailure(error) {
-                if (pendingResultFailureCause === undefined)
+            markPlayerResultFailure(error, result) {
+                const cause = (result === undefined ? undefined : resultFailureCauses.get(result)) ??
+                    pendingResultFailureCause;
+                if (cause === undefined)
                     return error;
-                failureCauses.retain(error, pendingResultFailureCause);
-                return attachPlaybookFailureCause(error, pendingResultFailureCause);
+                failureCauses.retain(error, cause);
+                return attachPlaybookFailureCause(error, cause);
             },
             takeGovernedPlayerOutput(result) {
                 const settlement = governedPlayerSettlements.get(result);
@@ -4067,6 +4872,14 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 });
             },
         };
+        if (parallelProfile !== undefined) {
+            // DR-067 §1: a parallel machine's boundary drain waits for every player
+            // and judge call it started.
+            const untrackedCallPlayer = boundary.callPlayer;
+            const untrackedCallJudge = boundary.callJudge;
+            boundary.callPlayer = (input, roleId, freshPrompt, signal) => trackBoundaryCall(untrackedCallPlayer(input, roleId, freshPrompt, signal));
+            boundary.callJudge = (purpose, stateId, prompt, signal) => trackBoundaryCall(untrackedCallJudge(purpose, stateId, prompt, signal));
+        }
         function playerActor(ports) {
             return createPlayerBridge({
                 resolveRoleId: requireRoleId,
@@ -4335,7 +5148,12 @@ export function createXStatePlaybookRuntime(machine, spec) {
         const nestedBridge = createNestedPlaybookBridge({
             nextCallId: () => `playbook-${++playbookCallSequence}`,
             getBoundarySignal: () => activeSignal,
-            callPlaybook: (request, signal) => requireHostPorts().callPlaybook(request, signal),
+            callPlaybook: (request, signal) => {
+                const call = requireHostPorts().callPlaybook(request, signal);
+                return parallelProfile === undefined
+                    ? call
+                    : trackBoundaryCall(Promise.resolve(call));
+            },
             emitStarted: async (event, aborts) => {
                 playbookCallTurnIds.set(event.callId, activeTurnId);
                 if (hasGovernedPlayerStates) {
@@ -4374,7 +5192,9 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 activeAborts = aborts ?? abortReasonClassifier(signal);
             },
             bindActorSettlement: (aborts) => {
-                actorSettlementAborts = aborts;
+                if (parallelProfile === undefined)
+                    actorSettlementAborts.length = 0;
+                actorSettlementAborts.push(aborts);
             },
             onControlPlaneError: (error, aborts) => {
                 // The shared bridge classifies before reporting against its own
@@ -4413,8 +5233,16 @@ export function createXStatePlaybookRuntime(machine, spec) {
             };
         }
         // DR-063 §2: a rejected player port or a result the runtime cannot read is
-        // a `player-failed` failure named by role; an abort is `aborted`.
-        function decidePlayerCallFailure(error, roleId, playerId, signal) {
+        // a `player-failed` failure named by role; an abort is `aborted`. A
+        // cancellation the runtime itself issued to a cohort member because its
+        // sibling failed is not this player's failure and decides nothing, so the
+        // originator's cause stands (DR-067 §1, playbook-55).
+        function decidePlayerCallFailure(error, roleId, playerId, signal, cohortCancellation) {
+            if (cohortCancellation?.aborted === true &&
+                Object.is(error, cohortCancellation.reason) &&
+                !activeAborts?.isAbortReason(error)) {
+                return error;
+            }
             const cause = isAbortFailure(error, signal)
                 ? ABORTED_FAILURE_CAUSE
                 : playerFailureCause({
@@ -4459,10 +5287,20 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 previousState: previousState ?? null,
                 state,
             };
-            const pendingBossQuestion = pendingBossQuestionForState(state, context);
-            if (pendingBossQuestion !== undefined &&
-                !hasUnresolvedReconciliation()) {
-                payload.pendingBossQuestion = pendingBossQuestion;
+            if (parallelProfile === undefined) {
+                const pendingBossQuestion = pendingBossQuestionForState(state, context);
+                if (pendingBossQuestion !== undefined &&
+                    !hasUnresolvedReconciliation()) {
+                    payload.pendingBossQuestion = pendingBossQuestion;
+                }
+            }
+            else if (!hasUnresolvedReconciliation()) {
+                // DR-067 §1: a parallel machine's telemetry carries every question
+                // pending in an active wait, in the plural.
+                const pendingBossQuestions = pendingBossQuestionsFor(state, context);
+                if (pendingBossQuestions.length > 0) {
+                    payload.pendingBossQuestions = pendingBossQuestions;
+                }
             }
             if (state.stateId === 'failed') {
                 const lastError = failedStateError(context);
@@ -4482,7 +5320,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     message,
                     ...(data === undefined ? {} : { data }),
                     state,
-                    ...stateIdentity(state.stateId),
+                    ...stateIdentity(statusTraceStateId(state)),
                 }, position),
             }));
             void enqueueEmission(async () => {
@@ -4523,8 +5361,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 controlPlaneError ??= error;
         }
         function consumeActorSettlementAborts(forSnapshot = false) {
-            const aborts = actorSettlementAborts ?? actorSettlementErrorAborts;
-            actorSettlementAborts = undefined;
+            const aborts = actorSettlementAborts.shift() ?? actorSettlementErrorAborts;
             actorSettlementErrorAborts = undefined;
             if (forSnapshot && aborts !== undefined) {
                 // XState can report an errored root through both its inspection
@@ -4599,7 +5436,8 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     try {
                         const snap = inspectionEvent.snapshot;
                         const state = normalizePlaybookSnapshot(snap);
-                        if (state.stateId === undefined) {
+                        if (state.stateId === undefined &&
+                            !(parallelProfile?.states.some(({ stateId }) => state.activeStateIds.includes(stateId)) ?? false)) {
                             throw new Error(`${label} root snapshot must expose exactly one playbook state id`);
                         }
                         const previousState = priorState;
@@ -4635,7 +5473,9 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             validateBoundQuestionProjection();
                         }
                         const payload = structuredStateTelemetryPayload(previousState, state, inspectionEvent.event, context);
-                        const stateStatuses = completeFailedStatuses(statusesForState(state, context, inspectionEvent.event), state, context);
+                        const stateStatuses = completeFailedStatuses(bossRelevantStateIds !== undefined && usesDefaultStatuses
+                            ? parallelStatusesFor(previousState, state, context)
+                            : statusesForState(state, context, inspectionEvent.event), state, context);
                         const outcomeStatuses = usesDefaultStatuses
                             ? acceptedOutcomes.map(({ acceptedOutcome }) => ({
                                 message: `→ ${acceptedOutcome}`,
@@ -4816,13 +5656,17 @@ export function createXStatePlaybookRuntime(machine, spec) {
             emissionQueue.clear();
             judgeQueue.clear();
             appliedReceipts.clear();
+            pendingCohorts.clear();
+            consumedCohortBoundaries.clear();
+            activeBoundaryCalls.clear();
+            cohortCompletionQueue.clear();
             actor = undefined;
             session = undefined;
             savedPorts = undefined;
             runtimePorts = undefined;
             activeSignal = undefined;
             activeAborts = undefined;
-            actorSettlementAborts = undefined;
+            actorSettlementAborts.length = 0;
             actorSettlementErrorAborts = undefined;
             activeAbortEmission = undefined;
             activeTurnId = undefined;
@@ -5077,9 +5921,12 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // state whose source declares no description publishes none: an id is
         // never promoted into a description by default.
         function stateDescriptionFor(state) {
+            // DR-067 §1: inside a parallel state, the meaning published is the
+            // root state's — the parallel parent's own description.
             const keys = [
                 ...(state.stateId === undefined ? [] : [state.stateId]),
                 ...(typeof state.value === 'string' ? [state.value] : []),
+                ...(isPlainObject(state.value) ? Object.keys(state.value) : []),
                 ...state.activeStateIds,
             ];
             for (const key of keys) {
@@ -5363,7 +6210,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
             const context = (snapshot
                 ?.context ?? {});
             const actual = state?.stateId === BOSS_REPLY_WAIT_STATE_ID
-                ? pendingBossQuestionFromContext(context)
+                ? singlePendingBossQuestion(state, context)
                 : undefined;
             if (!isDeepStrictEqual(actual, expected)) {
                 throw new Error(`${label} deferred FSM question does not equal its durable binding`);
@@ -5622,7 +6469,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 const state = normalizePlaybookSnapshot(snapshot);
                 const context = (snapshot.context ??
                     {});
-                const pending = pendingBossQuestionForState(state, context);
+                const pending = singlePendingBossQuestion(state, context);
                 if (pending === undefined ||
                     currentBoundDeferredOperation(pending)?.operationId !== operationId) {
                     throw new TypeError(`${label} restored deferred wait does not equal its FSM question`);
@@ -5732,9 +6579,9 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 refreshRetainedEffectReconciliation(effectLedgerMirror);
                 syncDeferredReconciliationOverlay();
                 refreshUnresolvedSemanticReconciliation(effectLedgerMirror);
-                const pending = !hasUnresolvedReconciliation()
-                    ? pendingBossQuestionForState(state, context ?? {})
-                    : undefined;
+                const pendingQuestions = !hasUnresolvedReconciliation()
+                    ? pendingBossQuestionsFor(state, context ?? {})
+                    : [];
                 const failedEffectAttempt = hasGovernedPlayerStates &&
                     state.stateId === 'failed' &&
                     failedAttemptMatchesCurrentLedger(effectLedgerMirror)
@@ -5759,16 +6606,12 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             : {}),
                     },
                     state,
-                    pendingBossQuestions: pending === undefined
-                        ? []
-                        : [
-                            {
-                                questionId: pending.questionId,
-                                asker: pending.asker,
-                                question: pending.question,
-                                sourceItem: pending.sourceItem,
-                            },
-                        ],
+                    pendingBossQuestions: pendingQuestions.map((pending) => ({
+                        questionId: pending.questionId,
+                        asker: pending.asker,
+                        question: pending.question,
+                        sourceItem: pending.sourceItem,
+                    })),
                     effectLedger: effectLedgerMirror,
                     ...(retainedEffectSourceSessionId === undefined
                         ? {}
@@ -5791,13 +6634,19 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 await rehydrateSnapshot('restore', nextSession, snapshot);
             },
             // DR-038 §§1,5 / PBRT-61/PBRT-65: adoption is restore under a fresh
-            // engagement identity and counter lineage, exposed separately so
-            // capability-less bespoke runtimes can omit it. Runtime-visible
-            // preflight mismatches reject before effects; after preflight the new
+            // engagement identity and counter lineage, exposed separately so a
+            // capability-less runtime can omit it. Runtime-visible preflight
+            // mismatches reject before effects; after preflight the new
             // session.started boundary owns failed-start cleanup just like init.
-            async adopt(nextSession, snapshot, context) {
-                await rehydrateSnapshot('adopt', nextSession, snapshot, context);
-            },
+            // DR-067 §2: retained-snapshot adoption stays in the flat domain, so a
+            // machine that declares a parallel state omits the member.
+            ...(parallelProfile === undefined
+                ? {
+                    async adopt(nextSession, snapshot, context) {
+                        await rehydrateSnapshot('adopt', nextSession, snapshot, context);
+                    },
+                }
+                : {}),
             // DR-029 / PBRT-52: side-effect-free control view over the live
             // snapshot, valid at parked quiescence outside an active boundary.
             // The view is detached and frozen; producing it emits nothing and
@@ -5818,9 +6667,9 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 const state = currentState();
                 const context = (snapshot.context ??
                     {});
-                const pending = !hasUnresolvedReconciliation()
-                    ? pendingBossQuestionForState(state, context)
-                    : undefined;
+                const pendingQuestions = !hasUnresolvedReconciliation()
+                    ? pendingBossQuestionsFor(state, context)
+                    : [];
                 const lastError = state.stateId === 'failed'
                     ? failedStateError(context)
                     : normalizeErrorFull(context.lastError);
@@ -5834,16 +6683,12 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     ...(projectedContext !== undefined
                         ? { context: projectedContext }
                         : {}),
-                    pendingQuestions: pending === undefined
-                        ? []
-                        : [
-                            {
-                                questionId: pending.questionId,
-                                asker: pending.asker,
-                                question: pending.question,
-                                sourceItem: pending.sourceItem,
-                            },
-                        ],
+                    pendingQuestions: pendingQuestions.map((pending) => ({
+                        questionId: pending.questionId,
+                        asker: pending.asker,
+                        question: pending.question,
+                        sourceItem: pending.sourceItem,
+                    })),
                     ...(lastError !== undefined ? { lastError } : {}),
                     actions: deriveControlActions(snapshot).map(({ action }) => action),
                 });
@@ -5893,6 +6738,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 const callId = `apply-${++applyCallSequence}`;
                 const position = { turnId, callId };
                 activeTurnId = turnId;
+                publicBoundarySequence += 1;
                 beginAutomaticReplayBoundary();
                 activeSignal = signal;
                 activeAborts = abortReasonClassifier(signal);
@@ -6064,6 +6910,8 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     if (receipt !== undefined && receipt.disposition !== 'rejected') {
                         appliedReceipts.set(key, receipt);
                     }
+                    if (parallelProfile !== undefined)
+                        await drainBoundaryCalls();
                     try {
                         await drainEmissions();
                     }
@@ -6157,6 +7005,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 refreshRetainedEffectFenceFromHost();
                 const turnId = ++turnSequence;
                 activeTurnId = turnId;
+                publicBoundarySequence += 1;
                 beginAutomaticReplayBoundary();
                 activeSignal = signal;
                 activeAborts = abortReasonClassifier(signal);
@@ -6196,7 +7045,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             const stateId = normalizePlaybookSnapshot(snapshot).stateId;
                             const snapshotContext = (snapshot
                                 .context ?? {});
-                            deferredPending = pendingBossQuestionForState(normalizePlaybookSnapshot(snapshot), snapshotContext);
+                            deferredPending = singlePendingBossQuestion(normalizePlaybookSnapshot(snapshot), snapshotContext);
                             pendingRequiresDeferredBinding =
                                 deferredPending !== undefined &&
                                     outcomeAuthority?.governedPlayerStates[deferredPending.resumeStateId]?.needsBossReply?.repositoryDisposition === 'deferred' &&
@@ -6327,6 +7176,8 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     catch (error) {
                         operationError = error;
                     }
+                    if (parallelProfile !== undefined)
+                        await drainBoundaryCalls();
                     let drainError;
                     try {
                         await drainEmissions();
@@ -6415,6 +7266,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     return runResultFor('no-action');
                 }
                 activeTurnId = playbookCallTurnIds.get(input.callId);
+                publicBoundarySequence += 1;
                 bindAutomaticReplayBoundary(playbookCallEffectPrefixes.has(input.callId)
                     ? playbookCallEffectPrefixes.get(input.callId)
                     : hasGovernedPlayerStates
@@ -6457,6 +7309,8 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             error: normalizeError(input.signal.reason),
                         };
                     }
+                    if (parallelProfile !== undefined)
+                        await drainBoundaryCalls();
                     let drainError;
                     try {
                         await drainEmissions();
@@ -6570,10 +7424,14 @@ export function createXStatePlaybookRuntime(machine, spec) {
                         emissionQueue.clear();
                         judgeQueue.clear();
                         appliedReceipts.clear();
+                        pendingCohorts.clear();
+                        consumedCohortBoundaries.clear();
+                        activeBoundaryCalls.clear();
+                        cohortCompletionQueue.clear();
                         actor = undefined;
                         activeSignal = undefined;
                         activeAborts = undefined;
-                        actorSettlementAborts = undefined;
+                        actorSettlementAborts.length = 0;
                         actorSettlementErrorAborts = undefined;
                         activeAbortEmission = undefined;
                         activeTurnId = undefined;
