@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **The link materializer takes the `.js` specifier a shipping package needs.** The helper derived the emitted FSM import from the `--fsm` path, so a module materialized from `code.fsm.ts` imported `./code.fsm.ts`, which `slc/link.md` forbids inside a package that compiles and ships JavaScript siblings and which `tsc` rejects there; every in-package link had to be edited by hand. The descriptor's optional `fsmSpecifier` names the `.js` sibling the build emits — same directory, same basename — and is emitted verbatim; another directory or basename is rejected with the target preserved ([[link-materialization-4](specs/packages/link-materialization.md#link-materialization-4)]).
+- **The link materializer takes the `.js` specifier a shipping package needs.** The helper derived the emitted FSM import from the `--fsm` path, so a module materialized from `code.fsm.ts` imported `./code.fsm.ts`, which `slc/link.md` forbids inside a package that compiles and ships JavaScript siblings and which `tsc` rejects there; every in-package link had to be edited by hand. The descriptor's optional `fsmSpecifier` names the `.js` sibling the build emits — same directory, same basename — and is emitted verbatim; another directory or basename is rejected with the target preserved ([[link-materialization-4](specs/packages/link-materialization.md#link-materialization-4)]). The emitted module also exposes `VERBATIM_PAYLOAD_FIELDS` under `_internal`, as the maintained modules do and as the linked-ownership check reads.
 
 ### Changed
 

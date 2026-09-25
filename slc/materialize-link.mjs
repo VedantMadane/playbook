@@ -362,6 +362,7 @@ const OPTION_SCHEMA = ${json(options)} as const;
 const INPUT_MAPPING = ${json(descriptor.inputMapping)} as const;
 const RESUMABLE_STATE_IDS: ReadonlySet<string> = new Set(${json(descriptor.resumableStateIds)});
 const UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string> = new Set(${json(descriptor.unfinishedFinalStateIds)});
+const VERBATIM_PAYLOAD_FIELDS: ReadonlySet<string> = new Set(${json(descriptor.verbatimPayloadFields)});
 export function validateOptions(value: unknown): PlaybookRuntimeOptions {
   const captured = snapshotJsonValue(value === undefined ? {} : value, ${JSON.stringify(`${descriptor.label} runtime options`)});
   if (captured === null || typeof captured !== 'object' || Array.isArray(captured)) {
@@ -387,7 +388,7 @@ ${quotedPlayer || labelledPlayer ? '  composePlayerPrompt,\n' : ''}  ...${json(d
     Object.entries(INPUT_MAPPING).filter(([, key]) => options[key as keyof PlaybookRuntimeOptions] !== undefined)
       .map(([field, key]) => [field, options[key as keyof PlaybookRuntimeOptions]]),
   ),
-  verbatimPayloadFields: new Set<string>(${json(descriptor.verbatimPayloadFields)}),
+  verbatimPayloadFields: VERBATIM_PAYLOAD_FIELDS,
   resumableStateIds: RESUMABLE_STATE_IDS,
   unfinishedFinalStateIds: UNFINISHED_FINAL_STATE_IDS,
 } satisfies XStatePlaybookRuntimeSpecV3<PlaybookRuntimeOptions>;
@@ -396,6 +397,7 @@ export const _internal = {
   ${quotedPlayer || labelledPlayer ? 'composePlayerPrompt,\n  ' : hasPlayer ? `composePlayerPrompt: (input: PlaybookPlayerInput, _identity?: unknown${hasContinuationMode ? ', resuming = false' : ''}) =>
     defaultComposePlayerPrompt(input, ${json(descriptor.placeholderFields)}${hasContinuationMode ? ', resuming' : ''}),\n  ` : ''}RESUMABLE_STATE_IDS,
   UNFINISHED_FINAL_STATE_IDS,
+  VERBATIM_PAYLOAD_FIELDS,
 };
 const createPlaybookRuntime: XStatePlaybookRuntimeFactory<
   XStatePlaybookRuntimeConstruction<PlaybookRuntimeOptions, PlaybookHostCapabilities>, 3

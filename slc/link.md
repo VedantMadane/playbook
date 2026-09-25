@@ -2559,8 +2559,11 @@ The thin emitted module:
   host-construction boundary's setup diagnostic.
 - Exposes, under an `_internal` export, the pure helpers verification
   needs — at least the prompt composers its own machine uses, which may
-  re-export the shared defaults when the spec does not override composition —
-  so compilation-correctness tests can exercise composition without a host.
+  re-export the shared defaults when the spec does not override composition,
+  and the `VERBATIM_PAYLOAD_FIELDS` and `UNFINISHED_FINAL_STATE_IDS` sets the
+  spec declares, which the linked-ownership check reads back — so
+  compilation-correctness tests can exercise composition and ownership
+  without a host.
   A playbook that calls players exposes `composePlayerPrompt`; a playbook
   whose states make direct-Captain calls exposes `composeCaptainPrompt`. A
   controller playbook that calls no players exposes no player composer:

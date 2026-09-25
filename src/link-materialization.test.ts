@@ -93,6 +93,7 @@ describe('optional link materialization integration', () => {
       import { resumableStateIdsFromMachine } from '@sublang/playbook/xstate-runtime';
       assert.deepEqual([...resumableStateIdsFromMachine(fixtureMachine)], ['work']);
       assert.deepEqual([..._internal.RESUMABLE_STATE_IDS], ['work']);
+      assert.deepEqual([..._internal.VERBATIM_PAYLOAD_FIELDS], [])
     `);
     const accepted = readFileSync(out, 'utf8');
     const incomplete = descriptor();
@@ -231,7 +232,12 @@ void missing;
       assert.equal(readFileSync(${JSON.stringify(out)}, 'utf8'), expected
         .replace('function snapshotOptions(value: unknown)', 'export function validateOptions(value: unknown)')
         .replace('snapshotJsonValue(value,', 'snapshotJsonValue(value === undefined ? {} : value,')
-        .replace('  snapshotOptions,', '  snapshotOptions: validateOptions,'));
+        .replace('  snapshotOptions,', '  snapshotOptions: validateOptions,')
+        // The verbatim field set is declared once and exposed for the
+        // linked-ownership check, as the maintained modules do.
+        .replace('const UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string> = new Set([]);\\n', 'const UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string> = new Set([]);\\nconst VERBATIM_PAYLOAD_FIELDS: ReadonlySet<string> = new Set([]);\\n')
+        .replace('  verbatimPayloadFields: new Set<string>([]),', '  verbatimPayloadFields: VERBATIM_PAYLOAD_FIELDS,')
+        .replace('  UNFINISHED_FINAL_STATE_IDS,\\n};', '  UNFINISHED_FINAL_STATE_IDS,\\n  VERBATIM_PAYLOAD_FIELDS,\\n};'));
     `);
   });
 
