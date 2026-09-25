@@ -271,3 +271,24 @@ it("carries an outcome's evidence qualification in the result description the ju
     "the behavior carries exactly one `Results:` bullet naming that outcome and carrying the qualification",
   );
 });
+
+it("marks every accepted governed arm so the runtime publishes the outcome", () => {
+  const definition = readFileSync(
+    new URL("../slc/gears2fsm.md", import.meta.url),
+    "utf8",
+  ).replace(/\s+/g, " ");
+  expect(definition).toContain(
+    "every accepted `onDone` arm — each arm that routes a declared outcome, not the malformed-output fallback — shall carry, first among its actions, the root-machine action `{ type: 'playbook.acceptedOutcome'",
+  );
+  for (const workflow of ["code", "review", "decide", "dev", "branch", "pr"]) {
+    const fsm = readFileSync(
+      new URL(`../reference/sdlc/${workflow}.playbook/${workflow}.fsm.ts`, import.meta.url),
+      "utf8",
+    );
+    expect(fsm, `${workflow} declares the marker action`).toContain("'playbook.acceptedOutcome':");
+    expect(
+      fsm.split("type: 'playbook.acceptedOutcome'").length - 1,
+      `${workflow} marks its accepted arms`,
+    ).toBeGreaterThan(0);
+  }
+});

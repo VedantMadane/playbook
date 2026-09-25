@@ -38,6 +38,10 @@ Where a later prompt reads the commit an earlier call itself created through a S
 
 When Source qualifies an outcome's evidence — what affirmatively supports it, or what supports no outcome — text2gears shall carry that qualification in the outcome's result description, which the hidden adjudicator reads when it selects the guard [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], rather than in the item's prose, which reaches no judge; a behavior with one qualified outcome therefore carries exactly one `Results:` bullet naming it, with an output property only where a consumer requires one.
 
+### compiler-results-15
+
+When gears2fsm compiles an accepted `onDone` arm of an artifact-schema-3 governed delegated-player state, it shall place first among the arm's actions the root-machine `playbook.acceptedOutcome` action with exact plain params `{ source, target, acceptedOutcome }` naming that state, the arm's target, and the accepted guard, and shall declare the action in the machine setup as a no-op typing those params, so the linked runtime confirms and publishes the accepted outcome [[playbook-runtime-81](playbook-runtime.md#playbook-runtime-81)]; the malformed-output fallback carries none.
+
 ### compiler-results-7
 
 When emitting a result description with an `Output shall include` clause, text2gears shall reserve complete backticked spans after that marker for output-field declarations [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)] outside plain-text parentheses, placing explanatory symbols in plain guidance text or inside the declaration's complete annotation rather than in separate backticks within parenthetical guidance, while retaining bare declarations with plain parenthetical guidance and parentheses inside a complete backticked annotation.
@@ -81,3 +85,7 @@ When the integration suite reads the shipped definitions and the maintained CODE
 ### compiler-results-14
 
 When the integration suite reads the shipped text2gears definition, it shall verify that it directs an outcome's evidence qualification into the result description and names item prose as text the adjudicator never reads [[compiler-results-13](#compiler-results-13)].
+
+### compiler-results-16
+
+When the integration suite reads the shipped gears2fsm definition and each maintained workflow FSM, it shall verify that the definition requires the accepted-outcome marker on every accepted governed arm and that each maintained FSM with a governed delegated-player state declares the `playbook.acceptedOutcome` action and carries it on its accepted arms [[compiler-results-15](#compiler-results-15)].

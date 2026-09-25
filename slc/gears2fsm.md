@@ -669,6 +669,20 @@ The compiler shall update or reset those source-owned facts only at their actual
 Transitions shall be self-driving when source items define the next obligation.
 Routing to an idle hub is for recovery, unrecoverable Boss input, or one-shot entry events — not the happy path.
 
+Where an artifact-schema-3 delegated-player state's outcomes are governed by the
+linked runtime ([link.md "Captain adjudication"](link.md#captain-adjudication)),
+every accepted `onDone` arm — each arm that routes a declared outcome, not the
+malformed-output fallback — shall carry, first among its actions, the
+root-machine action
+`{ type: 'playbook.acceptedOutcome', params: { source: '<stateId>', target: '<target stateId>', acceptedOutcome: '<guard>' } }`,
+with the setup's `actions` declaring `'playbook.acceptedOutcome'` as a no-op
+that types those three string params.
+The linked runtime retains the marker until the next public snapshot confirms
+`source` in the prior snapshot and `target` in the new one, and only then
+publishes the outcome's accepted trace and `→ <acceptedOutcome>` status; an arm
+without the marker accepts its outcome silently, and the host counts none of the
+work it saved.
+
 ### Auto-advance on approval
 
 A review/approval state's success outcome shall **target the next workflow step**, not idle back to a hub.
