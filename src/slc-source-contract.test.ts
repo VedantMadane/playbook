@@ -148,8 +148,8 @@ const linkedWorkflows = [
       'notPublished',
       'fixFailed',
       'fixNotPublished',
-      'checksStillFailing',
-      'mergeRefused',
+      'checksFailed',
+      'mergeUnconfirmed',
     ],
   },
 ] as const;

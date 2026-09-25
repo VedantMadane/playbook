@@ -761,10 +761,10 @@ describe('canonical Captain compiler bundle (CAPPLAY-11)', () => {
 
 describe('artifact schema cutover (RELEASE-15)', () => {
   it('keeps every shipped runtime and registry sibling on schema 3', () => {
-    // A materialized module declares its compat block as JSON, key quoted.
-    const schemaDeclaration = /\bartifactSchema"?:\s*3/;
+    // A materialized module declares its spec as JSON, with the key quoted.
+    const schemaDeclaration = /"?artifactSchema"?:\s*3/;
     const legacyDeclaration =
-      /artifactSchema"?:\s*2|SchemaV2|RegistryEntryV2/;
+      /"?artifactSchema"?:\s*2|SchemaV2|RegistryEntryV2/;
 
     for (const id of BUNDLED_WORKFLOW_IDS) {
       const base = `reference/sdlc/${id}.playbook/`;
@@ -1371,7 +1371,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'default',
       'validateBranchOptions',
     ],
-    './pr/playbook': ['_internal', 'default'],
+    './pr/playbook': ['_internal', 'default', 'validateOptions'],
     './pr/registry': [
       'default',
       'prCopyPasteGuardNames',
@@ -1907,11 +1907,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1921,10 +1923,9 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerCallOptions',
       'PlayerResult',
       'PlayerSessionStore',
-      'PrPlaybookHostCapabilities',
-      'PrPlaybookOptions',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './pr/registry': [
       'PlaybookSummaryPolicy',
@@ -2461,7 +2462,7 @@ import type { DevPlaybookHostCapabilities } from '@sublang/playbook/dev/playbook
 import { branchPlaybookRegistryEntry } from '@sublang/playbook/branch/registry';
 import type { PlaybookHostCapabilities as BranchPlaybookHostCapabilities } from '@sublang/playbook/branch/playbook';
 import { prPlaybookRegistryEntry } from '@sublang/playbook/pr/registry';
-import type { PrPlaybookHostCapabilities } from '@sublang/playbook/pr/playbook';
+import type { PlaybookHostCapabilities as PrPlaybookHostCapabilities } from '@sublang/playbook/pr/playbook';
 import type {
   HostCapabilities as FacadeHostCapabilities,
   WorktreeHostCapabilities,
@@ -2537,11 +2538,13 @@ declare const codeHostCapabilities: CodePlaybookHostCapabilities;
 declare const reviewHostCapabilities: ReviewPlaybookHostCapabilities;
 declare const decideHostCapabilities: DecidePlaybookHostCapabilities;
 declare const devHostCapabilities: DevPlaybookHostCapabilities;
-// BRANCH's materialized module types live authority as opaque; its registry
-// entry takes the Captain's construction capabilities alongside it.
+// The materialized modules type authority as opaque; each registry entry takes
+// the Captain's construction capabilities alongside it (BRANCH for the
+// governed worktree, PR for the script working directory).
 declare const branchHostCapabilities: PlaybookHostConstructionCapabilities &
   BranchPlaybookHostCapabilities;
-declare const prHostCapabilities: PrPlaybookHostCapabilities;
+declare const prHostCapabilities: PlaybookHostConstructionCapabilities &
+  PrPlaybookHostCapabilities;
 declare const ports: PlaybookPorts;
 declare const v3Entry: PlaybookCaptainRegistryEntryV3;
 // @ts-expect-error live construction capabilities are not runtime ports
