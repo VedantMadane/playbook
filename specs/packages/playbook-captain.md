@@ -1637,8 +1637,8 @@ validated prose surfaced through `emitReply`.
 The suite shall fail unless a pure chat turn settles in exactly one
 durable call (`respond`) with no separate summary call, while an
 acting turn costs two durable calls plus bounded correctives.
-The suite shall fail unless the real compiled DECIDE artifact engaged as leaf exposes its unresolved-effect-only `describe`/`apply` pair, advertises no action in an ordinary failure state, and makes zero `apply` calls while that actionless view is presented.
-The suite shall fail unless a status question on that ordinary failed leaf still settles as `respond` — no `deliver`, no FSM event, the leaf snapshot identical before and after — grounded in the exact published ControlView state description and empty action list ([[playbook-captain-9](playbook-captain.md#playbook-captain-9)]).
+The suite shall fail unless the real compiled DECIDE artifact engaged as leaf exposes its `describe`/`apply` pair, advertises exactly its fenced entry-event retry in an ordinary failure state whose governed boundaries carry complete `unchanged` receipts, and makes zero `apply` calls while that view is presented.
+The suite shall fail unless a status question on that ordinary failed leaf still settles as `respond` — no `deliver`, no FSM event, the leaf snapshot identical before and after — grounded in the exact published ControlView state description and action list ([[playbook-captain-9](playbook-captain.md#playbook-captain-9)]).
 The suite shall further fail unless the real DECIDE runtime reaches both its approval-backed and REVIEW-failure final states with the exact authored `stateDescription` on each terminal result, and the real shell's one completion fact carries that meaning before disposal without reading opaque output (verifying [[playbook-captain-20](#playbook-captain-20)]).
 The suite shall fail unless a full Boss turn through the real shell
 and real CODE artifact with a scripted empty-then-text player
