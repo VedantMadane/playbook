@@ -14,7 +14,7 @@ Implement and verify [DR-066](../decisions/066-captain-prepares-step-recovery.md
 ## Deliverables
 
 - [x] Durable recovery of the interrupted invocation.
-- [ ] Bounded Captain preparation and continuation through both front ends.
+- [x] Bounded Captain preparation and continuation through both front ends.
 - [ ] Integration and real-agent verification, documentation, and merged commits.
 
 ## Tasks

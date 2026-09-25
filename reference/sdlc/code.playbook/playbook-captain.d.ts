@@ -158,7 +158,7 @@ interface PlaybookCaptainShellSnapshotFields {
         readonly journal: number;
     };
     readonly journal: readonly PlaybookCaptainJournalRecord[];
-    readonly lastAction?: 'respond' | 'start' | 'switch' | 'resume' | 'dismiss' | 'deliver' | 'runtime';
+    readonly lastAction?: 'respond' | 'start' | 'switch' | 'resume' | 'dismiss' | 'deliver' | 'runtime' | 'recover';
     readonly lastSettlementStatus?: 'ok' | 'rejected' | 'failed';
 }
 /**

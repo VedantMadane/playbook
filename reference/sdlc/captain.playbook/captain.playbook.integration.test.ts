@@ -2820,26 +2820,10 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
 
     await target.harness.turn('Retry the retained failure now.', 2);
 
-    expect(target.harness.playerCalls).toEqual([]);
+    expect(target.harness.playerCalls).toEqual(['code-coder', 'review-reviewer']);
     expect(classifierPrompts(target.harness)).toEqual([]);
-    expect(target.code.runtimes[0]?.describe?.()).toMatchObject({
-      state: { stateId: 'failed' },
-      actions: [],
-    });
-    // DR-063 §4: the adopted failure still explains itself — the cause the
-    // source runtime decided travels inside the retained `lastError`.
-    expect(target.harness.surfaced.at(-1)).toBe(
-      [
-        'No retained work is actionable.',
-        '',
-        'Failure: the coder call failed: coder exploded.',
-        'Controls:',
-        '- Stop /code (ready)',
-      ].join('\n'),
-    );
-    expect(target.harness.shell.exportSnapshot()).toMatchObject({
-      mode: 'engaged.parked',
-    });
+    expect(target.harness.playerPrompts[0]).toContain(originalIntent);
+    expectCleanCompletion(target.harness);
     await target.harness.shell.dispose?.();
   });
 
@@ -3495,14 +3479,14 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     const snapshot = first.shell.exportSnapshot();
     expect(snapshot?.mode).toBe('engaged.parked');
     expect(snapshot?.frames?.[0]?.runtime.state.stateId).toBe('failed');
-    // The recovery input travels in the machine snapshot the record already
-    // carries; nothing was added beside it for this.
+    // The invocation checkpoint preserves the exact interrupted step.
     expect(Object.keys(snapshot!.frames![0]!.runtime).sort()).toEqual([
       'effectLedger',
       'failedEffectAttempt',
       'machine',
       'pendingBossQuestions',
       'playbookId',
+      'recoveryCheckpoint',
       'roleResumeTokens',
       'schemaVersion',
       'sequences',
@@ -5874,6 +5858,7 @@ describe('Captain reply presentation and effect attribution by construction', ()
       'disposeStack',
       'unresolvedEffectSettlement.begin',
       'unresolvedEffectSettlement.complete',
+      'callCaptainQueued',
     ];
     const operands: string[] = [];
     for (let index = shellSource.indexOf('runEffect(');

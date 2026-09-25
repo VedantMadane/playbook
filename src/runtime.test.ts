@@ -449,6 +449,7 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       'context?:JsonValue',
       'lastError?:NormalizedError',
       'pendingQuestions:readonlyPlaybookPendingBossQuestion[]',
+      'recovery?:PlaybookRecoveryOffer',
       'state:PlaybookState',
       'stateDescription?:string',
     ]);

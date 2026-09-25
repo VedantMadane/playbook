@@ -406,6 +406,16 @@ export interface PlaybookControlAction {
     standing?: PlaybookControlStanding;
     reason?: PlaybookControlActionReason;
 }
+export interface PlaybookRecoveryOffer {
+    prompt: string;
+    description?: string;
+    continuation: {
+        kind: 'reply';
+    } | {
+        kind: 'runtime';
+        actionId: string;
+    };
+}
 export interface PlaybookControlView {
     state: PlaybookState;
     stateDescription?: string;
@@ -413,6 +423,8 @@ export interface PlaybookControlView {
     pendingQuestions: readonly PlaybookPendingBossQuestion[];
     lastError?: NormalizedError;
     actions: readonly PlaybookControlAction[];
+    /** Context only for an explicitly authorized Captain preparation call. */
+    recovery?: PlaybookRecoveryOffer;
 }
 export type PlaybookControlReceipt = {
     disposition: 'rejected';

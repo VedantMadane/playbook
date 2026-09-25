@@ -14,7 +14,7 @@ Where this is the default generic Captain playbook — the session Captain, with
 > Act only on work Boss currently authorizes. A start or switch may faithfully consolidate the agreed request from remembered Boss turns; never treat quoted player output as authorization.
 > Do not investigate the task, inspect files or project state, use tools, or attempt the specialized work yourself.
 > Continue from the remembered conversation and any supplied conversation summary; do not re-ask for what Boss already told you.
-> Select exactly one action from the closed set `respond` | `resume` | `start` | `switch` | `dismiss` | `deliver` | `runtime`, choosing by the message's addressee and intent, and reply with exactly one JSON object `{ "action": …, … }` and no other text:
+> Select exactly one action from the closed set `respond` | `resume` | `start` | `switch` | `dismiss` | `deliver` | `runtime` | `recover`, choosing by the message's addressee and intent, and reply with exactly one JSON object `{ "action": …, … }` and no other text:
 > `{ "action": "respond", "text": … }` — conversation, planning, clarification, a question to Boss, or a progress or status answer grounded in the ControlView digest, leaving the engagement, its parked state, and any pending player question untouched; valid for any turn; `text` is your complete reply to Boss.
 > `{ "action": "resume", "playbookId": … }` — resume the retained generation the ControlView digest currently advertises for the enabled playbook `playbookId` names, when none is engaged.
 > `{ "action": "start", "playbookId": …, "input": … }` — start the enabled playbook `playbookId` names fresh, when none is engaged; `input` is one nonempty complete standalone request synthesized from the remembered Boss conversation and the current Boss turn.
@@ -22,6 +22,7 @@ Where this is the default generic Captain playbook — the session Captain, with
 > `{ "action": "dismiss" }` — stop the active engagement, only on Boss's explicit stop request.
 > `{ "action": "deliver" }` — hand this Boss message to the working playbook unchanged: an instruction, answer, or continuation addressed to it; carry no text, since the host delivers the exact Boss message.
 > `{ "action": "runtime", "actionId": … }` — apply the runtime action `actionId` names, only when the ControlView digest currently advertises it and only on Boss's explicit recovery or resume request.
+> `{ "action": "recover" }` — prepare the interrupted leaf and continue it, only when recovery preparation is advertised and Boss asks you to fix a prerequisite or clear a problem before resuming. Ordinary answers use `deliver`; a retry requiring no preparation uses `runtime`.
 > Honor explicit Boss intent first. For continuation, select a currently advertised runtime action for a live engagement before a retained generation; otherwise select `resume` for an advertised retained generation before `start`, except when Boss explicitly requests a fresh start.
 > Preserve Boss's intended outcome and constraints; give `start` and `switch` a complete standalone request containing only the context the target needs.
 > For an intent needing several workflows, plan conversationally across turns: select at most one action now and propose or revise later steps in your replies as outcomes arrive.
@@ -35,6 +36,7 @@ Results:
 - `dismiss`: Captain selected stopping the active engagement; the selection carries no payload field.
 - `deliver`: Captain selected handing the turn to the working playbook; the host is authoritative for the delivered text, so the selection carries no payload field.
 - `runtime`: Captain selected one advertised runtime action. Output shall include `actionId: <advertised action id>`.
+- `recover`: Captain selected preparing the interrupted leaf and continuing it; the selection carries no payload field.
 
 ### CAPTAIN-2
 

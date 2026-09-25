@@ -814,6 +814,12 @@ export interface PlaybookControlAction {
 // the Boss-appropriate grounding a host may speak from; the state id is
 // internal and is absent from it whenever the runtime's source declares
 // no description for the state it is in.
+export interface PlaybookRecoveryOffer {
+  prompt: string;
+  description?: string;
+  continuation: { kind: 'reply' } | { kind: 'runtime'; actionId: string };
+}
+
 export interface PlaybookControlView {
   state: PlaybookState;
   stateDescription?: string;
@@ -821,6 +827,8 @@ export interface PlaybookControlView {
   pendingQuestions: readonly PlaybookPendingBossQuestion[];
   lastError?: NormalizedError;
   actions: readonly PlaybookControlAction[];
+  /** Context only for an explicitly authorized Captain preparation call. */
+  recovery?: PlaybookRecoveryOffer;
 }
 
 // DR-029: the receipt `apply()` returns says which of three things

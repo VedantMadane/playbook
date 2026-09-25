@@ -136,7 +136,7 @@ export type CaptainControllerSelection =
       /** Complete standalone request synthesized from the remembered Boss conversation. */
       readonly input: CaptainControllerInput;
     }
-  | { readonly action: 'dismiss' }
+  | { readonly action: 'dismiss' | 'recover' }
   | { readonly action: 'deliver' }
   | { readonly action: 'runtime'; readonly actionId: string };
 
@@ -382,8 +382,8 @@ function classifyControllerTurn(
 // ---------------------------------------------------------------------------
 
 const RESTATED_REPLY_CONTRACT = [
-  'Reply again with exactly one JSON object `{ "action": …, … }` and no other text, selecting exactly one action from the closed set `respond` | `resume` | `start` | `switch` | `dismiss` | `deliver` | `runtime`:',
-  '`{ "action": "respond", "text": … }`, `{ "action": "resume", "playbookId": … }`, `{ "action": "start", "playbookId": …, "input": … }`, `{ "action": "switch", "playbookId": …, "input": … }`, `{ "action": "dismiss" }`, `{ "action": "deliver" }`, or `{ "action": "runtime", "actionId": … }`; every `input` is one nonempty complete standalone request.',
+  'Reply again with exactly one JSON object `{ "action": …, … }` and no other text, selecting exactly one action from the closed set `respond` | `resume` | `start` | `switch` | `dismiss` | `deliver` | `runtime` | `recover`:',
+  '`{ "action": "respond", "text": … }`, `{ "action": "resume", "playbookId": … }`, `{ "action": "start", "playbookId": …, "input": … }`, `{ "action": "switch", "playbookId": …, "input": … }`, `{ "action": "dismiss" }`, `{ "action": "deliver" }`, `{ "action": "runtime", "actionId": … }`, or `{ "action": "recover" }`; every `input` is one nonempty complete standalone request.',
 ].join('\n');
 
 function correctiveDecisionPrompt(prompt: string, reason: string): string {
@@ -496,6 +496,7 @@ function readDecisionReply(
         },
       };
     }
+    case 'recover':
     case 'dismiss': {
       const shape = requireKeys([]);
       if (shape !== undefined) return { reason: shape };

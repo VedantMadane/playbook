@@ -243,13 +243,14 @@ controller Source does not.
 The controller decision state's direct-Captain result contract discriminates
 the closed action set of DR-029 as extended by DR-038. Its guard discriminants
 are a stable compiler contract, not names the compiler may invent — `respond`, `resume`,
-`start`, `switch`, `dismiss`, `deliver`, and `runtime` — with each guard's
+`start`, `switch`, `dismiss`, `deliver`, and `runtime`, plus `recover` when Source declares recovery preparation — with each guard's
 required payload fields:
 
 - `respond` requires `text`;
 - `resume` requires `playbookId` and carries no `input`;
 - `start` and `switch` each require `playbookId` and `input`;
 - `runtime` requires `actionId`;
+- `recover`, when declared, requires no payload and selects host-owned preparation followed by runtime-validated continuation;
 - `dismiss` and `deliver` require none — a `deliver` result in particular
   carries no text payload: the host is authoritative for the delivered text,
   so the contract declares no field for it.

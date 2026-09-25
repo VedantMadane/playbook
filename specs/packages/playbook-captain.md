@@ -375,7 +375,7 @@ The shell shall submit every other non-empty Boss turn to the
 session Captain for its hidden decision call, and every selection —
 parse-injected, host-selected, or model-decided — arrives through the
 host-supplied controller port ([[captain-playbook-9](captain-playbook.md#captain-playbook-9)]) as one
-of `respond`, `resume`, `start`, `switch`, `dismiss`, `deliver`, or `runtime`,
+of `respond`, `resume`, `start`, `switch`, `dismiss`, `deliver`, `runtime`, or `recover`,
 a model-decided `respond` carrying the turn's reply prose so a chat
 turn settles in that one decision call.
 The shell shall validate a selection against host state before any
@@ -384,7 +384,7 @@ entries; `start` and `switch` inputs shall be nonempty standalone
 request strings ([[captain-playbook-9](captain-playbook.md#captain-playbook-9)]); `start` shall require
 an idle shell; `resume` shall require an idle shell and an installed retained generation for an enabled root whose freshly constructed frame runtimes carry the complete participation capability of [[playbook-captain-46](#playbook-captain-46)]; `switch` shall require
 an active root and a target absent from the active path; `dismiss`,
-`deliver`, and `runtime` shall require an active leaf; and `runtime`
+`deliver`, `recover`, and `runtime` shall require an active leaf; `recover` shall require an advertised recovery offer and execute bounded preparation followed by the same leaf continuation [[recovery-7](recovery.md#recovery-7)] [[recovery-8](recovery.md#recovery-8)]; and `runtime`
 shall require the active leaf's current `describe()` to advertise
 the selected action id.
 An invalid selection shall settle `rejected` with a reason and no
@@ -1081,7 +1081,7 @@ survive, and an action whose outcome is already established shall never
 be re-executed.
 When a selected action's turn fails, its outcome-report facts shall say
 the action may have changed the session only when that same error
-escaped the effect invocation itself. A failure outside that invocation
+escaped the effect invocation itself, including the isolated recovery preparation call [[recovery-7](recovery.md#recovery-7)]. A failure outside that invocation
 shall make no such claim, and every completed sub-step shall remain an
 explicit established fact.
 When recovery also fails, the shell shall preserve that state for the
@@ -1099,7 +1099,7 @@ The module's default shell factory shall return `PlaybookCaptainShell`.
 
 | Part | Exact content |
 | --- | --- |
-| Common | `schemaVersion: 4`; required `effectLedger: PlaybookEffectLedger`; `captain: { sessionId: UUID, runtime: PlaybookRuntimeSnapshot, agent: { adapter, instruction?, permissions? }, conversation }`; `playerSessions: Readonly<Record<playerId, { adapter, instruction?, permissions?, resumeToken? }>>`; `issuedSessionIds: readonly UUID[]`; nonnegative-integer `sequences: { turn, journal }`; `journal: readonly JournalRecord[]`; optional `lastAction: 'respond' \| 'resume' \| 'start' \| 'switch' \| 'dismiss' \| 'deliver' \| 'runtime'`; optional `lastSettlementStatus: 'ok' \| 'rejected' \| 'failed'` |
+| Common | `schemaVersion: 4`; required `effectLedger: PlaybookEffectLedger`; `captain: { sessionId: UUID, runtime: PlaybookRuntimeSnapshot, agent: { adapter, instruction?, permissions? }, conversation }`; `playerSessions: Readonly<Record<playerId, { adapter, instruction?, permissions?, resumeToken? }>>`; `issuedSessionIds: readonly UUID[]`; nonnegative-integer `sequences: { turn, journal }`; `journal: readonly JournalRecord[]`; optional `lastAction: 'respond' \| 'resume' \| 'start' \| 'switch' \| 'dismiss' \| 'deliver' \| 'runtime' \| 'recover'`; optional `lastSettlementStatus: 'ok' \| 'rejected' \| 'failed'` |
 | Captain conversation | Exactly `{ kind: 'unopened' }`, `{ kind: 'pinned', token: nonempty string }`, `{ kind: 'needsCatchUp', resume: nonempty string \| false, afterJournalSeq: nonnegative integer }`, or `{ kind: 'needsSeeding' }` |
 | Journal record | `{ seq, turnId, kind, payload }`, where `kind` is `boss`, `reply`, `handoff`, `action`, or `outcome`, and `payload` is JSON-safe |
 | `mode: 'chat'` | No frame, pending-question, last-error, or separately derived control-ledger member |

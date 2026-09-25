@@ -40,7 +40,21 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
     // Frozen historical inputs remain unshipped reproduction artifacts.
     expect(sha(read('slc/materialize-link.mjs'))).toBe('5024778548509370d899f3709829fd7609d67bc4fe5d72b2c76d5d0ab26f59eb');
     expect(sha(read('scripts/experiments/materialize-link-v2.mjs'))).toBe('fe7336bc4c1511c4170ac3cdaeda4ffc30f3848b40ae7301f6660c20067e58e0');
-    expect(sha(full)).toBe('139aaa9b245ea6421ba998573bec3c5e21f605d24710fe56fc73e23017a8e4d2');
+    expect(sha(full)).toBe('313b6fbcd9ca42f124971b3012dbc930daf2a5be5be63da3796458afc783be18');
+    // Recovery is additive; strip its exact additions before auditing the
+    // frozen pre-recovery experiment contracts below.
+    const recoveryAdditions = [
+      "interface PlaybookRecoveryCheckpoint {\n  readonly stateId: string;\n  readonly prompt: string;\n  readonly machine: JsonValue;\n  readonly boundaryPrefix: number;\n}\n\n",
+      "  /** Interrupted invocation, captured before its external call (DR-066). */\n  recoveryCheckpoint?: PlaybookRecoveryCheckpoint;\n",
+      "interface PlaybookRecoveryOffer {\n  prompt: string;\n  description?: string;\n  continuation: { kind: 'reply' } | { kind: 'runtime'; actionId: string };\n}\n\n",
+      "  recovery?: PlaybookRecoveryOffer;\n",
+      "The shared runtime owns the optional recovery context and invocation checkpoint; linked artifacts need no recovery-specific source, event, or actor.\n"
+];
+    let beforeRecovery = full;
+    for (const addition of recoveryAdditions) {
+      expect(beforeRecovery.split(addition)).toHaveLength(2);
+      beforeRecovery = beforeRecovery.replace(addition, '');
+    }
     const preferenceGuide = [
       'For an FSM that satisfies one of the materializer profiles above, derive its',
       'complete source-owned descriptor and run `materialize-link.mjs` before writing',
@@ -54,7 +68,7 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
       '',
     ].join('\n');
     expect(full.split(preferenceGuide)).toHaveLength(2);
-    const beforePreferenceGuide = full.replace(preferenceGuide, '');
+    const beforePreferenceGuide = beforeRecovery.replace(preferenceGuide, '');
     expect(sha(beforePreferenceGuide)).toBe('dfbdaf1d8f5d44151da9a04ab52953e687f9ccfb203585becc017e71295fb263');
     const entryGuardGuide = "A generated entry guard that requires the text already in context is likewise\nnot independent Source evidence; it is a producer defect when the entry action\nhas yet to copy the event's text. Do not compensate with a required option or\ninvented startup task. `entryEvent.contextField` supplies failure-retry text;\nit does not populate fresh entry context before FSM guards execute.\n";
     expect(beforePreferenceGuide.split(entryGuardGuide)).toHaveLength(2);

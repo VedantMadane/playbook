@@ -625,7 +625,7 @@ describe('linked REVIEW runtime', () => {
     expect(host.statuses).not.toContain('→ committed');
     expect(runtime.unresolvedEffectEnvelopes?.()).toEqual([]);
     expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
-      'retry:START_REVIEW',
+      'retry:step',
     ]);
     await runtime.dispose();
   });

@@ -4407,7 +4407,7 @@ describe('DR-032 shared role runtime transition', () => {
     await runtime.dispose();
   });
 
-  it('advertises neither retry nor unresolved-effect control when adjudication is lost over an unchanged receipt after a receipted commit', async () => {
+  it('offers only the unchanged failed step after a receipted commit', async () => {
     const attemptId = '20000000-0000-4000-8000-000000000001';
     const hostCapabilities = emptyLedgerHostCapabilities({
       attemptId,
@@ -4455,14 +4455,11 @@ describe('DR-032 shared role runtime transition', () => {
         .snapshot()
         .boundaries.map(({ physicalReceipt }) => physicalReceipt?.classification),
     ).toEqual(['one-descendant-commit', 'unchanged']);
-    // The receipted commit fences the entry-event retry (PBRT-71), and the
-    // lost adjudication over the unchanged boundary is no effect-possible
-    // episode: the view advertises nothing rather than a reconcile that
-    // cannot act and an abandonment that has no evidence to record.
+    // The earlier commit fences entry replay, while the failed step is safe.
     expect(runtime.unresolvedEffectEnvelopes?.()).toEqual([]);
     const view = runtime.describe?.();
     expect(view?.stateDescription).toBe('The task failed.');
-    expect(view?.actions).toEqual([]);
+    expect(view?.actions).toEqual([{id:'retry:step',label:'Retry: Verify the task.',standing:'ready'}]);
     expect(runtime.exportSnapshot?.()?.failedEffectAttempt).toEqual({
       boundaryPrefix: 0,
       attemptId,
@@ -4672,11 +4669,16 @@ describe('DR-032 shared role runtime transition', () => {
         retrySchema3Spec(),
       )({ configuredOptions: {}, hostCapabilities });
     const boundSession = session(recordingPorts(callPlayer));
-    const runtime = createRuntime();
+    let runtime = createRuntime();
     await runtime.init(boundSession);
 
     const failed = await runtime.handleBossInput(bossTurn('the task'));
     expect(failed.state.stateId).toBe('failed');
+    const legacy = structuredClone(runtime.exportSnapshot!()!);
+    delete legacy.recoveryCheckpoint;
+    await runtime.dispose();
+    runtime = createRuntime();
+    await runtime.restore!(boundSession, legacy);
     expect(
       hostCapabilities.effectLedger
         .snapshot()

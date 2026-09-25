@@ -454,6 +454,13 @@ interface PlaybookEffectLedgerCapability {
   ): Promise<PlaybookEffectLedger>;
 }
 
+interface PlaybookRecoveryCheckpoint {
+  readonly stateId: string;
+  readonly prompt: string;
+  readonly machine: JsonValue;
+  readonly boundaryPrefix: number;
+}
+
 interface PlaybookRuntimeSnapshot {
   schemaVersion: 4;
   playbookId: string;
@@ -484,12 +491,8 @@ interface PlaybookRuntimeSnapshot {
     readonly boundaryPrefix: number;
     readonly attemptId: string | null;
   };
-  recoveryCheckpoint?: {
-    readonly stateId: string;
-    readonly prompt: string;
-    readonly machine: JsonValue;
-    readonly boundaryPrefix: number;
-  };
+  /** Interrupted invocation, captured before its external call (DR-066). */
+  recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
   suspendedCall?: PlaybookSuspendedCall;
 }
 
@@ -2088,6 +2091,12 @@ interface PlaybookControlAction {
   reason?: PlaybookControlActionReason;   // why it is not `ready`
 }
 
+interface PlaybookRecoveryOffer {
+  prompt: string;
+  description?: string;
+  continuation: { kind: 'reply' } | { kind: 'runtime'; actionId: string };
+}
+
 interface PlaybookControlView {
   state: PlaybookState;
   stateDescription?: string;  // runtime-published meaning of the current state
@@ -2095,6 +2104,7 @@ interface PlaybookControlView {
   pendingQuestions: readonly PlaybookPendingBossQuestion[];
   lastError?: NormalizedError;
   actions: readonly PlaybookControlAction[];
+  recovery?: PlaybookRecoveryOffer;
 }
 
 type PlaybookControlReceipt =
@@ -2121,6 +2131,7 @@ throw. The view carries the current normalized state descriptor, the state
 description defined below, the authored context projection defined below, the
 pending Boss questions with their stable ids, the last recorded error in
 normalized form, and the currently valid actions.
+The shared runtime owns the optional recovery context and invocation checkpoint; linked artifacts need no recovery-specific source, event, or actor.
 
 `stateDescription` is the runtime's own Boss-facing statement of what its
 current state means, taken from the same source state descriptions the action

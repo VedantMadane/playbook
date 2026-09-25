@@ -52,8 +52,8 @@ export const CONTROLLER_ACTION_GUARDS = Object.freeze([
 /** True when `result` declares exactly the closed controller action set. */
 export function isControllerDecisionResult(result) {
     const domain = Object.keys(result ?? {}).filter((guard) => guard !== NEEDS_BOSS_REPLY);
-    return (domain.length === CONTROLLER_ACTION_GUARDS.length &&
-        CONTROLLER_ACTION_GUARDS.every((guard) => domain.includes(guard)));
+    return [CONTROLLER_ACTION_GUARDS, [...CONTROLLER_ACTION_GUARDS, 'recover']].some(expected =>
+        domain.length === expected.length && expected.every(guard => domain.includes(guard)));
 }
 /** True when the machine declares a controller decision state. */
 export function isControllerMachine(config) {

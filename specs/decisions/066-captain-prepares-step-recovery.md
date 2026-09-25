@@ -21,9 +21,11 @@ The procedure author should not need to describe exception handling, and neither
 - An explicit Boss recovery request may select one `recover` action: prepare the current leaf, then use its validated continuation.
 - Preparation uses a fresh Captain call with the configured permissions, the exact Boss instruction, and runtime-owned interrupted-step context.
   It may inspect and repair prerequisites, but may not perform the specialist's remaining task, invent an outcome, select an arbitrary state, edit session storage, or rewrite/discard work without Boss authorization.
-- The shared runtime captures the current invocation before calling its actor and retains that checkpoint with a parked failure.
+- The shared runtime captures the current invocation before calling its actor and retains that checkpoint with a parked failure or Boss question.
   Retry reenters that invocation with its original context and input, preserving completed predecessor steps and parent/child ownership.
   Replay permission is established from that invocation's effect boundary, not from all work performed during the Boss turn.
+- A missing judgment after a receipted commit is recovered from the saved player text and receipt, without repeating the player.
+  The host appends only a validated missing semantic candidate and uses the established reconstructed-result delivery.
 - Preparation does not prove completion or override repository-effect evidence.
   After preparation, the host re-reads the runtime's controls; a pending question receives the original Boss input, and a failed invocation uses the runtime's recovery action.
   A failure or unsatisfied continuation stays parked with its explanation.

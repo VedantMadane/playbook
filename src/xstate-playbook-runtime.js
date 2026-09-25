@@ -3603,9 +3603,83 @@ export function createXStatePlaybookRuntime(machine, spec) {
             if (!recoveryCheckpoint || hasUnresolvedReconciliation())
                 return false;
             const current = currentEffectLedger();
-            return current.boundaries.slice(recoveryCheckpoint.boundaryPrefix).every((boundary) => runtimeBoundaryIsOwned(boundary) &&
+            return current.boundaries
+                .slice(recoveryCheckpoint.boundaryPrefix)
+                .every((boundary) => runtimeBoundaryIsOwned(boundary) &&
                 boundary.logicalOperationId === undefined &&
                 boundary.physicalReceipt?.classification === 'unchanged');
+        }
+        // A completed commit with saved presentation needs only the missing
+        // tool-free judgment. Never repeat the player to recover that evidence.
+        function recoverableJudgment() {
+            if (!recoveryCheckpoint ||
+                retainedEffectReconciliationRequired ||
+                deferredReconciliationOperationId !== undefined)
+                return undefined;
+            const suffix = currentEffectLedger().boundaries.slice(recoveryCheckpoint.boundaryPrefix);
+            if (suffix.length !== 1)
+                return undefined;
+            const saved = suffix[0];
+            if (!runtimeBoundaryIsOwned(saved) ||
+                saved.sourceStateId !== recoveryCheckpoint.stateId ||
+                saved.logicalOperationId !== undefined ||
+                saved.correctionBudget.spent ||
+                saved.physicalReceipt?.classification !== 'one-descendant-commit' ||
+                !saved.finalText?.trim() ||
+                governedOutcomesForBoundary(saved) === undefined ||
+                (saved.semanticCandidate !== undefined &&
+                    persistedBoundaryReconciliation(saved, currentEffectLedger())
+                        ?.reconciliation.status !== 'resolved') ||
+                [...unresolvedSemanticBoundaryIds].some((id) => id !== saved.boundaryId))
+                return undefined;
+            return saved;
+        }
+        async function recoverJudgment(saved, signal) {
+            const checkpoint = recoveryCheckpoint;
+            const persisted = checkpoint.machine;
+            const input = Object.values(persisted.children)[0];
+            const actorInput = input.snapshot.input;
+            const outcomes = governedOutcomesForBoundary(saved);
+            const candidate = saved.semanticCandidate ??
+                parseGovernedSemanticCandidate(await boundary.callJudge('player-output-adjudication', saved.sourceStateId, buildGovernedJudgePrompt(actorInput, saved.finalText, outcomes), signal));
+            const result = reconcilePlaybookSemanticEvidence({
+                outcomes,
+                semanticCandidate: candidate,
+                finalText: saved.finalText,
+                receipt: saved.physicalReceipt,
+            });
+            if (result.status !== 'resolved') {
+                throw new Error(`${label} saved result could not be reconciled; the playbook remains parked`);
+            }
+            signal.throwIfAborted();
+            const next = {
+                ...saved,
+                semanticCandidate: snapshotJsonValue(result.evidence.semanticCandidate),
+            };
+            const acknowledged = assertPlaybookEffectLedger(await effectLedgerCapability.writeAhead([
+                {
+                    kind: 'replace-boundaries',
+                    replacements: [{ expected: saved, next }],
+                },
+            ]));
+            if (!isDeepStrictEqual(acknowledged.boundaries.find((b) => b.boundaryId === saved.boundaryId), next)) {
+                throw new Error(`${label} recovered judgment was not acknowledged exactly`);
+            }
+            effectLedgerMirror = acknowledged;
+            refreshUnresolvedSemanticReconciliation(acknowledged);
+            // Reuse the established reconstruction bridge to deliver the recorded
+            // result to XState without a second physical boundary or player call.
+            reconstructedGovernedPrefixSequence = checkpoint.boundaryPrefix;
+            prepareReconstructedGovernedDelivery({
+                ...currentState(),
+                stateId: checkpoint.stateId,
+                activeStateIds: [checkpoint.stateId],
+            }, acknowledged);
+            stopActor();
+            actor = buildActor(runtimePorts, checkpoint.machine);
+            suppressInspectionEmissions = false;
+            actor.start();
+            await waitForPlaybookQuiescence(actor, { pendingCalls: nestedBridge });
         }
         function validateRecoveryCheckpoint(checkpoint) {
             if (!checkpoint)
@@ -3613,15 +3687,20 @@ export function createXStatePlaybookRuntime(machine, spec) {
             const node = machine.root.states[checkpoint.stateId];
             const persisted = checkpoint.machine;
             const children = persisted.children;
-            if (!node || node.invoke.length !== 1 ||
+            if (!node ||
+                node.invoke.length !== 1 ||
                 !['player', 'captain'].includes(String(node.invoke[0].src)) ||
-                !isPlainObject(children) || Object.keys(children).length !== 1) {
+                !isPlainObject(children) ||
+                Object.keys(children).length !== 1) {
                 throw new TypeError(`${label} recovery checkpoint does not name one current invocation`);
             }
             const child = children[node.invoke[0].id];
-            if (!child || child.src !== node.invoke[0].src ||
-                !isPlainObject(child.snapshot) || child.snapshot.status !== 'active' ||
-                !isPlainObject(child.snapshot.input) || child.snapshot.input.stateId !== checkpoint.stateId) {
+            if (!child ||
+                child.src !== node.invoke[0].src ||
+                !isPlainObject(child.snapshot) ||
+                child.snapshot.status !== 'active' ||
+                !isPlainObject(child.snapshot.input) ||
+                child.snapshot.input.stateId !== checkpoint.stateId) {
                 throw new TypeError(`${label} recovery checkpoint invocation is incompatible`);
             }
         }
@@ -3695,11 +3774,11 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 // State-entry telemetry/status must precede the call they describe.
                 await drainEmissions();
                 signal.throwIfAborted();
-                captureRecoveryCheckpoint(input.stateId, freshPrompt);
                 const deferredContinuation = activeDeferredContinuation;
                 const reconstructed = takeReconstructedGovernedPlayerResult(input, roleId);
                 if (reconstructed !== undefined)
                     return reconstructed;
+                captureRecoveryCheckpoint(input.stateId, freshPrompt);
                 if (deferredContinuation === undefined &&
                     hasUnresolvedReconciliation()) {
                     throw markFsmResultFailure(new Error(`${label} governed semantic reconciliation remains unresolved`));
@@ -5052,6 +5131,14 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 return [];
             }
             const derived = [];
+            const judgment = state.stateId === 'failed' ? recoverableJudgment() : undefined;
+            if (judgment !== undefined)
+                derived.push({
+                    action: { id: 'retry:adjudication', label: 'Retry assessment of the saved result', standing: 'ready' },
+                    retryJudgment: judgment,
+                });
+            if (judgment !== undefined && !hasUnresolvedReconciliation())
+                return derived;
             if (hasUnresolvedReconciliation()) {
                 const operation = deferredReconciliationOperationId === undefined
                     ? undefined
@@ -5849,7 +5936,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     ...(failedEffectAttempt === undefined
                         ? {}
                         : { failedEffectAttempt }),
-                    ...(state.stateId === 'failed' && recoveryCheckpoint !== undefined
+                    ...((state.stateId === 'failed' || pending !== undefined) && recoveryCheckpoint !== undefined
                         ? { recoveryCheckpoint } : {}),
                     ...(suspendedCall === undefined ? {} : { suspendedCall }),
                 };
@@ -5900,6 +5987,18 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 const stateDescription = !hasUnresolvedReconciliation()
                     ? stateDescriptionFor(state)
                     : undefined;
+                const actions = deriveControlActions(snapshot).map(({ action }) => action);
+                const retry = actions.find(({ id, standing }) => (id.startsWith('retry:') || id === UNRESOLVED_EFFECT_RECONCILIATION_ACTION_ID) &&
+                    (standing ?? 'ready') === 'ready');
+                const recovery = recoveryCheckpoint === undefined ||
+                    (pending === undefined && retry === undefined) ? undefined : {
+                    prompt: recoveryCheckpoint.prompt,
+                    ...(stateDescriptions.get(recoveryCheckpoint.stateId) === undefined ? {} :
+                        { description: stateDescriptions.get(recoveryCheckpoint.stateId) }),
+                    continuation: pending === undefined
+                        ? { kind: 'runtime', actionId: retry.id }
+                        : { kind: 'reply' },
+                };
                 return deepFreeze({
                     state,
                     ...(stateDescription === undefined ? {} : { stateDescription }),
@@ -5917,7 +6016,8 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             },
                         ],
                     ...(lastError !== undefined ? { lastError } : {}),
-                    actions: deriveControlActions(snapshot).map(({ action }) => action),
+                    actions,
+                    ...(recovery === undefined ? {} : { recovery }),
                 });
             },
             // DR-029 / PBRT-52: revalidate the named action against the live
@@ -6078,7 +6178,11 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             accepted = true;
                             try {
                                 let run;
-                                if (candidate.unresolvedEffectAction === 'abandon') {
+                                if (candidate.retryJudgment !== undefined) {
+                                    await recoverJudgment(candidate.retryJudgment, signal);
+                                    run = runResultFor(settledOutcome(signal));
+                                }
+                                else if (candidate.unresolvedEffectAction === 'abandon') {
                                     signal.throwIfAborted();
                                     run = runResultFor('unresolved-effect');
                                 }

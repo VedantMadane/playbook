@@ -12,7 +12,7 @@ The project-specific source is `reference/sdlc/captain.md`, compiled through `sl
 
 ### captain-playbook-1
 
-When a Boss turn reaches the default Captain for decision — every turn that deterministic command parsing does not resolve ([[playbook-captain-7](playbook-captain.md#playbook-captain-7)]) — the Captain shall decide it from the exact Boss text, the supplied runtime and catalog digests, and its remembered session conversation, selecting exactly one of `respond`, `resume`, `start`, `switch`, `dismiss`, `deliver`, or `runtime`; it shall chat as naturally as its underlying agent while operating the playbooks, and it shall not investigate the task, inspect the workspace, use tools, or perform the specialized work itself.
+When a Boss turn reaches the default Captain for decision — every turn that deterministic command parsing does not resolve ([[playbook-captain-7](playbook-captain.md#playbook-captain-7)]) — the Captain shall decide it from the exact Boss text, the supplied runtime and catalog digests, and its remembered session conversation, selecting exactly one of `respond`, `resume`, `start`, `switch`, `dismiss`, `deliver`, `runtime`, or `recover`; it shall chat as naturally as its underlying agent while operating the playbooks, and it shall not investigate the task, inspect the workspace, use tools, or perform the specialized work itself.
 A command turn the parse resolves shall reach the Captain with its
 decision already made: the parsed decision object enters the
 controller loop as that turn's decision with no decision call, and
@@ -41,7 +41,7 @@ re-asking for what it was already told.
 
 ### captain-playbook-4
 
-While a playbook engagement is active or parked, when the Boss submits ordinary input, the default Captain shall choose among `respond`, `deliver`, `dismiss`, `switch`, and `runtime` by its own judgment of the input's addressee and intent, with `respond` a valid selection for any turn ([DR-029](../decisions/029-session-scoped-conversational-captain.md)): task-directed content — an instruction, answer, or continuation for the working playbook — shall flow to the active leaf as `deliver`, the leaf receiving the original Boss input unchanged from the shell ([[playbook-captain-7](playbook-captain.md#playbook-captain-7)]); conversation, planning, and clarification addressed to the Captain — progress and status questions included — shall settle as `respond` grounded in the supplied runtime digest, with the engagement, its parked state, and any pending player question untouched; and only an explicit stop, replacement, or recovery/resume request shall select `dismiss`, `switch`, or a `runtime` action.
+While a playbook engagement is active or parked, when the Boss submits ordinary input, the default Captain shall choose among `respond`, `deliver`, `dismiss`, `switch`, `runtime`, and `recover` by its own judgment of the input's addressee and intent, with `respond` a valid selection for any turn ([DR-029](../decisions/029-session-scoped-conversational-captain.md)): task-directed content — an instruction, answer, or continuation for the working playbook — shall flow to the active leaf as `deliver`, the leaf receiving the original Boss input unchanged from the shell ([[playbook-captain-7](playbook-captain.md#playbook-captain-7)]); conversation, planning, and clarification addressed to the Captain — progress and status questions included — shall settle as `respond` grounded in the supplied runtime digest, with the engagement, its parked state, and any pending player question untouched; and only an explicit stop, replacement, or recovery/resume request shall select `dismiss`, `switch`, or a `runtime` action; an explicit prerequisite-repair request shall select `recover` only when advertised [[recovery-6](recovery.md#recovery-6)], with preparation performed separately by the host [[recovery-7](recovery.md#recovery-7)].
 
 ### captain-playbook-5
 
@@ -104,7 +104,7 @@ the controller port —
 `{ action: 'respond', text }`,
 `{ action: 'resume', playbookId }`,
 `{ action: 'start' | 'switch', playbookId, input }`,
-`{ action: 'dismiss' }`, `{ action: 'deliver' }`, or
+`{ action: 'dismiss' }`, `{ action: 'deliver' }`, `{ action: 'recover' }`, or
 `{ action: 'runtime', actionId }` — and shall treat the returned settlement
 `{ status, facts, unresolvedEffects, reason?, receipt?, leafStateSummary? }` as the only
 evidence of effects, where `unresolvedEffects` is the exact detached bounded list frozen by [[playbook-captain-58](playbook-captain.md#playbook-captain-58)]; counted activity remains shell-owned and is supplied

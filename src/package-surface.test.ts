@@ -1426,6 +1426,8 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookFailureErrorEvidence',
       'PlaybookFailureEvidence',
       'PlaybookFailurePaths',
+      'PlaybookRecoveryCheckpoint',
+      'PlaybookRecoveryOffer',
       'PlaybookPendingBossQuestion',
       'PlaybookPendingCall',
       'PlaybookPorts',

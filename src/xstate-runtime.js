@@ -1866,8 +1866,8 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
     let recoveryCheckpoint;
     if (own(snapshot, 'recoveryCheckpoint')) {
         const checkpoint = snapshot.recoveryCheckpoint;
-        if (state.stateId !== 'failed' || !isRecord(checkpoint)) {
-            throw new TypeError('runtime recoveryCheckpoint requires a failed state and an object');
+        if ((state.stateId !== 'failed' && pendingBossQuestions.length === 0) || !isRecord(checkpoint)) {
+            throw new TypeError('runtime recoveryCheckpoint requires an interrupted state and an object');
         }
         rejectUnknownKeys(checkpoint, ['stateId', 'prompt', 'machine', 'boundaryPrefix'], 'runtime recoveryCheckpoint');
         const stateId = requireNonEmptyString(checkpoint.stateId, 'recoveryCheckpoint.stateId');
