@@ -36,7 +36,7 @@ Where a later prompt reads the commit an earlier call itself created through a S
 
 ### compiler-results-13
 
-When Source qualifies an outcome's evidence — what affirmatively supports it, or what supports no outcome — text2gears shall carry that qualification in the outcome's result description, which the hidden adjudicator reads when it selects the guard [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], rather than in the item's prose, which reaches no judge.
+When Source qualifies an outcome's evidence — what affirmatively supports it, or what supports no outcome — text2gears shall carry that qualification in the outcome's result description, which the hidden adjudicator reads when it selects the guard [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], rather than in the item's prose, which reaches no judge; a behavior with one qualified outcome therefore carries exactly one `Results:` bullet naming it, with an output property only where a consumer requires one.
 
 ### compiler-results-7
 

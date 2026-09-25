@@ -196,8 +196,8 @@ whose relevant description names the produced output property, using the
 placeholder's exact identifier — this is what lets the FSM thread the value
 through typed context.
 A single-outcome producer then declares exactly one bullet naming the
-property; this consumed-output case is the sole one in which a
-single-outcome behavior carries a `Results:` label.
+property; this consumed-output case and the qualified-outcome case below are
+the two in which a single-outcome behavior carries a `Results:` label.
 The commit a call itself creates is the one exception to naming the property
 after the placeholder: its producer declares `latestCommit: <commit identity>`
 whatever placeholder a later prompt reads it through — `<code-commit>` or
@@ -232,12 +232,16 @@ Where Source restricts an initial Captain to routing, text2gears shall preserve
 only the authored question and delegation outcomes and shall not infer a
 direct-answer or terminal result merely because Captain is the acting agent.
 
-A single-outcome behavior whose output no later item consumes carries no
-`Results:` label; downstream,
+A single-outcome behavior whose output no later item consumes and whose
+outcome Source leaves unqualified carries no `Results:` label; downstream,
 [gears2fsm](gears2fsm.md#setup) gives its state the default single-outcome
 contract, so text2gears shall not invent a one-bullet `Results:` block for it.
 When a later item does consume its output, the produced-value rule above
-applies instead.
+applies instead; when Source qualifies the one outcome's evidence — what
+affirmatively supports it, what supports no outcome — the behavior carries
+exactly one `Results:` bullet naming that outcome and carrying the
+qualification, with an output property only where a consumer requires one,
+because the adjudicator reads the qualification nowhere else.
 
 When Source requires a terminal return to the caller, preserve every returned value or fact and its return condition as an explicit workflow output obligation in GEARS.
 Merely naming a value in a completion predicate or an acting result does not state that the workflow returns it.

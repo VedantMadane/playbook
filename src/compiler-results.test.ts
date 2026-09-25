@@ -266,4 +266,8 @@ it("carries an outcome's evidence qualification in the result description the ju
     "shall be carried in that outcome's result description, the only text the adjudicator reads when it selects the guard",
   );
   expect(definition).toContain("left in the item's prose, it reaches no judge");
+  // A single qualified outcome still gets its one bullet (DECIDE-1's `proposed`).
+  expect(definition).toContain(
+    "the behavior carries exactly one `Results:` bullet naming that outcome and carrying the qualification",
+  );
 });
