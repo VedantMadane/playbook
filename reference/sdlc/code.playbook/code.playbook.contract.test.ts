@@ -36,8 +36,9 @@ const SHARED_TYPES = [
 
 describe('CODE re-exports the shared runtime contract types (PBRT-36)', () => {
   it('imports every contract type from @sublang/playbook/runtime', () => {
+    // The linked module re-exports them straight from the shared contract.
     const importStatement = dts.match(
-      /import type \{([\s\S]*?)\} from '@sublang\/playbook\/runtime';/,
+      /(?:import|export) type \{([\s\S]*?)\} from '@sublang\/playbook\/runtime';/,
     )?.[0];
     expect(
       importStatement,
@@ -56,7 +57,9 @@ describe('CODE re-exports the shared runtime contract types (PBRT-36)', () => {
 
   it('re-exports every contract type via one export statement', () => {
     const reexports = [
-      ...dts.matchAll(/export type \{([\s\S]*?)\};/g),
+      ...dts.matchAll(
+        /export type \{([^}]*)\}(?: from '@sublang\/playbook\/runtime')?;/g,
+      ),
     ].map((match) => match[0]);
     expect(
       reexports.some((statement) =>

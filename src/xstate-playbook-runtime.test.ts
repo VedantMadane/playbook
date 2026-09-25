@@ -53,7 +53,7 @@ import { branchMachine } from '../reference/sdlc/branch.playbook/branch.fsm.js';
 import { _internal as branchArtifact } from '../reference/sdlc/branch.playbook/branch.playbook.js';
 import { captainMachine as maintainedCaptainMachine } from '../reference/sdlc/captain.playbook/captain.fsm.js';
 import { _internal as captainArtifact } from '../reference/sdlc/captain.playbook/captain.playbook.js';
-import { codingMachine } from '../reference/sdlc/code.playbook/code.fsm.js';
+import { codeMachine } from '../reference/sdlc/code.playbook/code.fsm.js';
 import createCodePlaybookRuntime, {
   _internal as codeArtifact,
 } from '../reference/sdlc/code.playbook/code.playbook.js';
@@ -120,7 +120,7 @@ const maintainedArtifactFinalMetadata = [
   {
     label: 'CODE',
     artifactPath: 'reference/sdlc/code.playbook/code.playbook.ts',
-    machine: codingMachine,
+    machine: codeMachine,
     unfinishedFinalStateIds: codeArtifact.UNFINISHED_FINAL_STATE_IDS,
   },
   {
@@ -8732,7 +8732,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     // grounding a controller host speaks a status answer from, in place of the
     // state id it used to be handed.
     expect(view.stateDescription).toBe(
-      'The coding workflow failed and is waiting for a new coding intent.',
+      'CODE parked after a control-plane failure and waits for Boss to restart or resume it.',
     );
     expect(view.lastError).toMatchObject({
       name: 'Error',
@@ -8741,17 +8741,20 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     expect(view.actions[0]).toEqual({
       id: 'retry:START_CODE',
       label:
-        'Retry: Coder is running the first coding phase: a direct ' +
-        'implementation, a new intent record, or an existing intent-record ' +
-        'task.',
+        'Retry: Coder runs the first coding phase: a direct ' +
+        'implementation, a new IR, or the next task of an existing IR.',
       standing: 'ready',
     });
+    // The root Boss interrupt into the first phase is live (the request is
+    // in context); the IR-task target is not, since no IR was identified.
     expect(view.actions.map(({ id }) => id)).toEqual([
       'retry:START_CODE',
+      'jump:firstPhase',
     ]);
-    // PBRT-52: CODE exposes only its declared phase. The initial player
-    // failed before selecting one, so the projection is empty rather than
-    // leaking caller or player-authored context.
+    // PBRT-52: CODE exposes only its declared phase outcome, IR, commit, and
+    // evaluated revision. The initial player failed before accepting any, so
+    // the projection is empty rather than leaking caller or player-authored
+    // context.
     expect(view.context).toBeUndefined();
 
     // A29-17 leg (c): a scripted player error mid-action settles `failed`
@@ -8792,7 +8795,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     const parkedView = runtime.describe!();
     expect(parkedView.pendingQuestions).toEqual([
       {
-        questionId: 'runFirstPhase',
+        questionId: 'firstPhase',
         asker: { kind: 'role', roleId: 'coder' },
         question: 'Which repo should I touch?',
         sourceItem: 'CODE-1',

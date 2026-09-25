@@ -657,7 +657,7 @@ describe('PR FSM transition coverage', () => {
     ]);
   });
 
-  // DR-048: CODE's `reportedReviewFailure` is a declared failure terminal, so
+  // DR-048: CODE's `reviewFailed` is a declared failure terminal, so
   // the bridge rejects this caller's actor with the child's own public
   // result. PR recognizes the failure from that record — never from CODE's
   // output fields — and still relays the child's output.
@@ -667,7 +667,7 @@ describe('PR FSM transition coverage', () => {
       [
         Object.assign(
           new Error(
-            'Child playbook code reached failure terminal reportedReviewFailure',
+            'Child playbook code reached failure terminal reviewFailed',
           ),
           {
             result: {
@@ -676,7 +676,7 @@ describe('PR FSM transition coverage', () => {
               childSessionId: 'child-code-1',
               output: INSUFFICIENT_CODE,
               terminal: {
-                stateId: 'reportedReviewFailure',
+                stateId: 'reviewFailed',
                 kind: 'failure',
                 description: 'CODE reports the review failure.',
               },

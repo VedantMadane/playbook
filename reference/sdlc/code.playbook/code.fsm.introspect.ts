@@ -2,14 +2,14 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import type {
-  CodingContext,
+  CodeContext,
   PlaybookInput,
   PlayerInput,
-  codingMachine,
+  codeMachine,
 } from './code.fsm.js';
 
 export type TransitionGuard = (args: {
-  context: CodingContext;
+  context: CodeContext;
   event: unknown;
 }) => boolean;
 
@@ -23,14 +23,14 @@ export interface InvokingTransition {
 export interface PlayerStateInfo {
   readonly stateId: string;
   readonly sourceItem: string;
-  readonly getInput: (context: CodingContext) => PlayerInput;
+  readonly getInput: (context: CodeContext) => PlayerInput;
   readonly transitions: readonly InvokingTransition[];
 }
 
 export interface NestedPlaybookStateInfo {
   readonly stateId: string;
   readonly sourceItem: string;
-  readonly getInput: (context: CodingContext) => PlaybookInput;
+  readonly getInput: (context: CodeContext) => PlaybookInput;
   readonly transitions: readonly InvokingTransition[];
 }
 
@@ -41,7 +41,7 @@ export interface AwaitBossReplyInfo {
 
 type RawInvoke = {
   src?: unknown;
-  input?: (args: { context: CodingContext }) => PlayerInput | PlaybookInput;
+  input?: (args: { context: CodeContext }) => PlayerInput | PlaybookInput;
   onDone?: unknown;
 };
 
@@ -60,7 +60,7 @@ type RawConfig = {
   states?: Readonly<Record<string, RawState>>;
 };
 
-function rawConfig(machine: typeof codingMachine): RawConfig {
+function rawConfig(machine: typeof codeMachine): RawConfig {
   return (machine as unknown as { config: RawConfig }).config;
 }
 
@@ -84,13 +84,13 @@ function transitions(value: unknown): readonly InvokingTransition[] {
 }
 
 export function enumeratePlayerStates(
-  machine: typeof codingMachine,
+  machine: typeof codeMachine,
 ): readonly PlayerStateInfo[] {
   const states = rawConfig(machine).states ?? {};
   return Object.entries(states).flatMap(([stateId, state]) => {
     const invoke = state.invoke;
     if (invoke?.src !== 'player' || invoke.input === undefined) return [];
-    const getInput = (context: CodingContext): PlayerInput =>
+    const getInput = (context: CodeContext): PlayerInput =>
       invoke.input?.({ context }) as PlayerInput;
     const input = getInput({ runResults: '' });
     return [
@@ -108,13 +108,13 @@ export function enumeratePlayerStates(
 export const enumerateCaptainStates = enumeratePlayerStates;
 
 export function enumerateNestedPlaybookStates(
-  machine: typeof codingMachine,
+  machine: typeof codeMachine,
 ): readonly NestedPlaybookStateInfo[] {
   const states = rawConfig(machine).states ?? {};
   return Object.entries(states).flatMap(([stateId, state]) => {
     const invoke = state.invoke;
     if (invoke?.src !== 'playbook' || invoke.input === undefined) return [];
-    const getInput = (context: CodingContext): PlaybookInput =>
+    const getInput = (context: CodeContext): PlaybookInput =>
       invoke.input?.({ context }) as PlaybookInput;
     const input = getInput({ runResults: '' });
     return [
@@ -129,7 +129,7 @@ export function enumerateNestedPlaybookStates(
 }
 
 export function enumerateAwaitBossReply(
-  machine: typeof codingMachine,
+  machine: typeof codeMachine,
 ): AwaitBossReplyInfo {
   const on = rawConfig(machine).states?.awaitBossReply?.on ?? {};
   return {
@@ -138,7 +138,7 @@ export function enumerateAwaitBossReply(
   };
 }
 
-export function enumerateRootEvents(machine: typeof codingMachine): {
+export function enumerateRootEvents(machine: typeof codeMachine): {
   readonly startCode: { readonly target: string };
 } {
   const on = rawConfig(machine).states?.ready?.on ?? {};

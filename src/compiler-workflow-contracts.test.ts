@@ -15,7 +15,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const types = {
   review: "ReviewPlaybookOutput",
   decide: "DecideOutput",
-  code: "CodePlaybookOutput",
+  code: "CodeOutput",
   branch: "BranchPlaybookOutput",
   pr: "PrPlaybookOutput",
 };
