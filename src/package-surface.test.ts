@@ -784,29 +784,19 @@ describe('artifact schema cutover (RELEASE-15)', () => {
         ['TypeScript', runtimeSource],
         ['JavaScript', runtimeJavaScript],
       ] as const) {
-        const currentSchemaContract =
-          id === 'decide'
-            ? /authority\.artifactSchema !== 3/
-            : schemaDeclaration;
         expect(
           contents,
           `${id} ${kind} runtime omits its artifact-schema-3 contract`,
-        ).toMatch(currentSchemaContract);
+        ).toMatch(schemaDeclaration);
         expect(
           contents,
           `${id} ${kind} runtime retains artifact schema 2`,
         ).not.toMatch(legacyDeclaration);
       }
       expect(runtimeDeclaration).not.toMatch(legacyDeclaration);
-      if (id !== 'decide') {
-        expect(runtimeDeclaration).toMatch(
-          /XStatePlaybookRuntimeFactory<[\s\S]*, 3>;/,
-        );
-      } else {
-        expect(runtimeDeclaration).toContain(
-          'PlaybookRuntimeFactory<DecidePlaybookRuntimeConstruction>',
-        );
-      }
+      expect(runtimeDeclaration).toMatch(
+        /XStatePlaybookRuntimeFactory<[\s\S]*, 3>;/,
+      );
 
       for (const extension of ['ts', 'js', 'd.ts'] as const) {
         const registry = readFileSync(
@@ -1341,7 +1331,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'reviewSummaryPolicy',
       'validateReviewOptions',
     ],
-    './decide/playbook': ['_internal', 'createPlaybookRuntime', 'default'],
+    './decide/playbook': ['_internal', 'default'],
     './decide/registry': [
       'decideCopyPasteGuardNames',
       'decidePlaybookRegistryEntry',
@@ -1774,13 +1764,12 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'CaptainCallOptions',
       'CaptainResult',
       'DecidePlaybookHostCapabilities',
-      'DecidePlaybookRuntimeConstruction',
+      'DecidePlaybookOptions',
       'JsonValue',
       'NormalizedError',
       'PlaybookCallRequest',
       'PlaybookCallResult',
       'PlaybookCallStart',
-      'PlaybookControlAction',
       'PlaybookControlReceipt',
       'PlaybookControlView',
       'PlaybookPendingCall',
@@ -1788,7 +1777,6 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
-      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1799,7 +1787,6 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerResult',
       'PlayerSessionStore',
       '_internal',
-      'createPlaybookRuntime',
       'default',
     ],
     './decide/registry': [
@@ -2453,10 +2440,7 @@ import type { CodePlaybookHostCapabilities } from '@sublang/playbook/code/playbo
 import { reviewPlaybookRegistryEntry } from '@sublang/playbook/review/registry';
 import type { ReviewPlaybookHostCapabilities } from '@sublang/playbook/review/playbook';
 import { decidePlaybookRegistryEntry } from '@sublang/playbook/decide/registry';
-import type {
-  DecidePlaybookHostCapabilities,
-  DecidePlaybookRuntimeConstruction,
-} from '@sublang/playbook/decide/playbook';
+import type { DecidePlaybookHostCapabilities } from '@sublang/playbook/decide/playbook';
 import { devPlaybookRegistryEntry } from '@sublang/playbook/dev/registry';
 import type { DevPlaybookHostCapabilities } from '@sublang/playbook/dev/playbook';
 import { branchPlaybookRegistryEntry } from '@sublang/playbook/branch/registry';
@@ -2571,14 +2555,7 @@ const decideSchema: 3 = decidePlaybookRegistryEntry.artifactSchema;
 const decideProfile: PlaybookCaptainRuntimeProfile = decidePlaybookRegistryEntry.runtimeProfile;
 const decideEntry: PlaybookCaptainRegistryEntryV3 = decidePlaybookRegistryEntry;
 const decideCapabilities: PlaybookHostConstructionCapabilities = decideHostCapabilities;
-const decideConstruction: DecidePlaybookRuntimeConstruction = {
-  configuredOptions: {},
-  hostCapabilities: decideHostCapabilities,
-};
-decidePlaybookRegistryEntry.createRuntime(
-  decideConstruction.configuredOptions,
-  decideConstruction.hostCapabilities,
-);
+decidePlaybookRegistryEntry.createRuntime({}, decideHostCapabilities);
 // @ts-expect-error DECIDE is schema 3 and requires current-host capabilities
 decidePlaybookRegistryEntry.createRuntime({});
 const devSchema: 3 = devPlaybookRegistryEntry.artifactSchema;
@@ -2617,7 +2594,6 @@ void decideSchema;
 void decideProfile;
 void decideEntry;
 void decideCapabilities;
-void decideConstruction;
 void devSchema;
 void devProfile;
 void devEntry;

@@ -8857,7 +8857,8 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     // gears2fsm compiles — DECIDE's independent-proposal pair constructs —
     // while a parallel state of any other shape is still rejected up front.
     // The compiled DECIDE machine passes the shape check: construction
-    // proceeds to the artifact's own linked metadata.
+    // proceeds to the artifact's own linked metadata, and the maintained
+    // thin module constructs its factory over it.
     expect(() =>
       createXStatePlaybookRuntime(decideMachine, {
         label: 'decide-control',
@@ -8866,6 +8867,10 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
         outcomeAuthority: ROLELESS_OUTCOME_AUTHORITY,
       }),
     ).toThrow('decide-control roleStates must be supplied for schema 3');
+    expect(createDecidePlaybookRuntime.compat).toEqual({
+      artifactSchema: 3,
+      runtimeAbi: RUNTIME_ABI,
+    });
     const malformedMachine = createMachine({
       id: 'malformed',
       initial: 'pair',

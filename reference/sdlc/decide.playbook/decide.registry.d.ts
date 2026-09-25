@@ -14,8 +14,11 @@ export interface DecidePlaybookRegistryEntry {
     intent: string;
     artifactSchema: 3;
     runtimeProfile: {
-        readonly kind: 'bespoke';
-        readonly artifactSchema: 3;
+        readonly kind: 'shared-factory';
+        readonly compat: {
+            readonly artifactSchema: 3;
+            readonly runtimeAbi: number;
+        };
     };
     requiredRoleIds: readonly ['coder', 'reviewer'];
     concurrentRoleSets: readonly [readonly ['coder', 'reviewer']];

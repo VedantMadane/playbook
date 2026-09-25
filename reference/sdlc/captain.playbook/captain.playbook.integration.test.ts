@@ -57,8 +57,8 @@ import createPlaybookRuntime, {
 } from './captain.playbook.js';
 import { captainMachine } from './captain.fsm.js';
 // The shipped registry entries the A-29 rows drive for real (IR-036 task 4):
-// the linked CODE artifact over the shared factory, and the bespoke DECIDE
-// runtime that ships without the control-surface pair.
+// the linked CODE and DECIDE artifacts over the shared factory, DECIDE
+// through its parallel profile (DR-067).
 import codeRegistryEntry from '../code.playbook/code.registry.js';
 import decideRegistryEntry from '../decide.playbook/decide.registry.js';
 import reviewRegistryEntry from '../review.playbook/review.registry.js';
@@ -2197,8 +2197,20 @@ function advertisedActionIds(prompt: string): string[] {
 const CLASSIFIER_MARKER = 'Classify the following Boss message';
 const ADJUDICATION_MARKER = 'Pick exactly one outcome by `guard`';
 const GOVERNED_ADJUDICATION_MARKER = 'Pick exactly one declared `guard`';
-const DECIDE_ADJUDICATION_MARKER =
-  'You are the guard adjudicator for a playbook state machine.';
+
+/**
+ * The DECIDE source item a governed adjudication prompt adjudicates, read
+ * from the acting role and the declared outcomes the engine's prompt names.
+ */
+function decideSourceItemOf(
+  prompt: string,
+): 'DECIDE-1' | 'DECIDE-2' | 'DECIDE-3' | undefined {
+  if (!prompt.includes(GOVERNED_ADJUDICATION_MARKER)) return undefined;
+  if (prompt.includes('\n- `committed` — ')) return 'DECIDE-3';
+  if (prompt.includes('\n- `proposed` — Reviewer ')) return 'DECIDE-2';
+  if (prompt.includes('\n- `proposed` — Coder ')) return 'DECIDE-1';
+  return undefined;
+}
 
 function makeShellHarness(
   entries: readonly RegisteredEntry[],
@@ -2470,8 +2482,7 @@ function realArtifactHarness(
       }
       if (
         prompt.includes(ADJUDICATION_MARKER) ||
-        prompt.includes(GOVERNED_ADJUDICATION_MARKER) ||
-        prompt.includes(DECIDE_ADJUDICATION_MARKER)
+        prompt.includes(GOVERNED_ADJUDICATION_MARKER)
       ) {
         return okReply(
           JSON.stringify(
@@ -3161,10 +3172,10 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
 
   it('treats the real non-adoptable DECIDE artifact as fresh behavior', async () => {
     const decideQuestions = (prompt: string): unknown => {
-      if (prompt.includes('source item DECIDE-1')) {
+      if (decideSourceItemOf(prompt) === 'DECIDE-1') {
         return { guard: 'needsBossReply' };
       }
-      if (prompt.includes('source item DECIDE-2')) {
+      if (decideSourceItemOf(prompt) === 'DECIDE-2') {
         return { guard: 'needsBossReply' };
       }
       throw new Error(`unexpected DECIDE adjudication prompt: ${prompt}`);
@@ -3196,10 +3207,13 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await source.turn('/decide compare the retained designs', 1);
 
     expect(sourceDecide.runtimes).toHaveLength(1);
+    // DR-067 §2: the shared factory omits `adopt` for a machine that
+    // declares a parallel state; its terminal classification alone grants no
+    // retained generation, so the root still clears.
     expect(sourceDecide.runtimes[0]?.adopt).toBeUndefined();
     expect(
       sourceDecide.runtimes[0]?.retainedGenerationMetadata,
-    ).toBeUndefined();
+    ).toEqual({ unfinishedFinalStateIds: ['reportedReviewFailure'] });
     expect(source.shell.exportSnapshot()).toMatchObject({
       mode: 'engaged.parked',
       pendingBossQuestions: expect.arrayContaining([
@@ -3245,8 +3259,8 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
 // ---------------------------------------------------------------------------
 // A-29 / A-28 rows over the real Playbook Captain shell (IR-036 task 4):
 // CAPTAIN-37…-40 and the amended CAPTAIN-21. Rows whose asserts read genuine
-// engine state run on the shipped registry entries — the linked CODE
-// artifact over the shared factory and the bespoke DECIDE runtime — with
+// engine state run on the shipped registry entries — the linked CODE and
+// DECIDE artifacts over the shared factory — with
 // per-call scripted players, the `acceptance-fixtures/incident-boss-turns.ts`
 // fixture, and a scripted model that reads its answer out of the prompt the
 // shell composed. FakeRuntime entries carry the rows that need injected
@@ -3711,19 +3725,20 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(JSON.stringify(runtime.describe!())).toBe(before);
   });
 
-  // A29-19: the real compiled DECIDE artifact exposes only unresolved-effect
-  // actions. Its ordinary failed view has no action, which bounds machine
-  // verbs against that leaf without bounding the conversation.
+  // A29-19: the real compiled DECIDE artifact advertises only what its leaf
+  // offers — on the ordinary failed view, the shared engine's retry of the
+  // recorded topic (DR-067) — which bounds machine verbs against that leaf
+  // without bounding the conversation.
   it('bounds machine verbs on an ordinary failed DECIDE leaf', async () => {
     const decide = realEntry(decideRegistryEntry);
     const harness = realArtifactHarness([decide], {
       players: () => ({ status: 'error', error: 'proposal agent stopped' }),
-      decide: (prompt, advertised) =>
-        advertised.length > 0
+      decide: (prompt, advertised, boss) =>
+        /retry/i.test(boss) && advertised.length > 0
           ? { action: 'runtime', actionId: advertised[0] }
           : {
               action: 'respond',
-              text: `No machine action is offered; ${
+              text: `No machine action was requested; ${
                 /\nLeaf state: (.*)\n/.exec(prompt)?.[1] ?? 'unknown'
               }`,
             },
@@ -3731,14 +3746,20 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     await harness.init();
     await harness.turn('/decide the retry policy', 1);
 
-    // The DR-022 gate sees the pair, while the ordinary failure state offers
-    // no unresolved-effect action.
+    // The DR-022 gate sees the pair, and the ordinary failure state offers
+    // exactly its retry.
     const runtime = decide.runtimes[0]!;
     expect(runtime.describe).toBeTypeOf('function');
     expect(runtime.apply).toBeTypeOf('function');
     expect(runtime.describe!()).toMatchObject({
       stateDescription: 'DECIDE failed and is waiting for a new topic.',
-      actions: [],
+      actions: [
+        {
+          id: 'retry:START_DECIDE',
+          label: 'Retry: Coder and Reviewer prepare independent proposals.',
+          standing: 'ready',
+        },
+      ],
     });
 
     const before = harness.playerCalls.length;
@@ -3746,11 +3767,11 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
 
     const digest = harness.decisionPrompts().at(-1) ?? '';
     expect(digest).toContain('DECIDE failed and is waiting for a new topic.');
-    expect(digest).toContain('Advertised actions: none.');
+    expect(advertisedActionIds(digest)).toEqual(['retry:START_DECIDE']);
     // The status question settled `respond` on the published control view:
     // no delivery, no FSM event, no apply.
     expect(harness.playerCalls.length).toBe(before);
-    expect(harness.surfaced.at(-1)).toContain('No machine action is offered');
+    expect(harness.surfaced.at(-1)).toContain('No machine action was requested');
     expect(
       harness.telemetry.filter(
         (event) =>
@@ -3764,8 +3785,8 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
 
   // CAPTAIN-37 / DR-037: DECIDE's terminal result remains the runtime-owned
   // channel that carries the exact meaning of the final state into the root
-  // completion fact; its unresolved-only control pair supplies no substitute
-  // outcome authority.
+  // completion fact; its control pair supplies no substitute outcome
+  // authority.
   it.each([
     {
       label: 'approval-backed completion',
@@ -3835,12 +3856,12 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
         'one-descendant-commit',
       ],
       adjudicate: (prompt) => {
-        if (prompt.includes('source item DECIDE-3')) {
+        if (decideSourceItemOf(prompt) === 'DECIDE-3') {
           return { guard: 'committed' };
         }
         if (
-          prompt.includes('source item DECIDE-1') ||
-          prompt.includes('source item DECIDE-2')
+          decideSourceItemOf(prompt) === 'DECIDE-1' ||
+          decideSourceItemOf(prompt) === 'DECIDE-2'
         ) {
           return { guard: 'proposed' };
         }
@@ -3862,8 +3883,8 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     );
     expect(commitPlayerPrompt).toBeDefined();
     expect(commitPlayerPrompt).not.toContain('Commit:');
-    const commitAdjudicationPrompt = harness.captainCalls.find(({ prompt }) =>
-      prompt.includes('source item DECIDE-3'),
+    const commitAdjudicationPrompt = harness.captainCalls.find(
+      ({ prompt }) => decideSourceItemOf(prompt) === 'DECIDE-3',
     )?.prompt;
     expect(commitAdjudicationPrompt).toContain(
       'The spec-design change is committed.',

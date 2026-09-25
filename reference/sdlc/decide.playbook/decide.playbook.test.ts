@@ -15,7 +15,6 @@ import type {
   PlaybookRepositoryReceipt,
 } from '../../../src/runtime.js';
 import createLinkedPlaybookRuntime, {
-  _internal,
   type PlayerCallOptions,
   type PlaybookCallRequest,
   type PlaybookCallResult,
@@ -150,7 +149,11 @@ function createTestEffectHost(options: TestEffectHostOptions = {}) {
   let observation = replayObservation(options.baseline);
   let boundarySequence = 0;
   let attemptSequence = 0;
+  let cohortSequence = 0;
   let commitSequence = 10;
+  // Like the real host, one host attempt spans every boundary a public turn
+  // starts — its proposal cohort and its merge alike.
+  const attemptIdsByTurn = new Map<string, string>();
   const exclusiveClassifications = [
     ...(options.exclusiveClassifications ?? []),
   ];
@@ -163,7 +166,12 @@ function createTestEffectHost(options: TestEffectHostOptions = {}) {
     const logicalOperations = [...ledger.logicalOperations];
     for (const command of commands) {
       if (command.kind === 'start-boundaries') {
-        const attemptId = `61000000-0000-4000-8000-${String(++attemptSequence).padStart(12, '0')}`;
+        const turnKey = `${command.boundaries[0].runtimeSessionId}:${command.boundaries[0].turnId}`;
+        let attemptId = attemptIdsByTurn.get(turnKey);
+        if (attemptId === undefined) {
+          attemptId = `61000000-0000-4000-8000-${String(++attemptSequence).padStart(12, '0')}`;
+          attemptIdsByTurn.set(turnKey, attemptId);
+        }
         for (const seed of command.boundaries) {
           boundaries.push({
             sequence: ++boundarySequence,
@@ -356,7 +364,7 @@ function createTestEffectHost(options: TestEffectHostOptions = {}) {
     },
     async runCohort(raw: any) {
       const baseline = observation;
-      const cohortId = `62000000-0000-4000-8000-${String(++attemptSequence).padStart(12, '0')}`;
+      const cohortId = `62000000-0000-4000-8000-${String(++cohortSequence).padStart(12, '0')}`;
       const roleIds = [...raw.roleIds] as Array<'coder' | 'reviewer'>;
       const seeds = roleIds.map((roleId) => ({
         ...raw.effectBoundaries[roleId],
@@ -470,6 +478,11 @@ function createDeferredRepositoryHarness(
   let restorationMatches = true;
   let failBindCompletion = false;
   let failContinuationCompletion = false;
+  // The engine's deferred continuation operation settles `null` and hands
+  // the player's result to the FSM only after the host acknowledges it
+  // (PBRT-69), so this fake observes the player's text at the port, as a
+  // real host observes the repository.
+  let lastPlayerFinalText: string | undefined;
   const calls: Array<{ mode: string; operationId?: string }> = [];
 
   const replaceOperation = (
@@ -814,7 +827,7 @@ function createDeferredRepositoryHarness(
         );
       const committed =
         operation.status === 'fulfilled' &&
-        String(operation.value.finalText ?? '') === 'Committed proposal';
+        lastPlayerFinalText === 'Committed proposal';
       const after = committed
         ? { ...baseline, head: 'b'.repeat(40) }
         : baseline;
@@ -955,6 +968,9 @@ function createDeferredRepositoryHarness(
     failNextContinuationCompletion() {
       failContinuationCompletion = true;
     },
+    recordPlayerFinalText(finalText: string) {
+      lastPlayerFinalText = finalText;
+    },
   };
 }
 
@@ -986,14 +1002,34 @@ function completePorts(overrides: Partial<PlaybookPorts>): PlaybookPorts {
   };
 }
 
+// The shared engine's governed judge prompt names the acting role and the
+// state's declared outcomes; read back the source item it adjudicates.
+function sourceItemOf(
+  prompt: string,
+): 'DECIDE-1' | 'DECIDE-2' | 'DECIDE-3' | undefined {
+  if (!prompt.startsWith('This is hidden control work.')) return undefined;
+  if (prompt.includes('\n- `committed` — ')) return 'DECIDE-3';
+  if (prompt.includes('The reviewer role just produced this output:')) {
+    return 'DECIDE-2';
+  }
+  if (prompt.includes('The coder role just produced this output:')) {
+    return 'DECIDE-1';
+  }
+  return undefined;
+}
+
+function isClassifierPrompt(prompt: string): boolean {
+  return prompt.startsWith('Classify the following Boss message');
+}
+
 function judgeReply(prompt: string): string {
-  if (prompt.includes('source item DECIDE-1')) {
+  if (sourceItemOf(prompt) === 'DECIDE-1') {
     return JSON.stringify({ guard: 'proposed' });
   }
-  if (prompt.includes('source item DECIDE-2')) {
+  if (sourceItemOf(prompt) === 'DECIDE-2') {
     return JSON.stringify({ guard: 'proposed' });
   }
-  if (prompt.includes('source item DECIDE-3')) {
+  if (sourceItemOf(prompt) === 'DECIDE-3') {
     return JSON.stringify({ guard: 'committed' });
   }
   throw new Error(`unexpected judge prompt: ${prompt}`);
@@ -1084,7 +1120,7 @@ async function startWithCommitOutput(
       };
     },
     callJudge: async (prompt) =>
-      prompt.includes('source item DECIDE-3')
+      sourceItemOf(prompt) === 'DECIDE-3'
         ? JSON.stringify({ guard: 'committed' })
         : judgeReply(prompt),
     callPlaybook: async (request, boundarySignal) => {
@@ -1295,13 +1331,13 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
     expect(JSON.stringify(snapshot)).not.toContain('Claude Opus 5');
     expect(statuses).toContain('START_DECIDE');
     expect(statuses).toContain(
-      '⤷ Coder: Coder independently proposes a spec design.',
+      '⤷ coder: Coder independently proposes a spec design.',
     );
     expect(statuses).toContain(
-      '⤷ Reviewer: Reviewer independently proposes a spec design.',
+      '⤷ reviewer: Reviewer independently proposes a spec design.',
     );
     expect(statuses).toContain(
-      '⤷ Coder: Coder synthesizes both proposals and commits the design.',
+      '⤷ coder: Coder synthesizes both proposals and commits the design.',
     );
     expect(statuses).not.toContain('REVIEW examines the committed proposal.');
 
@@ -1309,8 +1345,8 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
       .filter(({ topic }) => topic === 'playbook.fsm.state')
       .map(({ payload }) => payload as Record<string, unknown>);
     const initial = fsmPayloads[0];
-    expect(initial.from).toEqual(initial.to);
-    expect(initial.previousState).toEqual(initial.state);
+    expect(initial.from).toBeNull();
+    expect(initial.previousState).toBeNull();
     expect(fsmPayloads).toContainEqual(
       expect.objectContaining({
         event: {
@@ -1367,15 +1403,15 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
         };
       },
       callJudge: async (prompt) => {
-        if (prompt.includes('Boss-input classifier')) {
+        if (isClassifierPrompt(prompt)) {
           return JSON.stringify({
             type: 'BOSS_INTERRUPT',
             targetId: 'independentProposals',
           });
         }
         if (
-          prompt.includes('source item DECIDE-1') ||
-          prompt.includes('source item DECIDE-2')
+          sourceItemOf(prompt) === 'DECIDE-1' ||
+          sourceItemOf(prompt) === 'DECIDE-2'
         ) {
           const match = prompt.match(/Need (coder|reviewer) input/);
           return match
@@ -1463,7 +1499,7 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
     expect(collision?.payload).toMatchObject({
       playerId: 'dev.shared',
       error: {
-        message: expect.stringContaining('already has an in-flight call'),
+        message: 'simultaneous calls to player key dev.shared are not allowed',
       },
     });
 
@@ -1530,48 +1566,73 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
   });
 
   // PBRT-45: a question pends only while its authored reply-wait state is
-  // active — the map spans all three of DECIDE's reply paths, and the
-  // context's retained entries never leak past their waits.
-  it('counts a question as pending only in its own active authored wait', () => {
-    const question = (resumeStateId: string, roleId: string) => ({
-      questionId: resumeStateId,
-      resumeStateId,
-      sourceItem: 'DECIDE-1',
-      asker: { kind: 'role', roleId },
-      question: `${resumeStateId}?`,
+  // active — the exported snapshot and the control view agree, and a branch
+  // that was answered and completed drops out while its sibling still waits.
+  it('counts a question as pending only in its own active authored wait', async () => {
+    let coderCalls = 0;
+    const runtime = createPlaybookRuntime({});
+    await runtime.init(
+      session(
+        completePorts({
+          callPlayer: async (roleId) => {
+            if (roleId === 'coder') coderCalls += 1;
+            return {
+              status: 'ok',
+              resumeToken: `${roleId}-thread`,
+              finalText:
+                roleId === 'coder' && coderCalls > 1
+                  ? 'Coder proposal'
+                  : `Need ${roleId} clarification`,
+            };
+          },
+          callJudge: async (prompt) => {
+            if (isClassifierPrompt(prompt)) {
+              return JSON.stringify({
+                type: 'BOSS_REPLY',
+                questionId: 'askCoderProposal',
+              });
+            }
+            return JSON.stringify({
+              guard: prompt.includes('```\nCoder proposal\n```')
+                ? 'proposed'
+                : 'needsBossReply',
+            });
+          },
+        }),
+      ),
+    );
+    const pendingIds = () => ({
+      snapshot: runtime
+        .exportSnapshot?.()
+        ?.pendingBossQuestions.map(({ questionId }) => questionId),
+      view: runtime
+        .describe?.()
+        .pendingQuestions.map(({ questionId }) => questionId),
     });
-    const context = {
-      pendingBossQuestions: {
-        askCoderProposal: question('askCoderProposal', 'coder'),
-        askReviewerProposal: question('askReviewerProposal', 'reviewer'),
-        commitCoderProposal: question('commitCoderProposal', 'coder'),
-      },
-    };
-    const state = (...activeStateIds: string[]) =>
-      ({
-        value: 'proposals',
-        activeStateIds,
-        tags: [],
-        status: 'active',
-        quiescent: true,
-      }) as never;
-    const pendingIds = (...activeStateIds: string[]) =>
-      _internal
-        .pendingQuestionsForState(state(...activeStateIds), context)
-        .map(({ questionId }: { questionId: string }) => questionId);
 
-    expect(pendingIds('waitCoderProposalReply')).toEqual(['askCoderProposal']);
-    expect(pendingIds('waitReviewerProposalReply')).toEqual([
-      'askReviewerProposal',
+    await expect(
+      runtime.handleBossInput({ text: 'Compare designs.', signal: signal() }),
+    ).resolves.toMatchObject({ outcome: 'quiescent' });
+    expect(pendingIds()).toEqual({
+      snapshot: ['askCoderProposal', 'askReviewerProposal'],
+      view: ['askCoderProposal', 'askReviewerProposal'],
+    });
+
+    await expect(
+      runtime.handleBossInput({ text: 'Use approach A.', signal: signal() }),
+    ).resolves.toMatchObject({ outcome: 'quiescent' });
+    expect(runtime.exportSnapshot?.()?.state.activeStateIds).toEqual([
+      'coderProposalComplete',
+      'independentProposals',
+      'waitReviewerProposalReply',
     ]);
-    expect(pendingIds('awaitBossReply')).toEqual(['commitCoderProposal']);
-    expect(
-      pendingIds('waitCoderProposalReply', 'waitReviewerProposalReply'),
-    ).toEqual(['askCoderProposal', 'askReviewerProposal']);
-    // A resumed player state and the failure state pend nothing, however
-    // long the context retains the answered entries.
-    expect(pendingIds('askCoderProposal')).toEqual([]);
-    expect(pendingIds('failed')).toEqual([]);
+    expect(pendingIds()).toEqual({
+      snapshot: ['askReviewerProposal'],
+      view: ['askReviewerProposal'],
+    });
+    expect(coderCalls).toBe(2);
+
+    await runtime.dispose();
   });
 
   it('drops an answered branch question from telemetry while its sibling still waits', async () => {
@@ -1590,7 +1651,7 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
             };
           },
           callJudge: async (prompt) => {
-            if (prompt.includes('Classify the Boss message')) {
+            if (isClassifierPrompt(prompt)) {
               return JSON.stringify({
                 type: 'BOSS_REPLY',
                 questionId: 'askCoderProposal',
@@ -1660,9 +1721,9 @@ describe('DECIDE governed adjudicator prompt', () => {
     // a judge shown the authored "Output shall include `coderProposal:
     // <verbatim final text>`" clause verbatim returned the presentation-owned
     // field, the reconciler rejected it as a structural error, and the single
-    // correction was spent on a self-inflicted defect. DECIDE's bespoke
-    // runtime built its own prompt with the same flaw; it now renders every
-    // arm through the engine's exported renderer.
+    // correction was spent on a self-inflicted defect. DECIDE's former
+    // runtime built its own prompt with the same flaw; DECIDE now adjudicates
+    // through the shared engine, whose prompt renders every arm that way.
     const judgePrompts: string[] = [];
     const playerPrompts: string[] = [];
     const nestedRequests: PlaybookCallRequest[] = [];
@@ -1711,7 +1772,7 @@ describe('DECIDE governed adjudicator prompt', () => {
     expect(judgePrompts).toHaveLength(3);
     const promptFor = (sourceItem: string): string => {
       const prompt = judgePrompts.find((candidate) =>
-        candidate.includes(`source item ${sourceItem}.`),
+        sourceItemOf(candidate) === sourceItem,
       );
       if (prompt === undefined) {
         throw new Error(`no judge prompt for ${sourceItem}`);
@@ -1961,11 +2022,13 @@ describe('DECIDE accepted-outcome consumer', () => {
       ),
     ).toEqual([]);
     expect(statuses.some((status) => status.startsWith('→ '))).toBe(false);
+    // PBRT-77: both proposal boundaries hold a complete `unchanged` cohort
+    // receipt, which excludes any effect, so the unresolved semantics take
+    // the ordinary failure path with its retry — nothing parks.
     expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
-      'reconcile:unresolved-effect',
-      'abandon:unresolved-effect',
+      'retry:START_DECIDE',
     ]);
-    expect(runtime.unresolvedEffectEnvelopes?.()).toHaveLength(2);
+    expect(runtime.unresolvedEffectEnvelopes?.()).toEqual([]);
     await runtime.dispose();
   });
 
@@ -2251,22 +2314,24 @@ describe('DECIDE deferred effect continuation', () => {
           };
         }
         coderCalls += 1;
+        const finalText =
+          coderCalls === 1
+            ? 'Coder proposal'
+            : coderCalls === 2
+              ? 'Approve this checkpoint?'
+              : coderCalls === 3
+                ? 'Approve the second checkpoint?'
+                : 'Committed proposal';
+        harness.recordPlayerFinalText(finalText);
         return {
           status: 'ok',
           resumeToken: `coder-token-${coderCalls}`,
-          finalText:
-            coderCalls === 1
-              ? 'Coder proposal'
-              : coderCalls === 2
-                ? 'Approve this checkpoint?'
-                : coderCalls === 3
-                  ? 'Approve the second checkpoint?'
-                  : 'Committed proposal',
+          finalText,
         };
       },
       callJudge: async (prompt) => {
         judgeCalls += 1;
-        if (prompt.includes('Boss-input classifier')) {
+        if (isClassifierPrompt(prompt)) {
           if (prompt.includes('Not an answer')) {
             return JSON.stringify({ type: 'NO_ACTION' });
           }
@@ -2281,10 +2346,10 @@ describe('DECIDE deferred effect continuation', () => {
             questionId: 'commitCoderProposal',
           });
         }
-        if (prompt.includes('source item DECIDE-1')) {
+        if (sourceItemOf(prompt) === 'DECIDE-1') {
           return JSON.stringify({ guard: 'proposed' });
         }
-        if (prompt.includes('source item DECIDE-2')) {
+        if (sourceItemOf(prompt) === 'DECIDE-2') {
           return JSON.stringify({ guard: 'proposed' });
         }
         if (prompt.includes('Approve the second checkpoint?')) {
@@ -2340,10 +2405,11 @@ describe('DECIDE deferred effect continuation', () => {
     const firstLedger = fixture.harness.readEffectLedger();
     const operationId = firstLedger.logicalOperations[0]?.operationId;
     expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    // PBRT-69: the durable binding names the player, never its token.
     expect(firstLedger.logicalOperations[0]).toMatchObject({
       originalBaseline: REPLAY_BASELINE,
       pendingQuestion: { question: 'Approve this checkpoint?' },
-      playerContinuation: 'coder-token-2',
+      playerContinuation: { v: 1, playerId: 'coder' },
     });
     expect(fixture.statuses).toContain(
       'coder asks: Approve this checkpoint?',
@@ -2362,7 +2428,8 @@ describe('DECIDE deferred effect continuation', () => {
       ledgerBeforeInvalid,
     );
 
-    // The durable binding, not a later store read, selects the continuation.
+    // PBRT-69: the token-free binding names the player; the resume token
+    // is the one the player session store holds when the continuation runs.
     fixture.playerSessions.update('coder', 'foreign-token');
     await expect(
       fixture.runtime.handleBossInput({
@@ -2373,13 +2440,13 @@ describe('DECIDE deferred effect continuation', () => {
       outcome: 'quiescent',
       state: { stateId: 'awaitBossReply' },
     });
-    expect(fixture.playerCalls.at(-1)?.options.resume).toBe('coder-token-2');
+    expect(fixture.playerCalls.at(-1)?.options.resume).toBe('foreign-token');
     const repeated = fixture.harness.readEffectLedger();
     expect(repeated.logicalOperations[0]).toMatchObject({
       operationId,
       originalBaseline: REPLAY_BASELINE,
       pendingQuestion: { question: 'Approve the second checkpoint?' },
-      playerContinuation: 'coder-token-3',
+      playerContinuation: { v: 1, playerId: 'coder' },
     });
     expect(repeated.logicalOperations[0]?.boundaryIds).toHaveLength(2);
 
@@ -2461,6 +2528,9 @@ describe('DECIDE deferred effect continuation', () => {
   });
 
   it('publishes no advanced question state when a durable completion rejects', async () => {
+    // PBRT-73: a deferred settlement the host did not durably acknowledge
+    // is indeterminate, so the runtime closes every state surface until the
+    // host recovers its write-ahead record instead of rewinding.
     const bindFailure = stagedFixture();
     bindFailure.harness.failNextBindCompletion();
     await bindFailure.init();
@@ -2469,16 +2539,11 @@ describe('DECIDE deferred effect continuation', () => {
         text: 'Choose the durable design.',
         signal: signal(),
       }),
-    ).resolves.toMatchObject({
-      outcome: 'failed',
-      state: { stateId: 'failed' },
-    });
+    ).rejects.toThrow('injected deferred bind completion failure');
     expect(bindFailure.statuses).not.toContain(
       'coder asks: Approve this checkpoint?',
     );
-    expect(
-      bindFailure.runtime.exportSnapshot?.()?.pendingBossQuestions,
-    ).toEqual([]);
+    expect(bindFailure.runtime.exportSnapshot?.()).toBeUndefined();
     await bindFailure.runtime.dispose();
 
     const continuationFailure = stagedFixture();
@@ -2495,17 +2560,7 @@ describe('DECIDE deferred effect continuation', () => {
         signal: signal(),
       }),
     ).rejects.toThrow('injected deferred continuation completion failure');
-    expect(
-      continuationFailure.runtime.exportSnapshot?.()?.state,
-    ).toMatchObject({ stateId: 'awaitBossReply' });
-    expect(
-      continuationFailure.runtime.exportSnapshot?.()?.pendingBossQuestions,
-    ).toMatchObject([
-      {
-        questionId: 'commitCoderProposal',
-        question: 'Approve this checkpoint?',
-      },
-    ]);
+    expect(continuationFailure.runtime.exportSnapshot?.()).toBeUndefined();
     expect(
       continuationFailure.statuses.slice(statusesBeforeContinuation),
     ).not.toContain('coder asks: Approve the second checkpoint?');
@@ -2540,7 +2595,7 @@ describe('DECIDE deferred effect continuation', () => {
     ).toMatchObject({
       checkpointRestorationEligible: true,
       pendingQuestion: { question: 'Approve this checkpoint?' },
-      playerContinuation: 'coder-token-2',
+      playerContinuation: { v: 1, playerId: 'coder' },
     });
 
     const parkedSnapshot = fixture.runtime.exportSnapshot?.();
@@ -2610,6 +2665,7 @@ describe('DECIDE suspended REVIEW persistence', () => {
       stateId: 'reviewCommit',
       childSessionId: 'review-child',
       turnId: 1,
+      effectBoundaryPrefixSequence: 0,
     });
     expect(snapshot.state).toMatchObject({
       stateId: 'reviewCommit',
@@ -2753,7 +2809,7 @@ describe('DECIDE suspended REVIEW persistence', () => {
         ...snapshot,
         effectLedger: { ...snapshot.effectLedger, revision: 1 },
       }),
-      /must equal the current host mirror/,
+      /does not equal the current host mirror/,
     ],
   ] as const)(
     'rolls back a failed restore when the %s',
@@ -2898,7 +2954,7 @@ describe('DECIDE local-role continuation', () => {
                   finalText: 'Need reviewer clarification',
                 },
           callJudge: async (prompt) =>
-            prompt.includes('source item DECIDE-1')
+            sourceItemOf(prompt) === 'DECIDE-1'
               ? JSON.stringify({ guard: 'proposed' })
               : JSON.stringify({ guard: 'needsBossReply' }),
         }),
@@ -3959,7 +4015,7 @@ describe('DECIDE failure causes (DR-063)', () => {
   it('names a refused merge adjudication a judge failure, with its transport error', async () => {
     const { runtime, statuses, run, rejection } = await failedRun({
       callJudge: async (prompt) => {
-        if (prompt.includes('source item DECIDE-3')) {
+        if (sourceItemOf(prompt) === 'DECIDE-3') {
           throw new Error('judge is down');
         }
         return judgeReply(prompt);
@@ -3972,13 +4028,14 @@ describe('DECIDE failure causes (DR-063)', () => {
         error: { name: 'Error', message: 'judge is down' },
       },
     };
-    // A refused adjudication is a control-plane error: the turn rejects with
-    // it, and the parked leaf publishes the cause on every other surface.
-    expect(run).toBeUndefined();
-    expect(rejection).toMatchObject({ message: 'judge is down' });
-    expect(failureCauses(runtime, statuses, run)).toMatchObject({
+    // A refused governed adjudication settles the turn as failed rather than
+    // rejecting it, and every surface publishes the cause.
+    expect(rejection).toBeUndefined();
+    expect(run).toMatchObject({ outcome: 'failed', state: { stateId: 'failed' } });
+    expect(failureCauses(runtime, statuses, run)).toEqual({
       view: cause,
       status: cause,
+      result: cause,
       snapshot: cause,
     });
     await runtime.dispose();
@@ -4037,17 +4094,18 @@ describe('DECIDE failure causes (DR-063)', () => {
     },
   );
 
-  it('keeps a proposal adjudication failure across the no-op reconciliation that follows it', async () => {
+  it('keeps a proposal adjudication failure across the no-op turn that follows it', async () => {
     // A frozen error refuses the cause marker, so the cause lives only in the
     // runtime's own memory — which must outlast the turn that decided it.
     const judgeError = Object.freeze(new Error('judge is down'));
     const { runtime, statuses, run, rejection } = await failedRun({
       callJudge: async (prompt) => {
-        if (prompt.includes('source item DECIDE-1')) throw judgeError;
+        if (sourceItemOf(prompt) === 'DECIDE-1') throw judgeError;
         return judgeReply(prompt);
       },
     });
-    expect(rejection).toBe(judgeError);
+    expect(rejection).toBeUndefined();
+    expect(run).toMatchObject({ outcome: 'failed', state: { stateId: 'failed' } });
     const cause: Cause = {
       code: 'judge-failed',
       evidence: {
@@ -4060,16 +4118,15 @@ describe('DECIDE failure causes (DR-063)', () => {
       status: cause,
       snapshot: cause,
     });
+    // PBRT-77: the proposals' complete `unchanged` cohort receipt excludes
+    // any effect, so nothing parks — the failure offers its retry, and a
+    // later turn that leaves it in place keeps the cause bound to it.
+    expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
+      'retry:START_DECIDE',
+    ]);
     await expect(
-      runtime.apply?.({
-        actionId: 'reconcile:unresolved-effect',
-        key: 'retry-unresolved-effect',
-        signal: signal(),
-      }),
-    ).resolves.toMatchObject({
-      disposition: 'executed',
-      run: { outcome: 'no-action' },
-    });
+      runtime.handleBossInput({ text: '', signal: signal() }),
+    ).resolves.toMatchObject({ outcome: 'no-action' });
     expect(failureCauses(runtime, statuses, run)).toMatchObject({
       view: cause,
       snapshot: cause,
@@ -4080,7 +4137,10 @@ describe('DECIDE failure causes (DR-063)', () => {
   it('names a refused proposal adjudication when both proposals refuse', async () => {
     const { runtime, statuses, run } = await failedRun({
       callJudge: async (prompt) => {
-        if (/source item DECIDE-[12]\b/.test(prompt)) throw new Error('judge is down');
+        const item = sourceItemOf(prompt);
+        if (item === 'DECIDE-1' || item === 'DECIDE-2') {
+          throw new Error('judge is down');
+        }
         return judgeReply(prompt);
       },
     });
@@ -4151,14 +4211,22 @@ describe('DECIDE failure causes (DR-063)', () => {
         return { status: 'ok', finalText: `${roleId} proposal` };
       },
       callJudge: async (prompt) => {
-        const item = /source item (DECIDE-[12])\b/.exec(prompt)?.[1];
+        const sourceItem = sourceItemOf(prompt);
+        const item =
+          sourceItem === 'DECIDE-1' || sourceItem === 'DECIDE-2'
+            ? sourceItem
+            : undefined;
         if (item === undefined) return judgeReply(prompt);
         judged.push(item);
         throw new Error(`${item} judge is down`);
       },
     });
     expect(judged).toEqual(['DECIDE-1', 'DECIDE-2']);
-    expect(rejection).toMatchObject({ message: 'DECIDE-1 judge is down' });
+    expect(rejection).toBeUndefined();
+    expect(run).toMatchObject({
+      outcome: 'failed',
+      error: { message: 'DECIDE-1 judge is down' },
+    });
     const cause: Cause = {
       code: 'judge-failed',
       evidence: {
