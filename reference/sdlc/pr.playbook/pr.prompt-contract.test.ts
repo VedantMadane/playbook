@@ -61,9 +61,11 @@ describe('PR player prompt composition', () => {
     const input = state.getInput(ACTUAL_CONTEXT);
     expect(input.callerInput).toBe(ACTUAL_CONTEXT.callerInput);
     const prompt = composePlayerPrompt(input);
-    expect(prompt).toContain(
-      '> Original request: Deliver the reviewed branch for issue #12.\n> Branch: issue-12-fix-retry\n> Base revision: 0123abcd\n\nPublish the branch',
-    );
+    // The prefix pass moved the relay after the instructions (DR-065).
+    expect(prompt.endsWith(
+      'open nothing further and report the failure with its reason.\n\n> Original request: Deliver the reviewed branch for issue #12.\n> Branch: issue-12-fix-retry\n> Base revision: 0123abcd',
+    )).toBe(true);
+    expect(prompt.startsWith('Publish the branch')).toBe(true);
     expect(prompt).not.toContain('<caller-input>');
   });
 

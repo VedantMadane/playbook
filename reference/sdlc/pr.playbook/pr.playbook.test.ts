@@ -60,7 +60,7 @@ const FIX_CODING_REQUEST =
   "The pull request's checks are red on the checked-out branch. Inspect the failing checks with `gh pr checks` and `gh run view --log-failed`, fix their cause on this branch with a minimal change, and make the checks pass.";
 
 const MERGED_DESCRIPTION =
-  'The pull request is merged with a merge commit on the repository default branch, which is checked out and fast-forwarded to the merged head; the merge requested deletion of the remote and local branch.';
+  'The pull request is merged and the local default branch was fast-forwarded to the merged head.';
 
 type RepositoryEffect = 'publish' | 'unchanged' | 'commit' | 'worktree';
 
@@ -636,8 +636,10 @@ describe('linked PR runtime', () => {
     // it to the stable `dev.coder` player. The whole caller input is quoted.
     expect(host.playerCalls).toHaveLength(1);
     expect(host.playerCalls[0]).toMatchObject({ playerId: 'coder', resume: false });
+    // The prefix pass puts the instructions first and the relay last (DR-065).
+    expect(host.playerCalls[0]?.prompt.startsWith('Publish the branch')).toBe(true);
     expect(host.playerCalls[0]?.prompt).toContain(
-      `> Original request: ${CALLER_INPUT.replaceAll('\n', '\n> ')}\n\nPublish the branch`,
+      `with its reason.\n\n> Original request: ${CALLER_INPUT.replaceAll('\n', '\n> ')}`,
     );
     expect(host.playerCalls[0]?.prompt).toContain('never force-push.');
     // The judge is asked for the two semantic fields it owns and nothing else.
@@ -696,7 +698,7 @@ describe('linked PR runtime', () => {
     expect(await git(host.repo, 'branch', '--list', BRANCH)).toBe('');
     expect(await git(host.repo, 'ls-remote', '--heads', 'origin', BRANCH)).toBe('');
     const view = runtime.describe!();
-    expect(view.state.stateId).toBe('merged');
+    expect(view.state.stateId).toBe('mergedLocalUpdated');
     expect(view.stateDescription).toBe(MERGED_DESCRIPTION);
     await runtime.dispose();
   });
@@ -749,7 +751,7 @@ describe('linked PR runtime', () => {
     );
 
     expect(result.stateDescription).toBe(
-      'The pull request is merged with a merge commit on the repository default branch, which is checked out but could not be fast-forwarded to the merged head; the merge requested deletion of the remote and local branch.',
+      'The pull request is merged, but the local default branch was not fast-forwarded to the merged head.',
     );
     expect(result.output).toEqual({
       status: 'merged',
@@ -822,7 +824,7 @@ describe('linked PR runtime', () => {
     );
 
     expect(result.stateDescription).toBe(
-      'The branch was not published or its pull request could not be opened; Coder reported the reason and no pull request is guaranteed to exist.',
+      "The branch or its pull request was not published; the workflow failed with Coder's complete result and its reason.",
     );
     expect(result.output).toEqual({
       status: 'not-merged',
@@ -1020,7 +1022,7 @@ describe('linked PR runtime', () => {
     expect(scriptEvents(host)).toEqual([
       { stateId: 'waitForChecks', sourceItem: 'PR-2', exitStatus: 1 },
       { stateId: 'publishFix', sourceItem: 'PR-4', exitStatus: 0 },
-      { stateId: 'waitForChecksAfterFix', sourceItem: 'PR-5', exitStatus: 0 },
+      { stateId: 'waitForFixChecks', sourceItem: 'PR-5', exitStatus: 0 },
       { stateId: 'mergePullRequest', sourceItem: 'PR-6', exitStatus: 0 },
       { stateId: 'updateLocalDefault', sourceItem: 'PR-7', exitStatus: 0 },
     ]);
@@ -1125,7 +1127,7 @@ describe('linked PR runtime', () => {
     );
 
     expect(result.stateDescription).toBe(
-      "The pull request's checks were red and the single CODE fix attempt returned an authored abort, failure, or insufficient terminal result; the pull request remains open.",
+      'The one CODE fix attempt ended in an authored abort or failure, or a terminal result that did not prove its success; the workflow failed relaying that result and left the pull request open.',
     );
     expect(result.output).toEqual({
       status: 'not-merged',
@@ -1253,7 +1255,7 @@ describe('linked PR runtime', () => {
     );
 
     expect(result.stateDescription).toBe(
-      "The fix could not be published: the checked-out branch no longer carries the published pull request, the push was rejected, or the pull request's head did not advance to the pushed commit; the pull request remains open.",
+      'The fix was not published; the workflow failed and left the pull request open.',
     );
     expect(result.output).toEqual({
       status: 'not-merged',
@@ -1347,7 +1349,7 @@ describe('linked PR runtime', () => {
     );
 
     expect(result.stateDescription).toBe(
-      "The pull request's checks are still failing after the one fix attempt; the pull request remains open.",
+      'The checks are still failing after the one fix attempt; the workflow failed and left the pull request open.',
     );
     expect(result.output).toEqual({
       status: 'not-merged',
@@ -1359,7 +1361,7 @@ describe('linked PR runtime', () => {
     expect(scriptEvents(host)).toEqual([
       { stateId: 'waitForChecks', sourceItem: 'PR-2', exitStatus: 1 },
       { stateId: 'publishFix', sourceItem: 'PR-4', exitStatus: 0 },
-      { stateId: 'waitForChecksAfterFix', sourceItem: 'PR-5', exitStatus: 1 },
+      { stateId: 'waitForFixChecks', sourceItem: 'PR-5', exitStatus: 1 },
     ]);
     expect(await ghCommands(host)).not.toContainEqual(expect.stringMatching(/^pr merge /));
     expect(await git(host.repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(BRANCH);
@@ -1385,7 +1387,7 @@ describe('linked PR runtime', () => {
     );
 
     expect(result.stateDescription).toBe(
-      'The merge did not complete: the checked-out branch no longer carries the published pull request, the pull request does not target the repository default branch, GitHub refused the merge, or the merge may have landed while its confirmation, the local switch to the default branch, or the branch deletion failed; the pull request is in the state GitHub reports.',
+      'The merge was refused or could not be confirmed; the workflow failed with an unconfirmed merge, leaving the pull request in the state GitHub reports.',
     );
     // The merge command ran, so the result claims no merged state either way.
     expect(result.output).toEqual({

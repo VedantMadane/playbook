@@ -57,7 +57,7 @@ describe('PR FSM introspection', () => {
     ).toEqual([
       { stateId: 'waitForChecks', sourceItem: 'PR-2' },
       { stateId: 'publishFix', sourceItem: 'PR-4' },
-      { stateId: 'waitForChecksAfterFix', sourceItem: 'PR-5' },
+      { stateId: 'waitForFixChecks', sourceItem: 'PR-5' },
       { stateId: 'mergePullRequest', sourceItem: 'PR-6' },
       { stateId: 'updateLocalDefault', sourceItem: 'PR-7' },
     ]);

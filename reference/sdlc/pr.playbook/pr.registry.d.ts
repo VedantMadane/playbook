@@ -1,4 +1,5 @@
-import { type PrPlaybookHostCapabilities, type PlaybookRuntime } from './pr.playbook.js';
+import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
+import { type PlaybookHostCapabilities, type PlaybookRuntime } from './pr.playbook.js';
 export interface PlaybookSummaryPolicy {
     stateCountLabels: Readonly<Record<string, string>>;
     copyPasteGuardNames: readonly string[];
@@ -24,7 +25,7 @@ export interface PrPlaybookRegistryEntry {
     concurrentRoleSets: readonly [];
     summaryPolicy: PlaybookSummaryPolicy;
     validateOptions(optionSlice: unknown): PrOptions;
-    createRuntime(options: PrOptions, hostCapabilities: PrPlaybookHostCapabilities): PlaybookRuntime;
+    createRuntime(options: PrOptions, hostCapabilities: PlaybookHostConstructionCapabilities & PlaybookHostCapabilities): PlaybookRuntime;
 }
 export declare const prStateCountLabels: {
     readonly openPullRequest: "publication round";
