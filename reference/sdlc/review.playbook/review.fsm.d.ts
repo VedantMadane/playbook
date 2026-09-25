@@ -132,17 +132,7 @@ export declare const reviewMachine: import("xstate").StateMachine<ReviewContext,
     type: "rememberActorError";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberPendingQuestion";
-    params: {
-        readonly stateId: ReviewStateId;
-        readonly sourceItem: ReviewSourceItem;
-        readonly roleId: ReviewRoleId;
-    };
-} | {
     type: "rememberBossReply";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberEmptyBossReplyError";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "rememberMalformedPlayerOutput";
@@ -166,6 +156,16 @@ export declare const reviewMachine: import("xstate").StateMachine<ReviewContext,
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "rememberRejectedAll";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "rememberPendingQuestion";
+    params: {
+        readonly stateId: ReviewStateId;
+        readonly sourceItem: ReviewSourceItem;
+        readonly roleId: ReviewRoleId;
+    };
+} | {
+    type: "rememberEmptyBossReplyError";
     params: import("xstate").NonReducibleUnknown;
 }, {
     type: "needsBossReply";

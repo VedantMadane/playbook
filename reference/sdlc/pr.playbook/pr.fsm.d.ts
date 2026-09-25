@@ -189,16 +189,16 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
     type: "rememberBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberEmptyBossReplyError";
+    type: "rememberMalformedPlayerOutput";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberMalformedPlayerOutput";
+    type: "clearBossReplyContext";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "setPendingBossQuestion";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "clearBossReplyContext";
+    type: "rememberEmptyBossReplyError";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "startPr";
