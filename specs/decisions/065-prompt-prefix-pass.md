@@ -38,7 +38,7 @@ A second pass is the natural home for the reorder: the compiled artifact shows t
 
 ### 3. Fidelity checking reads the layout from each prompt
 
-- The Source-to-GEARS checker accepts every item either in Source order, as before, or in the prefix-first layout: instruction units in Source order, relay units in Source order, and every relay after the last instruction, with every unit the item carries intact and used once.
+- The Source-to-GEARS checker accepts every item either in Source order, which every authored fragment occurrence it carries must keep, or in the prefix-first layout: instruction units in Source order, relay units in Source order, and every relay after the last instruction, with every unit the item carries intact and used once.
   A script item, which the pass never rewrites, is held to Source order.
 - Conservation stays counted by fragment text across the package: each item supplies the fragments of one layout it is accepted in, so one occurrence never stands for two authored fragments.
 - slc keeps its own copy of the checker and also runs it over the installed maintained bundles, so that copy carries the same acceptance rule, rule for rule.

@@ -443,6 +443,40 @@ describe('fidelity checker reads the prefix-first layout from each prompt (compi
     ]);
   });
 
+  it('orders every occurrence, so a relay block repeated after a later fragment fails', () => {
+    // DECIDE-3's trailing block relays the topic and then the proposal, so a
+    // repeated block puts a topic after the proposal; CODE-4's first block
+    // repeated after its last stands after the IR-task relay.
+    const cases = [
+      {
+        id: 'decide',
+        item: 'DECIDE-3',
+        after: "> > Original topic: <caller-topic>\n> > Reviewer's independent proposal: <reviewer-proposal>\n",
+        block: "> > Original topic: <caller-topic>\n> > Reviewer's independent proposal: <reviewer-proposal>\n",
+      },
+      {
+        id: 'code',
+        item: 'CODE-4',
+        after: '> > Current IR task: <ir-task>\n',
+        block: [
+          '> > Original intent: <caller-input>',
+          '> > Review scope: the commit <code-commit> from this coding phase and its resulting repository state.',
+          '> > Coder output: <coder-output>',
+          '',
+        ].join('\n'),
+      },
+    ];
+    for (const { id, item, after, block } of cases) {
+      const { source, gears } = reference(id);
+      expect(gears.split(after), item).toHaveLength(2);
+      const doubled = gears.replace(after, `${after}>\n${block}`);
+      expect(prompts(doubled).get(item)!.length, item).toBe(prompts(gears).get(item)!.length + block.split('\n').length);
+      expect(checkSourceGearsContract(source, doubled), item).toEqual([
+        `${item}: authored prompt fragments are out of Source order`,
+      ]);
+    }
+  });
+
   it('holds a script item to Source order where a prompted item may take the prefix-first layout', () => {
     const source = [
       ...FLOW_HEAD,

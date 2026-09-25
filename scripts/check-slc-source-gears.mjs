@@ -201,6 +201,19 @@ function fragmentIndex(haystack, needle) {
   return -1;
 }
 
+/** Every start of an exact contiguous occurrence of `needle` in `haystack`. */
+function fragmentIndices(haystack, needle) {
+  const indices = [];
+  if (needle.length === 0 || needle.length > haystack.length) return indices;
+  outer: for (let index = 0; index <= haystack.length - needle.length; index++) {
+    for (let offset = 0; offset < needle.length; offset++) {
+      if (haystack[index + offset] !== needle[offset]) continue outer;
+    }
+    indices.push(index);
+  }
+  return indices;
+}
+
 /** Whether two line arrays are equal. */
 function sameLines(left, right) {
   return left.length === right.length && left.every((line, index) => line === right[index]);
@@ -330,28 +343,49 @@ function prefixFirstTilings(item, fragments, textIds) {
 }
 
 /**
- * The Source-order layout: the authored fragments the prompt carries
- * contiguously stand in Source order, a fragment inside a longer carried one
- * taking that one's position.
+ * The Source-order layout: every complete occurrence of an authored fragment
+ * the prompt carries admits an order-preserving Source attribution. An
+ * occurrence inside a longer carried one belongs to that one, identical
+ * fragments are alternative attributions of one occurrence, and only disjoint
+ * occurrences order each other. slc's copy reads it the same way.
  */
 function inSourceOrder(item, fragments) {
-  const matches = fragments
-    .map((fragment) => ({
-      fragment,
-      promptIndex: fragmentIndex(item.prompt, fragment.lines),
-    }))
-    .filter((entry) => entry.promptIndex >= 0)
-    // A repeated relay inside a complete authored fragment has that
-    // fragment's position, not the position of its earlier standalone use.
-    .filter((entry, _index, entries) => !entries.some((other) =>
-      other.fragment.lines.length > entry.fragment.lines.length &&
-      other.promptIndex <= entry.promptIndex &&
-      other.promptIndex + other.fragment.lines.length >=
-        entry.promptIndex + entry.fragment.lines.length,
-    ))
-    .sort((left, right) => left.promptIndex - right.promptIndex);
-  return matches.every((entry, index) =>
-    index === 0 || matches[index - 1].fragment.start <= entry.fragment.start);
+  const spans = new Map();
+  for (const fragment of fragments) {
+    for (const start of fragmentIndices(item.prompt, fragment.lines)) {
+      const end = start + fragment.lines.length;
+      const key = `${start}:${end}`;
+      const span = spans.get(key) ?? { start, end, sourceStarts: [] };
+      // Fragments arrive in Source order; identical matches are alternatives.
+      span.sourceStarts.push(fragment.start);
+      spans.set(key, span);
+    }
+  }
+  const ordered = [...spans.values()].sort(
+    (left, right) => left.start - right.start || right.end - left.end,
+  );
+  let furthestEnd = -1;
+  let sourceFloor = -1;
+  let completed = 0;
+  const attributed = [];
+  for (const span of ordered) {
+    // A shorter match inside another carried fragment is that fragment's
+    // content, not a second independently ordered occurrence.
+    if (span.end <= furthestEnd) continue;
+    furthestEnd = span.end;
+    // Only disjoint earlier occurrences raise the floor; a crossing overlap
+    // invents no order of the lines the two share.
+    while (completed < attributed.length && attributed[completed].end <= span.start) {
+      sourceFloor = Math.max(sourceFloor, attributed[completed].sourceStart);
+      completed++;
+    }
+    // The earliest compatible attribution leaves every later choice open, so
+    // none here means no order-preserving attribution exists.
+    const sourceStart = span.sourceStarts.find((start) => start >= sourceFloor);
+    if (sourceStart === undefined) return false;
+    attributed.push({ end: span.end, sourceStart });
+  }
+  return true;
 }
 
 /** Non-overlapping contiguous occurrences of `needle` in `haystack`. */
