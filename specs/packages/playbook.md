@@ -197,7 +197,7 @@ A caller's compiled FSM shall therefore route a maintained child's failure termi
 
 #### playbook-28
 
-Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall apply the automatic-replay fence of [[playbook-runtime-71](playbook-runtime.md#playbook-runtime-71)] at every governed delegated-player state regardless of whether linking emits the shared flat runtime or DECIDE's bespoke parallel runtime.
+Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall apply the automatic-replay fence of [[playbook-runtime-71](playbook-runtime.md#playbook-runtime-71)] at every governed delegated-player state, whether the shared factory interprets a flat machine or DECIDE's proposal pair through its parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)].
 
 #### playbook-32
 
@@ -257,14 +257,14 @@ Where DECIDE runs under artifact schema `3`, each delegated outcome shall declar
 | `commitCoderProposal` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewCommit` |
 | `commitCoderProposal` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
 
-The two proposal calls shall execute as one declared concurrent all-`unchanged` cohort under [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)], while `commitCoderProposal` shall begin only after both cohort receipts complete and shall execute through the exclusive host transaction of [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)].
+The two proposal calls shall execute as one declared concurrent all-`unchanged` cohort under [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)] and [[playbook-runtime-90](playbook-runtime.md#playbook-runtime-90)], while `commitCoderProposal` shall begin only after both cohort receipts complete and shall execute through the exclusive host transaction of [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)].
 Each proposal `proposed` or `needsBossReply` arm shall require an exact matching `unchanged` receipt under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)] before staging its presentation or publishing its question.
 Each proposal question's authored continuation shall run as a new separately governed `unchanged` boundary under [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)].
 The commit prompt shall continue to require one commit but shall prescribe no `Commit:` marker or other response formatting, while the reconciler shall treat `coderOutput` as opaque presentation and obtain `latestCommit` only from the matching receipt OID under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)].
 Missing, incomplete, mismatched, concurrent, foreign, or ambiguous evidence shall remain unresolved under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)] without revealing a proposal early, starting REVIEW, or replaying either player.
 Each accepted matrix arm shall execute one stable `playbook.acceptedOutcome` marker carrying its exact source, target, and accepted outcome under [[playbook-runtime-81](playbook-runtime.md#playbook-runtime-81)], and the deferred merge arm shall use the checkpoint-bound continuation of [[playbook-30](#playbook-30)].
-The bespoke runtime's hidden adjudicator shall render each arm's judge-facing reply contract from this matrix through the shared renderer of [[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)] under [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], so every arm asks the judge for `guard` alone and names its presentation and effect fields as runtime-supplied.
-The DECIDE source, GEARS, FSM, bespoke linked runtime, declarations, and registry shall move atomically to artifact schema `3` while preserving their agreement under [[playbook-1](#playbook-1)] and their declared parallel role set under [[playbook-captain-5](playbook-captain.md#playbook-captain-5)].
+The shared factory's hidden adjudicator shall render each arm's judge-facing reply contract from this matrix through the shared renderer of [[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)] under [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], so every arm asks the judge for `guard` alone and names its presentation and effect fields as runtime-supplied.
+The DECIDE source, GEARS, FSM, linked runtime — a thin module over the shared factory's parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)] per [DR-067](../decisions/067-parallel-proposals-through-the-shared-factory.md) — declarations, and registry shall move atomically to artifact schema `3` under runtime ABI `1` [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)] while preserving their agreement under [[playbook-1](#playbook-1)] and their declared parallel role set under [[playbook-captain-5](playbook-captain.md#playbook-captain-5)].
 
 #### playbook-39
 
@@ -314,15 +314,15 @@ Where execution leaves a delegated-role state without suspending for its Boss qu
 
 #### playbook-30
 
-Where a maintained workflow runs under artifact schema `3` and one governed delegated-role arm declares `needsBossReply` with repository disposition `deferred`, its compiled runtime shall apply the checkpoint-bound logical-operation continuation of [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)] identically whether the workflow uses the shared flat runtime or DECIDE's bespoke parallel runtime.
+Where a maintained workflow runs under artifact schema `3` and one governed delegated-role arm declares `needsBossReply` with repository disposition `deferred`, its compiled runtime shall apply the checkpoint-bound logical-operation continuation of [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)] identically whether the shared factory interprets a flat machine or DECIDE's machine through its parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)].
 
 #### playbook-54
 
-Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall end every effect-authorized player call prompt — the initial call and each deferred continuation — with the pre-existing-changes block of that call's own baseline [[playbook-runtime-94](playbook-runtime.md#playbook-runtime-94)] and shall add none to a call declared exclusively `unchanged`, whether linking emits the shared flat runtime or DECIDE's bespoke parallel runtime.
+Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall end every effect-authorized player call prompt — the initial call and each deferred continuation — with the pre-existing-changes block of that call's own baseline [[playbook-runtime-94](playbook-runtime.md#playbook-runtime-94)] and shall add none to a call declared exclusively `unchanged`, whether the shared factory interprets a flat machine or DECIDE's machine through its parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)].
 
 #### playbook-55
 
-Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall decide the failure cause of [[playbook-runtime-96](playbook-runtime.md#playbook-runtime-96)] where each failure is decided and publish it from the failed state's status data, telemetry, run result, control view, and exported snapshot alike, whether linking emits the shared flat runtime or DECIDE's bespoke parallel runtime.
+Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall decide the failure cause of [[playbook-runtime-96](playbook-runtime.md#playbook-runtime-96)] where each failure is decided and publish it from the failed state's status data, telemetry, run result, control view, and exported snapshot alike, whether the shared factory interprets a flat machine or DECIDE's machine through its parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)].
 A cancellation the runtime itself issues — a parallel proposal cancelled because its sibling failed — decides no cause of its own, and the cohort's failure carries the cause of the member that failed first.
 
 ## Verification
@@ -372,7 +372,7 @@ When the CODE, REVIEW, and DECIDE workflow suites run, they shall fail unless CO
 
 #### playbook-29
 
-When maintained-workflow conformance drives equivalent artifact-schema-3 governed boundaries through the shared flat runtimes and DECIDE's bespoke parallel runtime, it shall fail unless both apply the same host-acknowledged `unchanged`-only gates to empty-`ok` correction and ordinary failure-state retry, both retain evidence and start no automatic player call for a missing, incomplete, or non-`unchanged` receipt, and DECIDE's authored and generated runtime siblings stay behaviorally identical (verifying [[playbook-28](#playbook-28)]).
+When maintained-workflow conformance drives equivalent artifact-schema-3 governed boundaries through the shared factory's flat runtimes and its parallel DECIDE runtime, it shall fail unless both apply the same host-acknowledged `unchanged`-only gates to empty-`ok` correction and ordinary failure-state retry, both retain evidence and start no automatic player call for a missing, incomplete, or non-`unchanged` receipt, and DECIDE's authored and generated runtime siblings stay behaviorally identical (verifying [[playbook-28](#playbook-28)]).
 
 #### playbook-33
 
@@ -386,7 +386,7 @@ The suites shall further fail unless every accepted matrix row publishes its exa
 #### playbook-37
 
 When the DECIDE conformance suites drive its real artifact-schema-3 runtime, they shall fail unless the source, GEARS, and compiled prompts contain no `Commit:` response-format instruction; no presentation parser influences a transition; missing, glued, fenced, quoted, duplicated, or misleading `Commit:` prose leaves the accepted arm unchanged under equal semantic and effect evidence; both proposal calls overlap from one common baseline without revealing either proposal early; every proposal `proposed` and `needsBossReply` outcome and every separately governed proposal answer continuation accepts only a matching `unchanged` receipt; the merge waits for both proposal receipts and then runs exclusively; `committed` accepts only a matching `one-descendant-commit` receipt and obtains `latestCommit` from its exact OID; every mismatched or ambiguous proposal or merge receipt remains unresolved without an unauthorized player call; and merge `needsBossReply` uses one exact-checkpoint cumulative deferred operation (verifying [[playbook-12](#playbook-12)], [[playbook-22](#playbook-22)], [[playbook-30](#playbook-30)], and [[playbook-36](#playbook-36)]).
-The suites shall further fail unless each accepted matrix row publishes its exact confirmed marker and status, including the completion-order-specific proposal target, while an unaccepted fallback publishes neither, and the source, GEARS, FSM, bespoke linked runtime, declarations, and registry agree on schema `3` and the matrix of [[playbook-36](#playbook-36)] (verifying [[playbook-1](#playbook-1)]).
+The suites shall further fail unless each accepted matrix row publishes its exact confirmed marker and status, including the completion-order-specific proposal target, while an unaccepted fallback publishes neither, and the source, GEARS, FSM, linked runtime, declarations, and registry agree on schema `3`, runtime ABI `1`, and the matrix of [[playbook-36](#playbook-36)] (verifying [[playbook-1](#playbook-1)]).
 The suites shall further fail unless the proposal and merge adjudicator prompts carry no `Output shall include` clause, state each arm's exact reply JSON of `guard` alone, name `coderProposal`, `reviewerProposal`, `coderOutput`, and `question` as presentation-owned and `latestCommit` as effect-owned runtime-supplied fields to omit, and a guard-only reply resolves each arm with its correction budget unspent while the runtime supplies the omitted fields (verifying [[playbook-36](#playbook-36)]).
 
 #### playbook-40
@@ -417,7 +417,7 @@ When a workflow FSM leaves or abandons a Boss-reply path, its conformance suite 
 
 #### playbook-31
 
-When maintained-workflow conformance drives equivalent artifact-schema-3 deferred question chains through the shared flat runtimes and DECIDE's bespoke parallel runtime, it shall fail unless both withhold the question until its logical operation is durable, start one authored continuation only from a valid exact-checkpoint answer, preserve one original baseline and cumulative receipt across repeated questions, keep invalid answers waiting, park another exit or checkpoint mismatch without a player, and restore an eligible exact-checkpoint wait without a player or judge; authored and generated DECIDE runtime siblings shall remain behaviorally identical (verifying [[playbook-30](#playbook-30)]).
+When maintained-workflow conformance drives equivalent artifact-schema-3 deferred question chains through the shared factory's flat runtimes and its parallel DECIDE runtime, it shall fail unless both withhold the question until its logical operation is durable, start one authored continuation only from a valid exact-checkpoint answer, preserve one original baseline and cumulative receipt across repeated questions, keep invalid answers waiting, park another exit or checkpoint mismatch without a player, and restore an eligible exact-checkpoint wait without a player or judge; authored and generated DECIDE runtime siblings shall remain behaviorally identical (verifying [[playbook-30](#playbook-30)]).
 
 #### playbook-56
 

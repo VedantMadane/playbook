@@ -629,7 +629,10 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
     const adoption = sectionOf(linkSpec, 'Retained-snapshot adoption (optional)');
     expect(adoption).toContain('adopt(session, snapshot, context)');
     expect(adoption).toMatch(
-      /Every runtime the shared `createXStatePlaybookRuntime` factory\s+constructs implements `adopt`/,
+      /Every runtime the shared `createXStatePlaybookRuntime` factory\s+constructs for a flat machine implements `adopt`/,
+    );
+    expect(adoption).toMatch(
+      /constructs for a machine that declares a parallel state omits it/,
     );
     expect(adoption).toMatch(/fresh valid `PlaybookSession`\s+identity/);
     expect(adoption).toMatch(/before calling the\s+runtime capability/);

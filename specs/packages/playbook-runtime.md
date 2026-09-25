@@ -56,7 +56,7 @@ Every configured option slice shall be plain JSON and shall reject the reserved 
 
 Each linked workflow runtime shall import its FSM and the shared runtime contract types from `@sublang/playbook/runtime`, hold no host-specific type, and interact with its host only through `PlaybookPorts`.
 Each public workflow module shall default-export a `createPlaybookRuntime(options)` factory and shall re-export rather than redefine the shared runtime types.
-A flat single-region artifact shall use `createXStatePlaybookRuntime` from `@sublang/playbook/xstate-runtime`, while a parallel artifact may emit bespoke linked machinery that implements the same public contract per [DR-019](../decisions/019-shared-linked-runtime-factory.md).
+Every maintained artifact shall use `createXStatePlaybookRuntime` from `@sublang/playbook/xstate-runtime` — a flat single-region FSM directly and an FSM with compiled parallel groups through the parallel profile of [[playbook-runtime-87](#playbook-runtime-87)] — while an artifact outside this package may supply linked machinery of its own that implements the same public contract per [DR-019](../decisions/019-shared-linked-runtime-factory.md) and [DR-067](../decisions/067-parallel-proposals-through-the-shared-factory.md).
 The registry shall receive configured options and the artifact-bound current-host capability of [[playbook-runtime-50](#playbook-runtime-50)] separately under [[playbook-captain-5](playbook-captain.md#playbook-captain-5)] and shall compose them into the shared factory's exact disjoint construction object only when constructing a fresh, restored, or adopted runtime; this construction shall not widen `PlaybookPorts` or `handleBossInput`.
 
 #### playbook-runtime-34
@@ -81,7 +81,7 @@ runtime contract types `PlaybookFailureCode`, `PlaybookFailureCause`,
 the TypeScript projection of
 [slc/link.md](../../slc/link.md#playbookruntime-contract).
 The executable `@sublang/playbook/xstate-runtime` module shall export `assertPlaybookEffectLedger`, `emptyPlaybookEffectLedger`, and `isPlaybookEffectLedgerMonotonicExtension` over those shared contract types, plus `PlaybookSemanticFieldAuthority`, `PlaybookSemanticOutcomeSpec`, `PlaybookSemanticEvidenceInput`, `PlaybookReconciledSemanticOutput`, `PlaybookRetainedSemanticEvidence`, `PlaybookSemanticReconciliationReason`, `PlaybookSemanticReconciliation`, `PlaybookSemanticCandidateStructureError`, and `reconcilePlaybookSemanticEvidence` as the centralized semantic-reconciliation surface of [[playbook-runtime-77](#playbook-runtime-77)].
-That module shall also export `renderGovernedOutcomeContract`, the judge-facing governed reply-contract rendering of [[playbook-runtime-10](#playbook-runtime-10)], so a bespoke linked runtime under [[playbook-runtime-5](#playbook-runtime-5)] renders the identical contract rather than restating it.
+That module shall also export `renderGovernedOutcomeContract`, the judge-facing governed reply-contract rendering of [[playbook-runtime-10](#playbook-runtime-10)], so linked machinery an artifact supplies of its own under [[playbook-runtime-5](#playbook-runtime-5)] renders the identical contract rather than restating it.
 `PlaybookPendingBossQuestion` shall carry `questionId`, exact `question`, optional `sourceItem`, and an `asker` discriminated as `{ kind: 'captain' }` or `{ kind: 'role', roleId: string }`; it shall expose no overloaded player field.
 `PlayerResult.status` shall be the union `'ok' | 'aborted' | 'error'`,
 `PlayerResult` shall expose optional `resumeToken`, `PlayerCallOptions`
@@ -513,7 +513,7 @@ runtime method shall drain the queue before resolving or rejecting.
 
 #### playbook-runtime-81
 
-Where an artifact supplies schema `3`, the shared and bespoke linked runtimes shall recognize only a root-machine XState action whose type is exactly `playbook.acceptedOutcome` and whose exact plain-data params are `{ source, target, acceptedOutcome }`, require `source` and `acceptedOutcome` to name a declared governed outcome of [[playbook-runtime-50](#playbook-runtime-50)], and retain it privately until the corresponding next public root snapshot confirms `source` in the prior snapshot and `target` in the new snapshot under [DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §6.
+Where an artifact supplies schema `3`, every linked runtime shall recognize only a root-machine XState action whose type is exactly `playbook.acceptedOutcome` and whose exact plain-data params are `{ source, target, acceptedOutcome }`, require `source` and `acceptedOutcome` to name a declared governed outcome of [[playbook-runtime-50](#playbook-runtime-50)], and retain it privately until the corresponding next public root snapshot confirms `source` in the prior snapshot and `target` in the new snapshot under [DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §6.
 Each confirmed marker shall produce one trace-schema-4 `outcome.accepted` event carrying those exact three fields per [[playbook-runtime-37](#playbook-runtime-37)] and, where the canonical status profile applies, one exact `→ <acceptedOutcome>` status per [[playbook-runtime-3](#playbook-runtime-3)]; markers confirmed together shall retain their XState execution order, and all such emissions shall drain before the public boundary settles.
 A valid unmarked transition, including an unexecuted guarded arm or rejected-guard fallback, shall settle normally without accepted-outcome evidence or claimed-outcome status.
 An executed marker that is malformed, undeclared, or unconfirmed by those adjacent snapshots, or a batch that instruments one governed source more than once regardless of target or outcome, shall clear that entire pending marker batch and fail the current public boundary after retaining the ordinary transitioned state but before public settlement, accepted-outcome evidence, or claimed-outcome status; the runtime shall use only public XState inspection events and root snapshots rather than underscore-prefixed inspection fields.
@@ -632,6 +632,29 @@ through its one Captain-session FIFO.
 DECIDE's independent-proposal state shall invoke Coder and Reviewer in parallel, stage their results separately, and join only after both finish so neither prompt receives the other's proposal.
 When a Boss interrupt replaces the topic during that state, DECIDE shall restart the complete parallel pair with the new topic and shall retain neither prior branch result.
 Where one parallel branch needs a Boss reply, that branch shall park independently while its sibling continues, and a reply shall resume only the identified branch.
+
+#### playbook-runtime-87
+
+Where a linked machine declares a root `type: 'parallel'` state, the shared factory shall interpret it only in the parallel group shape of [gears2fsm](../../slc/gears2fsm.md#parallel-groups) — each region a compound state holding exactly one working leaf that invokes the typed `player` actor and carries `playbook.busy`, exactly one wait leaf tagged `playbook.parked` whose `BOSS_REPLY` arms resume that working leaf, and exactly one `type: 'final'` leaf, every leaf carrying a stable `meta.playbook.stateId` distinct from every other state's, the regions' working roles pairwise distinct, and the parent's `onDone` the join — deriving the regions, their leaves, and the cohort of working leaves from the machine itself with no further link declaration, and rejecting construction when the host's schema-3 authority supplies concurrent role sets none of which is those regions' roles in region order ([DR-067](../decisions/067-parallel-proposals-through-the-shared-factory.md) §1).
+
+#### playbook-runtime-88
+
+Where a machine declares a parallel state of [[playbook-runtime-87](#playbook-runtime-87)], the shared factory shall read pending Boss questions as the keyed `context.pendingBossQuestions` records of [gears2fsm](../../slc/gears2fsm.md#boss-reply-suspension), each pending only while a wait state whose `BOSS_REPLY` resumes its `resumeStateId` is active, and shall carry every such question in the plural `pendingBossQuestions` of its state telemetry, exported snapshot, and control view, offer each to the Boss-input classifier of [[playbook-runtime-7](#playbook-runtime-7)], and require the answered known `questionId` when more than one is pending, while a flat machine's singular pendingness and observable output stay unchanged.
+
+#### playbook-runtime-89
+
+Where a machine declares a parallel state of [[playbook-runtime-87](#playbook-runtime-87)], the shared factory shall schedule its default statuses for each newly entered Boss-relevant state — each player state's role line, each wait state's question lines, and the failure line — by comparing the new snapshot's active state ids with the previous snapshot's, so a sibling that is still running or still waiting is not announced again.
+
+#### playbook-runtime-90
+
+When the working leaves of one parallel state of [[playbook-runtime-87](#playbook-runtime-87)] are entered together, the shared factory shall run them, at most once per public boundary, as one declared all-`unchanged` cohort through the host's cohort transaction of [[playbook-runtime-73](#playbook-runtime-73)], adjudicating each member's result through the one reconciler of [[playbook-runtime-77](#playbook-runtime-77)] in serial, replacing every member's boundary in one acknowledged batch when one member spends its correction because [[playbook-runtime-69](#playbook-runtime-69)] admits no half-complete cohort, acknowledging members and releasing their results in completion order so each accepted-outcome marker of [[playbook-runtime-81](#playbook-runtime-81)] names the target the machine reached, cancelling every sibling of a member that fails, and failing the cohort with the cause of [[playbook-runtime-96](#playbook-runtime-96)] decided first, a cancellation the runtime itself issued deciding none:
+
+- An empty-`ok` corrective re-ask and a single region resuming after its Boss reply run through the exclusive transaction, as a flat call does.
+- A member failure is a rejected or colliding player call, a non-`ok` result, an unresolved governed settlement, or an unacknowledged completion.
+
+#### playbook-runtime-91
+
+Where a machine declares a parallel state of [[playbook-runtime-87](#playbook-runtime-87)], the shared factory shall classify abort evidence per player call, so a trace sink rejecting with a sibling's cancellation is forgiven for that call alone, shall queue concurrent actor settlements in order rather than hold one slot, and shall settle each public boundary only after every player, judge, and nested call it started has settled, a cancelled sibling whose port ignores its signal included.
 
 #### playbook-runtime-41
 
@@ -758,7 +781,7 @@ stack? }`, the exact effect-ledger mirror of [[playbook-runtime-69](#playbook-ru
 player-call/playbook-call sequence counters, the direct-Captain-call
 counter when the runtime supports direct Captain calls, the current normalized
 state descriptor, the governed failure-attempt member of [[playbook-runtime-71](#playbook-runtime-71)] when applicable, and the pending Boss questions as `{ questionId, asker, question, sourceItem? }` entries whose `asker` is exactly `{ kind: 'captain' }` or `{ kind: 'role', roleId }`.
-A question shall count as pending only while the machine awaits its reply in an authored reply-wait state, under one pendingness shared with the state telemetry a host ledger mirrors, so the ledger and this snapshot cannot disagree about the same fact: for a runtime the shared factory constructs that wait is the singular canonical `awaitBossReply` state, and a context question a later state retains — the recoverable failure a resumed player reached included — shall export as no pending question, while a bespoke runtime counts the questions awaiting replies in its own authored wait states, DECIDE's parallel branch waits included.
+A question shall count as pending only while the machine awaits its reply in an authored reply-wait state, under one pendingness shared with the state telemetry a host ledger mirrors, so the ledger and this snapshot cannot disagree about the same fact: for a flat machine the shared factory interprets that wait is the singular canonical `awaitBossReply` state, for a machine it interprets through the parallel profile each keyed question pends only while its own authored wait is active under [[playbook-runtime-88](#playbook-runtime-88)], DECIDE's parallel branch waits included, and a context question a later state retains — the recoverable failure a resumed player reached included — shall export as no pending question, while linked machinery of an artifact's own counts the questions awaiting replies in its own authored wait states.
 Where exactly one nested playbook call is suspended, that snapshot shall also carry its bridge-owned `callId`, `stateId`, `playbookId`, exact `text`, and `childSessionId`, enriched with the matching call-to-turn owner when present and the governed replay prefix of [[playbook-runtime-71](#playbook-runtime-71)] when applicable; export shall return `undefined` if the pending bridge identity, complete descriptor, or recorded call-to-turn ownership is absent or inconsistent.
 Where no nested playbook call is suspended, the schema-version-4 snapshot shall omit `suspendedCall`; at any other unsafe capture point `exportSnapshot` shall return `undefined`.
 A direct-Captain-capable runtime shall persist the `captainCall` member of `sequences` in every exported schema-version-4 snapshot.
@@ -789,7 +812,7 @@ The compiled default Captain runtime shall expose the shared factory's snapshot 
 #### playbook-runtime-61
 
 Where a linked runtime implements the optional adoption capability of `@sublang/playbook/runtime`, `adopt(session, snapshot, context)` shall be a third initialization path, distinct from `init` and same-engagement `restore`, that may bind a valid fresh `PlaybookSession` identity to the retained machine generation.
-Every runtime the shared `createXStatePlaybookRuntime` factory constructs shall expose `adopt`, regardless of whether that artifact supplies retained-generation classification metadata; a bespoke runtime may omit it, and member absence shall be the capability boundary.
+Every runtime the shared `createXStatePlaybookRuntime` factory constructs for a flat machine shall expose `adopt`, regardless of whether that artifact supplies retained-generation classification metadata; every runtime it constructs for a machine that declares a parallel state shall omit it, as linked machinery of an artifact's own may, and member absence shall be the capability boundary ([DR-067](../decisions/067-parallel-proposals-through-the-shared-factory.md) §2).
 Before actor construction or any player-session-store, port, trace, status, or telemetry effect, adoption shall validate and detach the target session, the exact `PlaybookAdoptionContext` of [[playbook-runtime-65](#playbook-runtime-65)], and the runtime-visible portion of the structural envelope: a supported schema-version-4 snapshot satisfying the retained-ledger fence of [[playbook-runtime-75](#playbook-runtime-75)], the target session's exact playbook id, the factory's already-validated artifact contract, and any supplied local-role binding set against the artifact's declared roles.
 The host remains responsible for the generation envelope it alone owns — working directory, complete catalog-entry structure, and every retained frame's artifact schema — before it calls the runtime capability ([DR-038](../decisions/038-universal-run-resumption.md) §3).
 After preflight, adoption shall reconstruct the actor from the persisted machine snapshot with inspection effects suppressed and shall rebuild a suspended nested call through the same prepared bridge transaction as live restore, except that [[playbook-runtime-65](#playbook-runtime-65)] supplies fresh target call and child identity instead of restoring source call-to-turn ownership: prepare and claim the rebased descriptor during actor startup, require an active normalized actor state equal to the retained state under that rebase, drain suppressed work, and confirm the bridge only as the final fallible step.
@@ -847,14 +870,13 @@ like the parked-session snapshot capability, changing no runtime ABI
 and no artifact or snapshot schema ([[playbook-runtime-50](#playbook-runtime-50)]); a runtime
 without the pair advertises no actions and plain text delivery is the
 only verb against it.
-Per [DR-019](../decisions/019-shared-linked-runtime-factory.md), the
-shared factory supports only flat single-region FSMs: it shall reject at
-construction any machine that declares no root states, any machine that
-declares a `type: 'parallel'` state, any
-machine whose non-root state declares child states, and any root state
+Per [DR-019](../decisions/019-shared-linked-runtime-factory.md) and [DR-067](../decisions/067-parallel-proposals-through-the-shared-factory.md), the
+shared factory supports flat single-region FSMs plus the root parallel states of [[playbook-runtime-87](#playbook-runtime-87)]: it shall reject at
+construction any machine that declares no root states, any `type: 'parallel'` state not of that compiled shape, any other compound state,
+and any root state
 whose `meta.playbook.stateId` is not a string equal to its state key —
 a missing identity included — so every
-snapshot exposes exactly one playbook state id under the one identity
+snapshot outside a parallel state exposes exactly one playbook state id under the one identity
 the factory's state lookups index by.
 The shared factory shall also reject at construction any supplied `unfinishedFinalStateIds` member containing an id that does not name a root `type: 'final'` state, without inferring which final outcomes leave the procedure unfinished ([slc/link.md](../../slc/link.md#output)).
 When that member is supplied, every runtime the shared factory constructs shall expose `retainedGenerationMetadata` ([[playbook-runtime-34](#playbook-runtime-34)]) as an immutable copy whose `unfinishedFinalStateIds` preserve the declaration exactly, including an explicitly empty set; when the member is omitted, the marker shall be absent, so the link declaration by itself grants no runtime capability.
@@ -1108,7 +1130,7 @@ When `handleBossInput` is invoked with an already-aborted signal, the suite shal
 When an apply has been accepted but a settlement sink rejects before receipt publication, the suite shall fail unless the exact apply abort reason and a distinct rejection alike fold into the current `failed` receipt, which is published, returned, and replayed without carrying either failure to a later boundary (verifying [[playbook-runtime-52](#playbook-runtime-52)]).
 When an `apply.finished` delivery rejection is causally identical to the apply signal's abort reason, the suite shall fail unless the published receipt stands and the next unrelated public boundary settles cleanly; a distinct delivery failure shall still surface from that next boundary's drain (verifying [[playbook-runtime-52](#playbook-runtime-52)]).
 When a machine's initial state entry action throws during `init`, the suite shall fail unless `init` rejects with that error, one best-effort `session.disposed` boundary follows the attempted `session.started`, and a subsequent `init` whose start does not throw succeeds (verifying [[playbook-runtime-37](#playbook-runtime-37)]).
-Where a linked runtime builds its own actor rather than using the shared factory — DECIDE today — when the abort-settlement verification runs, the suite shall drive that runtime's applicable exact-identity classification, ordinary settlement precedence, immutable invocation-and-resume provenance, pre-aborted entry refusal, active-boundary lifetime, and emission-ownership cases and shall fail unless each satisfies [[playbook-runtime-13](#playbook-runtime-13)], [[playbook-runtime-37](#playbook-runtime-37)], [[playbook-runtime-41](#playbook-runtime-41)], and [[playbook-runtime-42](#playbook-runtime-42)].
+Where a linked runtime builds its own actor rather than using the shared factory, when the abort-settlement verification runs, the suite shall drive that runtime's applicable exact-identity classification, ordinary settlement precedence, immutable invocation-and-resume provenance, pre-aborted entry refusal, active-boundary lifetime, and emission-ownership cases and shall fail unless each satisfies [[playbook-runtime-13](#playbook-runtime-13)], [[playbook-runtime-37](#playbook-runtime-37)], [[playbook-runtime-41](#playbook-runtime-41)], and [[playbook-runtime-42](#playbook-runtime-42)].
 
 #### playbook-runtime-19
 
@@ -1181,7 +1203,7 @@ The public-contract matrix shall fail unless the SLC, authored runtime source, c
 
 #### playbook-runtime-82
 
-When the accepted-outcome integration matrix drives the shared flat runtime and the real artifact-schema-3 bespoke parallel DECIDE runtime, it shall fail unless an executed declared marker produces exactly one `outcome.accepted` trace and one canonical accepted-outcome status only after adjacent public root snapshots confirm its source and target, every such emission drains before settlement, and multiple simultaneously confirmed parallel markers retain their exact source, target, outcome, and execution order (verifying [[playbook-runtime-81](#playbook-runtime-81)]).
+When the accepted-outcome integration matrix drives the shared factory's flat runtime and the real artifact-schema-3 DECIDE runtime over its parallel profile, it shall fail unless an executed declared marker produces exactly one `outcome.accepted` trace and one canonical accepted-outcome status only after adjacent public root snapshots confirm its source and target, every such emission drains before settlement, and multiple simultaneously confirmed parallel markers retain their exact source, target, outcome, and execution order (verifying [[playbook-runtime-81](#playbook-runtime-81)]).
 The matrix shall fail unless a stricter guard's valid unmarked fallback settles without accepted evidence, an initial-entry marker with no prior root snapshot, an unconfirmed source or target, malformed or undeclared marker data, a malformed-then-valid action batch, and duplicate instrumentation fail the boundary without evidence, no stale marker can attach to a later snapshot, and a rejected accepted-outcome trace sink emits no claimed status (verifying [[playbook-runtime-3](#playbook-runtime-3)] and [[playbook-runtime-81](#playbook-runtime-81)]).
 
 ### Host adapter
@@ -1229,7 +1251,7 @@ no further status for that disposal, so the parked state's line
 reaches the host exactly once for that engagement.
 The rule binds every linked runtime, not the shared factory alone, so
 the suite shall drive the same disposal against each runtime that
-builds its own actor — DECIDE today — and shall fail unless that
+builds its own actor and shall fail unless that
 disposal likewise appends only `session.disposed`. Because the
 omission is a per-runtime convention rather than a shared code path,
 the suite shall additionally discover, rather than enumerate, every
@@ -1437,7 +1459,7 @@ assignable to the shared types and would therefore pass while an artifact still 
 
 
 Where the integration suite drives CODE, REVIEW, DECIDE, and a direct-Captain runtime through complete sessions, it shall fail unless every emitted trace event has schema version `4`, session identity is immutable, causality is validated, trace sequences are contiguous and boundary-complete, initialization and disposal faults preserve their first causal error, and every started call has exactly one finish — a started-boundary sink that records and then rejects with a distinct error included: the pair finishes `error` with no host call begun and the public method rejects with the original sink error, while a sink that cancels the turn and rejects with the exact signal reason instead finishes the pair `aborted` with no host call and the turn settles as an abort (verifying [[playbook-runtime-37](#playbook-runtime-37)]).
-When a maintained shared-factory runtime or DECIDE reaches a final state, the integration suite shall fail unless its terminal result carries that state's exact authored description and never a state-id or output-derived fallback (verifying [[playbook-runtime-41](#playbook-runtime-41)]).
+When a maintained shared-factory runtime, DECIDE included, reaches a final state, the integration suite shall fail unless its terminal result carries that state's exact authored description and never a state-id or output-derived fallback (verifying [[playbook-runtime-41](#playbook-runtime-41)]).
 The suite shall fail unless every shell-hosted player-call pair retains both its semantic `roleId` and resolved `playerId`, while a standalone call retains its role without inventing a host player id; restoring under compatible changed model tuning shall also make the next composed prompt use the current `promptIdentity` rather than a value persisted in machine context (verifying [[playbook-runtime-15](#playbook-runtime-15)] and [[playbook-runtime-37](#playbook-runtime-37)]).
 The suite shall fail unless a standalone runtime without bindings starts each local role fresh, resumes and rotates that role's validated token in `roleResumeTokens`, clears an omitted token only on `ok`, preserves the prior token when `aborted` or `error` omits one, keeps different roles independent, preserves continuity across parked turns, and discards it on disposal; with bindings but no external store, two sequential roles mapped to one player id shall select and rotate one shared private token while the snapshot projects that token back to both local-role keys (verifying [[playbook-runtime-38](#playbook-runtime-38)] and [[playbook-runtime-45](#playbook-runtime-45)]).
 Host results shall fail unless they are validated, detached, and frozen before any final text, error, or resume token is consumed, and a late result after abort shall not mutate continuity or trace success (verifying [[playbook-runtime-37](#playbook-runtime-37)] and [[playbook-runtime-38](#playbook-runtime-38)]).
@@ -1481,6 +1503,18 @@ them.
 Disposal shall fail rather than race an active turn, concurrent idle disposal
 shall share one teardown, and a canceled branch whose host ignores abort shall
 finish draining before the turn settles without mutating its player token (verifying [[playbook-runtime-40](#playbook-runtime-40)], [[playbook-runtime-41](#playbook-runtime-41)]).
+
+#### playbook-runtime-100
+
+Where the integration suite drives the shared factory over a synthetic two-region machine of the compiled parallel shape under fake ports and a host double whose effect ledger runs the real validation on every write, it shall fail unless:
+
+- construction accepts that shape and omits `adopt`, and rejects a region without a wait leaf, a wait leaf resuming its sibling region, a reused state id, a missing join, a host repository without `runCohort`, and region roles outside the host's declared concurrent role sets (verifying [[playbook-runtime-61](#playbook-runtime-61)] and [[playbook-runtime-87](#playbook-runtime-87)]);
+- the entered working leaves reach exactly one `runCohort` with every member `unchanged`, both player calls overlap, adjudication never overlaps, the member that finished first completes its region first, each role line is announced once, and no role status trace names a state id while both run (verifying [[playbook-runtime-41](#playbook-runtime-41)], [[playbook-runtime-89](#playbook-runtime-89)], and [[playbook-runtime-90](#playbook-runtime-90)]);
+- one member's correction spend rewrites both members' boundaries in one acknowledged batch the ledger validation accepts (verifying [[playbook-runtime-90](#playbook-runtime-90)]);
+- a member's non-`ok` result cancels its sibling, whose finish records `aborted`, and the turn fails with that member's cause on the run result and control view (verifying [[playbook-runtime-90](#playbook-runtime-90)] and [[playbook-runtime-91](#playbook-runtime-91)]);
+- two branch questions pend together in state telemetry, the exported snapshot, and the control view, a classifier reply naming no question moves nothing, and a reply naming one resumes only its region through the exclusive transaction (verifying [[playbook-runtime-88](#playbook-runtime-88)] and [[playbook-runtime-90](#playbook-runtime-90)]);
+- a parked parallel state exports and restores with every pending question (verifying [[playbook-runtime-88](#playbook-runtime-88)]); and
+- a Boss interrupt restarts both regions as a new cohort (verifying [[playbook-runtime-90](#playbook-runtime-90)]).
 
 #### playbook-runtime-44
 
@@ -1549,7 +1583,7 @@ The suite shall also fail unless the compiled default Captain exposes both snaps
 
 #### playbook-runtime-62
 
-Where the integration suite exercises retained-snapshot adoption, it shall fail unless every shared-factory runtime exposes `adopt` even without retained-generation metadata, a fresh runtime adopts a parked schema-version-4 snapshot with the exact current effect-ledger mirror under a distinct valid engagement identity and continues from the persisted state without initial classification, that successful adoption closes all three initialization paths, and a bespoke capability-less runtime remains valid with the member absent (verifying [[playbook-runtime-61](#playbook-runtime-61)] and [[playbook-runtime-65](#playbook-runtime-65)]).
+Where the integration suite exercises retained-snapshot adoption, it shall fail unless every shared-factory runtime exposes `adopt` even without retained-generation metadata, a fresh runtime adopts a parked schema-version-4 snapshot with the exact current effect-ledger mirror under a distinct valid engagement identity and continues from the persisted state without initial classification, that successful adoption closes all three initialization paths, and a capability-less runtime — the shared factory's parallel DECIDE runtime included — remains valid with the member absent (verifying [[playbook-runtime-61](#playbook-runtime-61)] and [[playbook-runtime-65](#playbook-runtime-65)]).
 It shall fail unless adopting a suspended nested snapshot reconstructs the exact persisted invocation under fresh target call, child, and counter ownership without another host child call or `playbook.call.started` trace, then resumes the parent exactly once; unless schema, playbook-id, local-role binding, and adoption-context preflight mismatches reject before any player-session-store or host effect; unless successful adoption leaves retained role-token projections unapplied through both a supplied store whose `restore` rejects and the runtime-private fallback; unless, in that suspended case, persisted-state and bridge mismatches produce no child-host call or playbook-call boundary and clean up the attempted target session; and unless failed reconstruction rolls provisional bridge ownership back so the same unused runtime accepts an exact retry (verifying [[playbook-runtime-61](#playbook-runtime-61)], [[playbook-runtime-65](#playbook-runtime-65)], and [[playbook-runtime-42](#playbook-runtime-42)]).
 
 #### playbook-runtime-64
@@ -1600,8 +1634,8 @@ with scripted per-call results — the test suite shall fail unless every
 factory-built runtime exposes `describe` and `apply` together, and
 unless both members throw before `init`, during an active boundary,
 and after disposal.
-The suite shall also fail unless factory construction rejects the real
-DECIDE FSM because it declares parallel states, a synthetic non-parallel
+The suite shall also fail unless factory construction accepts the real
+DECIDE FSM and rejects a synthetic parallel state not of the compiled shape of [[playbook-runtime-87](#playbook-runtime-87)], a synthetic non-parallel
 machine that declares a compound state, a synthetic flat machine
 whose `meta.playbook.stateId` differs from its state key, a synthetic
 flat machine with a root state declaring no string
@@ -1724,7 +1758,7 @@ projected run result and no start-only field, `stateId` appearing on
 
 #### playbook-runtime-54
 
-Where the integration suite constructs a linked artifact against the real shared engine, when its shared-factory declaration is absent, malformed, schema `1`, schema `2`, or disagrees with the loaded engine, the suite shall fail unless runtime construction rejects before any machine interpretation or agent call with a diagnostic naming the offending declaration and supported value; the real artifact-schema-3 shared-factory and bespoke DECIDE profiles shall each preserve local roles without creating a host binding (verifying [[playbook-runtime-50](#playbook-runtime-50)]).
+Where the integration suite constructs a linked artifact against the real shared engine, when its shared-factory declaration is absent, malformed, schema `1`, schema `2`, or disagrees with the loaded engine, the suite shall fail unless runtime construction rejects before any machine interpretation or agent call with a diagnostic naming the offending declaration and supported value; the real artifact-schema-3 shared-factory profiles, DECIDE's included, shall each preserve local roles without creating a host binding (verifying [[playbook-runtime-50](#playbook-runtime-50)]).
 The suite shall also fail unless the engine exports the frozen supported set `[3]`; exposes each successfully constructed schema-3 shared factory's exact validated `{ artifactSchema, runtimeAbi }` pair as an immutable own `compat` data property whose frozen value remains identical after later mutation of the supplied spec; accepts valid governed and explicit roleless-empty schema-3 metadata; rejects missing, extra, accessor, unknown, wrongly owned, inconsistent, or FSM-mismatched state, outcome, payload-field, authority, and disposition declarations before a player call; requires an exact accessor-free schema-3 construction object with a live capability object; and proves configured option snapshotting, FSM context, runtime snapshots, launch projections, and continuation identity contain no capability member or nested authority value (verifying [[playbook-runtime-29](#playbook-runtime-29)] and [[playbook-runtime-50](#playbook-runtime-50)]).
 
 #### playbook-runtime-98

@@ -40,7 +40,7 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
     // Frozen historical inputs remain unshipped reproduction artifacts.
     expect(sha(read('slc/materialize-link.mjs'))).toBe('91b2ef6c88b1445205234f7aaf15cf9acdb19e3ebb43385a36c4df8ee79c986a');
     expect(sha(read('scripts/experiments/materialize-link-v2.mjs'))).toBe('fe7336bc4c1511c4170ac3cdaeda4ffc30f3848b40ae7301f6660c20067e58e0');
-    expect(sha(full)).toBe('6dbf796e05568719ba7cc57e722a0326b1d8743240109a846e855704e431db3e');
+    expect(sha(full)).toBe('5db634be00d4b66c7f7cf2534a010d4a6b2149e97ea0a405ee5d1220df4e2094');
     const preferenceGuide = [
       'For an FSM that satisfies one of the materializer profiles above, derive its',
       'complete source-owned descriptor and run `materialize-link.mjs` before writing',
@@ -55,11 +55,11 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
     ].join('\n');
     expect(full.split(preferenceGuide)).toHaveLength(2);
     const beforePreferenceGuide = full.replace(preferenceGuide, '');
-    expect(sha(beforePreferenceGuide)).toBe('2bcfaa79d9c1bedd8a51df3f9f009c1e6e17051bedf9b1b0f4f917c54b5a277e');
+    expect(sha(beforePreferenceGuide)).toBe('2bba31dec18627de01df423a84d48d3cf64eacf83b69a9d9dd48ff642943dd86');
     const entryGuardGuide = "A generated entry guard that requires the text already in context is likewise\nnot independent Source evidence; it is a producer defect when the entry action\nhas yet to copy the event's text. Do not compensate with a required option or\ninvented startup task. `entryEvent.contextField` supplies failure-retry text;\nit does not populate fresh entry context before FSM guards execute.\n";
     expect(beforePreferenceGuide.split(entryGuardGuide)).toHaveLength(2);
     const beforeEntryGuard = beforePreferenceGuide.replace(entryGuardGuide, '');
-    expect(sha(beforeEntryGuard)).toBe('4bda98c473ea06da5606ad081d9340c0dade1ed52ea6cbfe4c418bcfa83d029e');
+    expect(sha(beforeEntryGuard)).toBe('4392f72ae590e73ab9a74d7914069344f4d639909c85a7ac94966ffbfe5cb3bc');
     const currentValidatorGuide = [
       "The linked module shall export public synchronous pure `validateOptions(value: unknown): PlaybookRuntimeOptions` and bind that same function as the shared spec's `snapshotOptions`.",
       "The validator shall first capture `value === undefined ? {} : value` with the public `snapshotJsonValue` exported by `@sublang/playbook/xstate-runtime`, before reading option members, applying defaults, or constructing a replacement record; only top-level `undefined` is normalized, and non-JSON input rejects through that shared boundary.",
@@ -72,7 +72,7 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
     expect(beforePreferenceGuide.split(currentValidatorGuide)).toHaveLength(2);
     expect(beforePreferenceGuide.indexOf(currentValidatorGuide)).toBeGreaterThan(beforePreferenceGuide.indexOf('## PlaybookRuntime contract'));
     const historicalFull = beforeEntryGuard.replace(currentValidatorGuide, previousValidatorGuide);
-    expect(sha(historicalFull)).toBe('af3ae338c9dbb09b890d2af70ac79b7d00664fbf68eab9c669ecd498e9efe3fa');
+    expect(sha(historicalFull)).toBe('e817e4c7af6c50f232be51ad9ed39987cf95f15f0582d497f3e531d767e22a7c');
     const validatorGuide = previousValidatorGuide + [
       'Boss text supplied by the entry event is not a required startup option unless Source independently requires it before the first Boss turn; a generated required type annotation alone is not that evidence.',
       'A source-appropriate optional seed may remain, and genuine required bootstrap catalogs or other options shall not be erased or filled with invented defaults.',
@@ -86,7 +86,7 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
       "- Supplies the spec's `snapshotOptions` with the same options-validation",
       '  semantics previously generated inline:',
     ].join('\n'));
-    expect(sha(beforeValidator)).toBe('c41bbac9d9aa6d2134ee3ec88672ba8d9ef6c263a8649d1d0ec93688e3726a67');
+    expect(sha(beforeValidator)).toBe('d319d9da9f4a95d0288680eb805777dc502757167d887a0902c78b8cef196a3e');
     const currentRecipe = beforePreferenceGuide.slice(beforePreferenceGuide.indexOf('## Optional deterministic materialization\n'), beforePreferenceGuide.indexOf('## PlaybookRuntime contract\n'));
     const childAcceptance = "`onDone` proves successful bridge delivery without a declared child failure;\nit does not establish every caller-owned domain condition. The caller shall\nenforce its own explicit Source-authored acceptance or relay predicates on\nthe delivered output before continuing, without inventing predicates from\ncallee implementation details or overriding the child's compiled terminal\nkind with output fields.\n";
     const previousChildAcceptance = "Because the bridge routes a failure terminal to the error path, `onDone` alone\nproves the child succeeded and a caller never inspects a callee's output fields\nto decide that; a caller reads those fields only when its own Source relays\nthem.\n";
@@ -94,16 +94,16 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
     const archivedRecipe = read('scripts/experiments/materializer-v2-recipe.md')
       .replace(/^(?:<!-- SPDX-[^\n]+ -->\n)+\n/, '');
     const fullV2 = beforeValidator.replace(childAcceptance, previousChildAcceptance).replace(currentRecipe, archivedRecipe);
-    expect(sha(fullV2)).toBe('d6869060496b08c1116d9bbca1455d4d7819adf4743732fcffd715990b791184');
+    expect(sha(fullV2)).toBe('709ed9e385419290b8cb3d24a04cb4aba4d9ae4eb7e1e0e3aaf05835418f93b6');
     const previousGuide = 'Its factory preflight checks linked metadata; the Captain host owns registry\n'
       + 'manifest and live authority-envelope validation at its construction boundary.\n'
       + 'Do not audit the bare shared factory as if it owned that Captain-host boundary\n'
       + 'or synthesize host capabilities in the emitted artifact.\n';
     const previousFull = fullV2.replace(commonGuide, '').replace('Its factory preflight checks linked metadata.\n', previousGuide);
-    expect(sha(previousFull)).toBe('1460978372399c5fa1f5b1abebc06de6ebcbfd3c7a48583f258e5b9fa112a354');
+    expect(sha(previousFull)).toBe('0a9388dae71c1f8e388fc512318fe7f8817afd3c86ba692ef6717b930759b16f');
     const previousClause = 'whose optional live completion mapper may return only detached `finalText`, `semanticCandidate`, `logicalOperationId`, and additional typed ledger commands for the same atomic completion;';
     const currentClause = 'whose optional live completion mapper may return only detached `finalText`, `semanticCandidate`, `logicalOperationId`, additional typed ledger commands for the same atomic completion, one `deferred` binding carrying optional UUID `operationId` plus exact `pendingQuestion` and `playerContinuation`, or literal `unresolved: true`, where `deferred` shall be mutually exclusive with `unresolved`, `logicalOperationId`, and commands;';
-    expect(sha(previousFull.replace(currentClause, previousClause))).toBe('5467bf3c58e027b530061208e157e86d5137227e5c696fa6b72772a10ae4d7e1');
+    expect(sha(previousFull.replace(currentClause, previousClause))).toBe('3b7a1fdab2c15a89b0ecc2ebdee90a749fceb3ea984214f4854ef08564aa4813');
     const entryAnchors = anchorsOf(recipe);
     // The rejected archive covers its original contract, not later optional profiles.
     for (const anchor of anchorsOf(fullV2)) expect(entryAnchors.has(anchor), anchor).toBe(true);
