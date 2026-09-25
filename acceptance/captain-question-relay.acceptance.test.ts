@@ -12,6 +12,7 @@ import { createSessionStore } from '../reference/sdlc/code.playbook/session-stor
 import { openSessionHost } from '../reference/sdlc/code.playbook/session-host.js';
 import { loadLaunchPlan } from '../reference/sdlc/code.playbook/bin/launch-config.js';
 import { executionConfigFromPlan } from '../reference/sdlc/code.playbook/bin/run.js';
+import { runPlaybookCli } from '../reference/sdlc/code.playbook/bin/playbook.js';
 
 class LocalClaude extends ClaudeCodeAdapter {
   constructor() {
@@ -24,7 +25,7 @@ class LocalClaude extends ClaudeCodeAdapter {
     } });
   }
 }
-it('Boss clarifies, reopens, and answers using only Captain replies', async () => {
+it.each(['SDK', 'CLI'])('Boss clarifies, reopens, and answers using only Captain replies through %s', async (frontend) => {
   const root = await mkdtemp(join(tmpdir(), 'captain-question-live-'));
   const cwd = join(root, 'repo'); await mkdir(cwd);
   execFileSync('git', ['init', '-q'], { cwd });
@@ -55,7 +56,36 @@ playbooks:
   const options = { store, config, loadModule, adapterImports: {
     claude: async () => LocalClaude, codex: async () => CodexAdapter,
   } as never, observers: [{ onRecord: (record: any) => { records.push(record); } }] };
-  let controller = await openSessionHost({ ...options, mode: 'new', cwd });
+  let cliTurn = 0;
+  async function openTestHost(sessionId?: string) {
+    if (frontend === 'SDK') return openSessionHost({ ...options, cwd,
+      ...(sessionId ? { mode: 'continue' as const, sessionId } : { mode: 'new' as const }),
+    });
+    return {
+      get sessionId() { return sessionId!; },
+      async dispose() { /* Each CLI invocation releases its own lease. */ },
+      async handleBossTurn(input: string) {
+        const json = ++cliTurn % 2 === 0;
+        let stdout = '', stderr = '';
+        const result = await runPlaybookCli({
+          argv: ['run', ...(sessionId ? ['--session', sessionId] : []), ...(json ? ['--json'] : []), input],
+          cwd, userConfigPath: configPath, sessionStore: store, loadModule,
+          adapterImports: options.adapterImports,
+          stdout: { write(text: string) { stdout += text; return true; } },
+          stderr: { write(text: string) { stderr += text; return true; } },
+        });
+        expect(result.code, stderr).toBe(0);
+        sessionId = result.sessionId;
+        const stored = await store.readStream(sessionId!);
+        records.splice(0, records.length, ...stored.entries.map(entry => entry.record));
+        expect(stdout).toBe(`${json ? JSON.stringify({ sessionId, reply: result.reply }) : result.reply}\n`);
+        expect(result.reply).toBe(records.filter(record => record.type === 'captain_reply').at(-1)?.text);
+        expect(stderr).not.toContain('execution topology');
+        return result.record;
+      },
+    };
+  }
+  let controller = await openTestHost();
   const replies = () => records.filter(record => record.type === 'captain_reply').map(record => record.text);
   console.log(`Captain conversation evidence: ${root}`);
   try {
@@ -79,7 +109,7 @@ playbooks:
     console.log(`Captain clarification: ${replies().at(-1)}`);
     const id = controller.sessionId;
     await controller.dispose();
-    controller = await openSessionHost({ ...options, mode: 'continue', sessionId: id });
+    controller = await openTestHost(id);
     const followUp = await controller.handleBossTurn('Please ask the worker to confirm whether preview deletes all its data after seven days. Do not choose an option yet.');
     expect(followUp.effectLedger.boundaries).toHaveLength(2);
     expect(records.filter(record => record.type === 'player_prompt').at(-1)?.prompt).toContain('Please ask the worker to confirm whether preview deletes all its data after seven days. Do not choose an option yet.');

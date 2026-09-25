@@ -21,6 +21,7 @@ import { openSessionHost } from './session-host.js';
 import { createRepositoryEffectCoordinator } from './bin/repository-effects.js';
 import { loadLaunchPlan } from './bin/launch-config.js';
 import { executionConfigFromPlan } from './bin/run.js';
+import { runPlaybookCli } from './bin/playbook.js';
 
 const execFileAsync = promisify(execFile);
 class RecoveryAdapter implements AgentAdapter {
@@ -286,6 +287,8 @@ describe('Captain preparation through a durable session', () => {
     { startWithQuestion: false, preparation: 'ready', automatic: true, nested: true },
     { startWithQuestion: false, preparation: 'ready', automatic: true, nested: true, throws: true },
     { startWithQuestion: false, preparation: 'ready', interrupted: true, nested: true },
+    { startWithQuestion: false, preparation: 'ready', interrupted: true, nested: true, cliRetry: true },
+    { startWithQuestion: false, preparation: 'ready', interrupted: true, nested: true, cliStart: true },
     { startWithQuestion: false, preparation: 'ready' },
     { startWithQuestion: true, preparation: 'ready' },
     { startWithQuestion: false, preparation: 'ready', nested: true },
@@ -302,7 +305,7 @@ describe('Captain preparation through a durable session', () => {
     ].map((preparation) => ({ startWithQuestion: false, preparation })),
   ])
     it(
-      `restored ${'nested' in scenario ? 'nested ' : ''}${scenario.startWithQuestion ? 'question' : 'failed step'} with ${scenario.preparation} preparation`,
+      `restored ${'nested' in scenario ? 'nested ' : ''}${scenario.startWithQuestion ? 'question' : 'failed step'} with ${scenario.preparation} preparation${'cliRetry' in scenario ? ' from SDK to CLI' : 'cliStart' in scenario ? ' from CLI to SDK' : ''}`,
       withFixture('captain-preparation-', async (dir) => {
         const { startWithQuestion, preparation } = scenario;
         const nested = 'nested' in scenario && scenario.nested;
@@ -397,20 +400,57 @@ describe('Captain preparation through a durable session', () => {
           adapterImports,
         });
         let timeoutOverride: ReturnType<typeof vi.spyOn> | undefined;
+        async function runCli(argv: string[], signal?: AbortSignal) {
+          let stdout = '', stderr = '';
+          const result = await runPlaybookCli({
+            argv: ['run', ...argv], cwd, userConfigPath: configPath,
+            sessionStore: store, loadModule, adapterImports, signal,
+            env: { ANTHROPIC_API_KEY: 'fixture-only' },
+            probeAdapterSdk: async () => true,
+            stdout: { write(text: string) { stdout += text; return true; } },
+            stderr: { write(text: string) { stderr += text; return true; } },
+          });
+          return { ...result, stdout, stderr };
+        }
         try {
           if (interrupted) {
-            RecoveryAdapter.interruptPreparation = () => controller.host.abortActiveTurn();
-            await expect(controller.handleBossTurn('/wrapper implement the original task')).rejects.toThrow();
-            const saved = await controller.read();
+            const id = controller.sessionId;
+            if ('cliStart' in scenario) {
+              await controller.dispose();
+              const abort = new AbortController();
+              RecoveryAdapter.interruptPreparation = () => abort.abort(new Error('injected CLI interruption'));
+              const stopped = await runCli(['--session', id, '/wrapper implement the original task'], abort.signal);
+              expect(stopped.code, stopped.stderr).toBe(2);
+              expect(stopped.stdout).toBe('');
+            } else {
+              RecoveryAdapter.interruptPreparation = () => controller.host.abortActiveTurn();
+              await expect(controller.handleBossTurn('/wrapper implement the original task')).rejects.toThrow();
+              const stopped = await controller.read();
+              await expect(controller.lease.discard({ attemptId: stopped!.uncertain!.attemptId })).rejects.toThrow('resume its saved step');
+              await controller.dispose();
+            }
+            const saved = await realStore.read(id);
             expect(saved?.state).toBe('uncertain');
             expect(saved?.uncertain?.recovery?.snapshot.frames).toHaveLength(2);
             expect(saved?.uncertain?.recovery?.snapshot.frames.at(-1).runtime.state.stateId).toBe('failed');
             expect(JSON.stringify(saved?.uncertain?.recovery)).not.toContain('resumeToken');
-            await expect(controller.lease.discard({ attemptId: saved!.uncertain!.attemptId })).rejects.toThrow('resume its saved step');
-            const id = controller.sessionId;
-            await controller.dispose();
-            controller = await openSessionHost({ store, mode: 'recover', sessionId: id, config, loadModule, adapterImports });
-            const resumed = await controller.recover();
+            let resumed;
+            if ('cliRetry' in scenario) {
+              const calls = RecoveryAdapter.calls.length;
+              const discarded = await runCli(['--session', id, '--discard-uncertain']);
+              expect(discarded.code).toBe(2);
+              expect(discarded.stdout).toBe('');
+              expect(discarded.stderr).toContain('resume its saved step');
+              expect(RecoveryAdapter.calls).toHaveLength(calls);
+              expect((await realStore.read(id)).uncertain?.attemptId).toBe(saved.uncertain?.attemptId);
+              const retried = await runCli(['--session', id, '--retry-uncertain']);
+              expect(retried.code, retried.stderr).toBe(0);
+              expect(retried.stdout).toBe(`${retried.reply}\n`);
+              resumed = retried.record;
+            } else {
+              controller = await openSessionHost({ store, mode: 'recover', sessionId: id, config, loadModule, adapterImports });
+              resumed = await controller.recover();
+            }
             expect(resumed.state).toBe('settled');
             expect(resumed.snapshot.frames).toHaveLength(2);
             expect(resumed.snapshot.frames.at(-1).runtime.state.stateId).toBe('awaitBossReply');
