@@ -157,8 +157,11 @@ Keep each declaration outside plain-text parentheses; explanatory symbols in
 parenthetical guidance use plain text, never separate backticks, because those
 backticks would declare extra required fields. Guidance may instead occur
 inside a field's complete annotation, including any parentheses there.
-For example, use `` `codeCommit` (new code-owned commit) `` or
-`` `codeCommit: <new code-owned commit>` ``, without backticks around code.
+For example, use `` `latestCommit` (new code-owned commit) `` or
+`` `latestCommit: <commit identity>` ``, without backticks around code.
+The commit a call itself creates is always declared as `latestCommit`, the
+canonical effect-owned property every linked runtime fills from the
+repository receipt and every terminal output projects from.
 An output property name shall match the same ASCII identifier pattern as a
 guard name: a kebab-case Source placeholder such as `<coder-output>` names the
 property `coderOutput` through the canonical kebab-token-to-camel-field mapping
