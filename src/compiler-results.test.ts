@@ -256,3 +256,14 @@ it("keeps a created commit under latestCommit while the Source reads it through 
     expect(gears).not.toMatch(/`(codeCommit|decideCommit)[:`]/);
   }
 });
+
+it("carries an outcome's evidence qualification in the result description the judge reads", () => {
+  const definition = readFileSync(
+    new URL("../slc/text2gears.md", import.meta.url),
+    "utf8",
+  ).replace(/\s+/g, " ");
+  expect(definition).toContain(
+    "shall be carried in that outcome's result description, the only text the adjudicator reads when it selects the guard",
+  );
+  expect(definition).toContain("left in the item's prose, it reaches no judge");
+});

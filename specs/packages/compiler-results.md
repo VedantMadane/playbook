@@ -34,6 +34,10 @@ When declaring a result's output properties, text2gears shall declare a property
 
 Where a later prompt reads the commit an earlier call itself created through a Source-named placeholder, text2gears shall declare that producer's property as `latestCommit`, the effect-owned name every linked runtime fills from the repository receipt [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], and gears2fsm shall bind the placeholder to a typed context field assigned from that accepted `latestCommit`, so the Source keeps its own placeholder while one effect-owned name serves every workflow ([DR-066](../decisions/066-compiled-builtins-keep-their-public-interface.md)).
 
+### compiler-results-13
+
+When Source qualifies an outcome's evidence — what affirmatively supports it, or what supports no outcome — text2gears shall carry that qualification in the outcome's result description, which the hidden adjudicator reads when it selects the guard [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], rather than in the item's prose, which reaches no judge.
+
 ### compiler-results-7
 
 When emitting a result description with an `Output shall include` clause, text2gears shall reserve complete backticked spans after that marker for output-field declarations [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)] outside plain-text parentheses, placing explanatory symbols in plain guidance text or inside the declaration's complete annotation rather than in separate backticks within parenthetical guidance, while retaining bare declarations with plain parenthetical guidance and parentheses inside a complete backticked annotation.
@@ -73,3 +77,7 @@ When the integration suite reads the shipped text2gears definition, it shall ver
 ### compiler-results-12
 
 When the integration suite reads the shipped definitions and the maintained CODE and DECIDE GEARS, it shall verify that text2gears states the `latestCommit` exception with gears2fsm's binding, that gears2fsm states the binding, and that each committing result of CODE and DECIDE declares `latestCommit` while the review call relays `<code-commit>` or `<decide-commit>` [[compiler-results-11](#compiler-results-11)].
+
+### compiler-results-14
+
+When the integration suite reads the shipped text2gears definition, it shall verify that it directs an outcome's evidence qualification into the result description and names item prose as text the adjudicator never reads [[compiler-results-13](#compiler-results-13)].

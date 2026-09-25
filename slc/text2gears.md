@@ -211,6 +211,13 @@ The annotation makes the field runtime-owned: the adjudicator selects the result
 A distinct typed field extracted from that response remains judge-authored even when a later prompt quotes its exact value; quoting a field does not turn it into the player's whole final response.
 One property name shall not be annotated as verbatim in one result contract and judge-authored in another; text2gears shall choose distinct properties or report that the Source cannot be represented by the current contract.
 
+A Source statement that qualifies an outcome's evidence — what affirmatively
+supports it, what supports no outcome, such as "a progress report, status
+update, or promise of a later result supports no review outcome" — shall be
+carried in that outcome's result description, the only text the adjudicator
+reads when it selects the guard; left in the item's prose, it reaches no
+judge.
+
 Result metadata is compiler control data, not part of the acting agent's
 prompt.
 text2gears shall not put guard names, result-property schema, JSON control
