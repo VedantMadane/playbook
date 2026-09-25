@@ -231,13 +231,13 @@ export declare const devMachine: import("xstate").StateMachine<DevContext, {
     type: "emptyBossReply";
     params: unknown;
 } | {
-    type: "needsBossReplyWithoutQuestion";
-    params: unknown;
-} | {
     type: "startsDev";
     params: unknown;
 } | {
     type: "discussionCompleteAfterBossReply";
+    params: unknown;
+} | {
+    type: "needsBossReplyWithoutQuestion";
     params: unknown;
 } | {
     type: "decideSucceeded";
