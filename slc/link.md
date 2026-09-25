@@ -101,6 +101,12 @@ session-derived input values are outside this profile; do not widen their
 contracts to an unconstrained primitive.
 The tool adds optional string `cwd` for script-bearing machines; it does not
 put `cwd` in FSM input unless the descriptor explicitly maps it.
+When the linked module is part of a package that compiles and ships
+JavaScript siblings, supply the optional `fsmSpecifier` — the `.js` sibling
+the build emits for the source FSM, such as `./code.fsm.js`, in the same
+directory and with the same basename — so the emitted import satisfies the
+NodeNext rule under Output; omit it for a source-only host, where the tool
+derives the specifier from the `--fsm` path.
 An explicit `entryEvent: null` selects the shared classifier only where this
 definition permits no deterministic entry; it does not relax entry rules.
 `bossEvents` retains the exact additional erased event fields, source ownership,

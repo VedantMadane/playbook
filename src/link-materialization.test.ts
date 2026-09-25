@@ -331,6 +331,26 @@ void missing;
     expect(readFileSync(out, 'utf8')).toBe('existing target\n');
   });
 
+  it('emits a declared .js FSM specifier from a TypeScript FSM and rejects one naming another sibling', () => {
+    if (!(process.features as { typescript?: unknown }).typescript) return;
+    fsm = join(root, 'native.fsm.ts');
+    writeFileSync(fsm, fixture());
+    // Inside a package that ships JavaScript siblings, the module must import
+    // the build's `.js` file, which does not exist at link time.
+    const accepted = emit({ ...descriptor(), fsmSpecifier: './native.fsm.js' });
+    expect(accepted.status, accepted.stderr).toBe(0);
+    const emitted = readFileSync(out, 'utf8');
+    expect(emitted).toContain('import { fixtureMachine as machine } from "./native.fsm.js";');
+    expect(emitted).not.toContain('native.fsm.ts');
+    for (const wrong of ['./other.fsm.js', './nested/native.fsm.js', './native.fsm.ts', 'native.fsm.js']) {
+      writeFileSync(out, 'existing target\n');
+      const result = emit({ ...descriptor(), fsmSpecifier: wrong });
+      expect(result.status, `${wrong}: ${result.stderr}`).toBe(1);
+      expect(JSON.parse(result.stderr).status).toBe('error');
+      expect(readFileSync(out, 'utf8')).toBe('existing target\n');
+    }
+  });
+
   it.each(['profile', 'parallel', 'compound', 'captain', 'playbook', 'option'])('refuses unsupported %s and preserves the target', (mode) => {
     const value = descriptor();
     if (mode === 'profile') value.profile = 'custom-strategies';

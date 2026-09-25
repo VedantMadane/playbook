@@ -37,6 +37,7 @@ The descriptor shall carry the exact erased and authored metadata through these 
 | `placeholderFields` | Authored placeholder-token to input-field string map. |
 | `resumableStateIds` | Explicit duplicate-free delegated-player state ids allowed to suspend for and resume from a Boss reply, according to the FSM's resumption registry or `BOSS_REPLY` branches, independently of its interrupt targets. |
 | `transitionEventFields`, `verbatimPayloadFields`, `unfinishedFinalStateIds`, `controlContextFields` | Explicit duplicate-free string arrays, including empty arrays. |
+| `fsmSpecifier` | Optional relative runtime specifier ending in `.js` that names the emitted JavaScript sibling of the `--fsm` file — same directory, same basename — for a module inside a package that ships JavaScript beside its sources [[playbook-runtime-5](playbook-runtime.md#playbook-runtime-5)]; when absent, the helper derives the specifier from the `--fsm` path. |
 
 ### link-materialization-5
 
@@ -133,6 +134,7 @@ Where the real CLI emits an ordinary workflow against the actual shared engine, 
 ### link-materialization-18
 
 When the integration suite invokes the real CLI over supported and unsupported source loading, profile, topology, actor, option shape, invalid metadata and output failure cases, it shall verify each diagnostic and existing-target preservation [[link-materialization-2](#link-materialization-2)] [[link-materialization-3](#link-materialization-3)] [[link-materialization-5](#link-materialization-5)] [[link-materialization-10](#link-materialization-10)] [[link-materialization-11](#link-materialization-11)].
+It shall also verify that a declared `fsmSpecifier` is emitted verbatim as the FSM import of a module materialized from a TypeScript FSM and that one naming another directory or basename is rejected with the target preserved [[link-materialization-4](#link-materialization-4)].
 
 ### link-materialization-19
 

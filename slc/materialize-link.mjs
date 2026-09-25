@@ -7,7 +7,7 @@
 import { createRequire } from 'node:module';
 import { lstat, open, realpath, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { dirname, extname, relative, resolve } from 'node:path';
+import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // Compile-time source only; emitted modules depend only on the shared engine.
@@ -78,6 +78,10 @@ const DESCRIPTOR_KEYS = [
   'transitionEventFields', 'verbatimPayloadFields', 'resumableStateIds',
   'unfinishedFinalStateIds', 'controlContextFields',
 ];
+// Optional: the runtime specifier of the FSM's emitted JavaScript sibling, for
+// a module inside a package that compiles and ships `.js` beside its sources.
+const OPTIONAL_KEYS = ['fsmSpecifier'];
+const JS_SPECIFIER = /^\.\.?\/.+\.js$/;
 const LABELLED_KEYS = ['playerInputExport', 'omitEmptyRelayLines', 'identityPlaceholders'];
 const TOKEN = /^(#|[A-Za-z_$][A-Za-z0-9_$-]*)$/;
 const CONTRACT_TYPES = [
@@ -126,7 +130,10 @@ function validateDescriptor(value, engine) {
   const descriptor = engine.snapshotJsonValue(value, 'link descriptor');
   const labelled = descriptor?.profile === 'flat-labelled-relays';
   const keys = labelled ? [...DESCRIPTOR_KEYS, ...LABELLED_KEYS] : DESCRIPTOR_KEYS;
-  record(descriptor, 'descriptor', keys, keys);
+  record(descriptor, 'descriptor', [...keys, ...OPTIONAL_KEYS], keys);
+  if (descriptor.fsmSpecifier !== undefined && (typeof descriptor.fsmSpecifier !== 'string' || !JS_SPECIFIER.test(descriptor.fsmSpecifier))) {
+    throw new TypeError('fsmSpecifier must be a relative runtime specifier ending in .js');
+  }
   if (descriptor.schema !== SCHEMA) throw new TypeError(`descriptor.schema must equal ${SCHEMA}`);
   if (!['flat-defaults', 'flat-quoted-relays', 'flat-labelled-relays'].includes(descriptor.profile)) throw new UnsupportedLinkProfile('profile requires ordinary normative linking');
   if (labelled) {
@@ -428,9 +435,19 @@ export async function runMaterializer(argv, input) {
   // Validate the export name before selecting it from the imported module.
   validateDescriptor(descriptor, engine);
   const module = await import(pathToFileURL(source).href);
-  const specifier = relative(dirname(out), fsm).replaceAll('\\', '/');
+  const derived = relative(dirname(out), fsm).replaceAll('\\', '/');
+  let specifier = derived.startsWith('.') ? derived : `./${derived}`;
+  if (descriptor.fsmSpecifier !== undefined) {
+    // The declared `.js` sibling must be the build output of exactly this FSM:
+    // same directory and same basename, differing only in the extension.
+    const declared = resolve(dirname(out), descriptor.fsmSpecifier);
+    if (dirname(declared) !== dirname(fsm) || basename(declared, '.js') !== basename(fsm, extname(fsm))) {
+      throw new TypeError('fsmSpecifier must name the .js sibling of the --fsm file');
+    }
+    specifier = descriptor.fsmSpecifier;
+  }
   const code = materializeLink({ machine: module[descriptor.machineExport], descriptor,
-    fsmSpecifier: specifier.startsWith('.') ? specifier : `./${specifier}`, engine });
+    fsmSpecifier: specifier, engine });
   const temporary = `${out}.${randomUUID()}.tmp`;
   try {
     const file = await open(temporary, 'wx', 0o644);
