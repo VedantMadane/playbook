@@ -1050,7 +1050,7 @@ describe('linked DEV runtime', () => {
       children: [
         settledChild('branch', 1, BRANCH_COMPLETE),
         settledChild('code', 1, CODE_COMPLETE),
-        failedTerminalChild('pr', 'checksStillFailing', stillFailing),
+        failedTerminalChild('pr', 'checksFailed', stillFailing),
       ],
     });
     const runtime = linkedRuntime(host);

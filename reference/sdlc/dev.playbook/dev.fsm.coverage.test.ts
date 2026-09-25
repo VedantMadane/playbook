@@ -342,7 +342,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       context: PULL_REQUEST_CONTEXT,
       event: {
         type: 'xstate.error.actor.pr',
-        error: failureTerminal('pr', 'checksStillFailing', {
+        error: failureTerminal('pr', 'checksFailed', {
           status: 'not-merged',
           reason: 'checks-failed',
           pullRequest: '34',
@@ -1023,7 +1023,7 @@ describe('DEV FSM transition coverage', () => {
       [
         BRANCH_COMPLETE,
         CODE_COMPLETE,
-        failureTerminal('pr', 'checksStillFailing', stillFailing),
+        failureTerminal('pr', 'checksFailed', stillFailing),
       ],
     );
     workflow.actor.send({ type: 'START_DEV', developmentRequest: 'Fix #12.' });
