@@ -198,6 +198,13 @@ through typed context.
 A single-outcome producer then declares exactly one bullet naming the
 property; this consumed-output case is the sole one in which a
 single-outcome behavior carries a `Results:` label.
+The commit a call itself creates is the one exception to naming the property
+after the placeholder: its producer declares `latestCommit: <commit identity>`
+whatever placeholder a later prompt reads it through — `<code-commit>` or
+`<decide-commit>`, for instance — because the linked runtime fills that
+property from the repository receipt rather than from the player, and
+[gears2fsm](gears2fsm.md#context-and-prompts) binds the Source's placeholder
+to the retained commit.
 
 Where a later prompt relays a delegated player's whole final response as quoted context, the producer shall declare that property in the exact annotated form `` `<field>: <verbatim final text>` ``.
 The annotation makes the field runtime-owned: the adjudicator selects the result guard, while the linked runtime carries the player's canonical final text into that field instead of asking a judge to reproduce it.

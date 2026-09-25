@@ -233,3 +233,26 @@ it("keeps a delegated Boss question framework-owned and confines output properti
     "travels in the result's verbatim final-text property and is not a separate judge-authored property",
   );
 });
+
+it("keeps a created commit under latestCommit while the Source reads it through its own placeholder", () => {
+  const flat = (file: string) =>
+    readFileSync(new URL(file, import.meta.url), "utf8").replace(/\s+/g, " ");
+  expect(flat("../slc/text2gears.md")).toContain(
+    "its producer declares `latestCommit: <commit identity>` whatever placeholder a later prompt reads it through",
+  );
+  expect(flat("../slc/gears2fsm.md")).toContain(
+    "binds to a typed context field named by its canonical mapping, assigned from that call's accepted `latestCommit`",
+  );
+  for (const [workflow, placeholder] of [
+    ["code", "<code-commit>"],
+    ["decide", "<decide-commit>"],
+  ] as const) {
+    const gears = readFileSync(
+      new URL(`../reference/sdlc/${workflow}.playbook/${workflow}.gears.md`, import.meta.url),
+      "utf8",
+    );
+    expect(gears).toContain("`latestCommit: <commit identity>`");
+    expect(gears).toContain(placeholder);
+    expect(gears).not.toMatch(/`(codeCommit|decideCommit)[:`]/);
+  }
+});

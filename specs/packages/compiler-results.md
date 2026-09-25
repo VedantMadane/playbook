@@ -30,6 +30,10 @@ Where the behavior is Captain's routing decision under that contract, whose `que
 
 When declaring a result's output properties, text2gears shall declare a property only where a consumer requires its value — a later item's placeholder, the workflow's terminal return [[compiler-results-3](#compiler-results-3)], or the workflow's declared public interface [[compiler-workflow-contracts-6](compiler-workflow-contracts.md#compiler-workflow-contracts-6)] — and shall carry a detail the acting agent reports only within its final text, such as a reason, a summary, or a list, in that result's verbatim final-text property rather than as a separate judge-authored property ([DR-066](../decisions/066-compiled-builtins-keep-their-public-interface.md)).
 
+### compiler-results-11
+
+Where a later prompt reads the commit an earlier call itself created through a Source-named placeholder, text2gears shall declare that producer's property as `latestCommit`, the effect-owned name every linked runtime fills from the repository receipt [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], and gears2fsm shall bind the placeholder to a typed context field assigned from that accepted `latestCommit`, so the Source keeps its own placeholder while one effect-owned name serves every workflow ([DR-066](../decisions/066-compiled-builtins-keep-their-public-interface.md)).
+
 ### compiler-results-7
 
 When emitting a result description with an `Output shall include` clause, text2gears shall reserve complete backticked spans after that marker for output-field declarations [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)] outside plain-text parentheses, placing explanatory symbols in plain guidance text or inside the declaration's complete annotation rather than in separate backticks within parenthetical guidance, while retaining bare declarations with plain parenthetical guidance and parentheses inside a complete backticked annotation.
@@ -65,3 +69,7 @@ It shall also verify that a separate unannotated typed extracted field remains j
 ### compiler-results-10
 
 When the integration suite reads the shipped text2gears definition, it shall verify that its result-contract rules confine output properties to consumed values — a later placeholder, the terminal return, or the declared public interface — and name the verbatim final-text property as the carrier of detail the acting agent reports only in its final text [[compiler-results-9](#compiler-results-9)].
+
+### compiler-results-12
+
+When the integration suite reads the shipped definitions and the maintained CODE and DECIDE GEARS, it shall verify that text2gears states the `latestCommit` exception with gears2fsm's binding, that gears2fsm states the binding, and that each committing result of CODE and DECIDE declares `latestCommit` while the review call relays `<code-commit>` or `<decide-commit>` [[compiler-results-11](#compiler-results-11)].

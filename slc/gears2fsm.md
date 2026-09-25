@@ -610,6 +610,12 @@ or remove remaining entries as evidence arrives, but it cannot grow or retain
 the same-length plan indefinitely; the initial finite array therefore bounds
 the number of sequential child calls without an arbitrary runtime call limit.
 
+A placeholder that reads the commit an earlier call created — `<code-commit>`,
+`<decide-commit>` — binds to a typed context field named by its canonical
+mapping, assigned from that call's accepted `latestCommit`, the effect-owned
+property the runtime fills from the repository receipt
+([text2gears](text2gears.md#result-contracts)); the actor input carries the
+field beside the prompt like any other relayed value.
 Prompts shall pass only the **specific extracted fields** the player needs.
 The compiler shall not dump `JSON.stringify(lastResult)` or any opaque blob: it leaks internal `guard` strings, wastes tokens, and confuses the LLM.
 
@@ -810,6 +816,12 @@ reply that omits `questionId` and fill that sole id.
 Where several questions are pending, the classifier prompt and event shall
 require `questionId` and shall reject an omitted or unknown id without moving
 the FSM.
+
+Every exit from a Captain- or player-invoking state other than into its own
+Boss-reply wait — an accepted outcome, the malformed-output fallback, an actor
+error — and every non-reply exit from a wait shall clear that state's pending
+question and reply context, so a call that fails after resuming leaves no
+stale question for the next turn's classifier to offer.
 
 The scalar `awaitBossReply` state and every local branch wait are quiescent for
 the runtime drive boundary.
