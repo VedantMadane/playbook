@@ -143,6 +143,20 @@ describe('prompt-prefix pass tool (compiler-prompt-prefix-6)', () => {
   it.each(workflows)('$id: rewrites exactly the relay-first items', ({ id, prefixed }) => {
     const { gears } = reference(id);
     const { text, stdout } = prefix(dir, gears);
+    if (section(gears, SECTION) !== undefined) {
+      // A bundle recompiled since the pass shipped already carries its
+      // output: no relay precedes an instruction, so nothing is rewritten,
+      // and its provenance lists exactly the items whose relays now trail.
+      expect(stdout).toContain('no eligible item');
+      expect(text).toBe(gears);
+      expect(section(gears, SECTION)).toBe(
+        `\n${prefixed.map((itemId) => `- ${itemId}: relays → tail`).join('\n')}\n`,
+      );
+      for (const [itemId, prompt] of prompts(gears)) {
+        expect(relaysTrail(prompt), itemId).toBe(true);
+      }
+      return;
+    }
     expect(stdout.trim().split('\n')).toEqual([...prefixed]);
 
     const before = prompts(gears);
