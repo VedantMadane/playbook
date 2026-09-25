@@ -86,6 +86,7 @@ export interface PlaybookEffectBoundary {
   readonly baseline: PlaybookRepositoryObservation;
   readonly after?: PlaybookRepositoryObservation;
   readonly physicalReceipt?: PlaybookRepositoryReceipt;
+  readonly restored?: PlaybookRepositoryObservation;
   readonly finalText?: string;
   readonly semanticCandidate?: JsonValue;
   readonly initialSemanticCandidate?: JsonValue;
@@ -103,6 +104,7 @@ export type PlaybookEffectBoundaryStart = Omit<
   | 'attemptNumber'
   | 'after'
   | 'physicalReceipt'
+  | 'restored'
   | 'finalText'
   | 'semanticCandidate'
   | 'initialSemanticCandidate'
@@ -278,6 +280,7 @@ export interface HostCapabilities {
   readonly effectLedger: PlaybookEffectLedgerCapability;
 }
 export interface WorktreeRepositoryCapability extends RepositoryCapability {
+  acquire(options?: { signal?: AbortSignal }): Promise<{ assertOwner(): Promise<void>; release(): Promise<void> }>;
   readonly identity: RepositoryIdentity;
   observe(): Promise<PlaybookRepositoryObservation>;
 }

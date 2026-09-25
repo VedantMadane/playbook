@@ -258,7 +258,7 @@ const inert = createPlaybookRuntime({
 ```
 
 `createWorktreeHostCapabilities()` requires only that `cwd` exist and returns
-exactly `repository: { identity, observe, runExclusive, runDeferred }` and
+exactly `repository: { identity, observe, acquire, runExclusive, runDeferred }` and
 `effectLedger: { snapshot, writeAhead }`. The governed worktree is bound at
 every governed call and observation rather than fixed at construction: it is
 the canonical root of the nearest Git worktree containing `cwd`, or — when
@@ -279,6 +279,7 @@ CLI uses (process-local until the repository exists, since there is no `.git`
 to publish it in), observe before and after the operation, apply the engine's
 correction-budget `writeAhead` mid-completion, and bind, park, continue, and
 restore deferred Boss questions with the engine's exact checkpoint semantics.
+`acquire({signal})` holds that same worktree claim for preparation checks; call `assertOwner()` before checking and `release()` in `finally`.
 Overlapping calls on one worktree run one at a time, in no guaranteed order.
 A write the ledger rejects after a boundary has started leaves the worktree
 claim quarantined, exactly as it would under `playbook run`: treat that
@@ -413,10 +414,18 @@ Automatic discovery belongs only to the ordinary
 `~/.spex/sessions` profile with no `SPEX_HOME` or `sessions` override; custom
 profiles require an explicit migration request.
 
-For an uncertain session, reopen with `mode:'retry'` and call `retry()`. It uses
-the exact recorded input and attempted configuration. Module-free
+A single recovery entry point handles either a paused step or an uncertain attempt:
+
+```ts
+const controller = await openSessionHost({ store: shared, sessionId, mode: 'recover' });
+try { await controller.recover(); } finally { await controller.dispose(); }
+```
+
+For uncertainty it uses the saved instruction and exact attempted settings. It resumes the saved preparation point when available; otherwise it checks whether the original turn can safely repeat. It never chooses discard. For an already settled pause, `recover(answer)` may supply Boss's missing input. New input cannot replace an uncertain instruction before recovery.
+
+Explicit `mode:'retry'` and `retry()` remain supported. Module-free
 `discardSessionUncertain(shared, sessionId)` restores the prior recovery only
-when no effect-ledger advancement prevents discard.
+when neither recorded effects nor a preparation recovery point prevents discard.
 
 `readHistory()` returns readable history and a damaged boundary, including a
 clearly marked synthetic projection when a validated legacy journal has no

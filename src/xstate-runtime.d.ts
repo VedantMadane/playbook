@@ -69,11 +69,9 @@ export type PlaybookReconciledSemanticOutput = Readonly<Record<string, string>> 
 /** Retained presentation and semantic evidence, kept separate from output. */
 export interface PlaybookRetainedSemanticEvidence {
     readonly finalText?: string;
-    readonly semanticCandidate: Readonly<Record<string, string>> & {
-        readonly guard: string;
-    };
+    readonly semanticCandidate: Readonly<Record<string, string>>;
 }
-export type PlaybookSemanticReconciliationReason = 'missing-presentation-evidence' | 'missing-repository-receipt' | 'invalid-repository-receipt' | 'repository-disposition-mismatch' | 'missing-effect-evidence' | 'missing-runtime-evidence' | 'inconsistent-runtime-evidence';
+export type PlaybookSemanticReconciliationReason = 'no-matching-outcome' | 'missing-presentation-evidence' | 'missing-repository-receipt' | 'invalid-repository-receipt' | 'repository-disposition-mismatch' | 'missing-effect-evidence' | 'missing-runtime-evidence' | 'inconsistent-runtime-evidence';
 /** A fail-closed semantic/effect reconciliation decision. */
 export type PlaybookSemanticReconciliation = {
     readonly status: 'resolved' | 'deferred';

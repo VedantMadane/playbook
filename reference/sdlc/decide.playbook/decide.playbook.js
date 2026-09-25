@@ -429,7 +429,7 @@ function buildAdjudicatorPrompt(input, playerOutput, correction) {
         lines.push(...renderGovernedOutcomeContract(guard, description, outcomes[guard]));
     }
     lines.push('');
-    lines.push("Pick exactly one declared `guard` and reply with exactly that outcome's reply shape above: `guard` plus its semantic-owned fields and nothing else.");
+    lines.push("Pick exactly one declared `guard` and reply with exactly that outcome's reply shape above: `guard` plus its semantic-owned fields and nothing else.", 'If no declared outcome matches the player output, instead reply exactly {"blocked":"explain the missing outcome or contradictory requirements"}. Never force a match or invent a guard. A blocked reply pauses the playbook for Boss; it is not completion.');
     lines.push('A field listed as runtime-supplied is owned by presentation, effect, or runtime evidence; the runtime fills it itself, and a reply that includes one is structurally invalid.');
     if (correction !== undefined) {
         lines.push('');
@@ -1790,7 +1790,7 @@ function createDecidePlaybookRuntime(options, deferredEffects) {
                 deferred: {
                     operationId: operationId ?? randomUUID(),
                     pendingQuestion,
-                    playerContinuation: snapshotJsonValue(selectPlayerResume(roleId, playerId), 'DECIDE deferred player continuation'),
+                    playerContinuation: { v: 1, playerId: playerId ?? roleId },
                 },
             };
         });
@@ -2459,6 +2459,16 @@ function createDecidePlaybookRuntime(options, deferredEffects) {
         const operationId = deferredOperationId;
         const callId = `player-${++playerCallSequence}`;
         const effectBoundary = deferredBoundarySeed(operationId, callId);
+        const boundPlayerId = resolvedPlayerId(effectBoundary.roleId);
+        const validateBinding = (value) => {
+            if (!isPlainObject(value) || Object.keys(value).length !== 2 ||
+                value.v !== 1 || value.playerId !== (boundPlayerId ?? effectBoundary.roleId)) {
+                throw new TypeError('DECIDE bound deferred player continuation is invalid');
+            }
+        };
+        // Validate before the host consumes the pending question. Provider hints
+        // are optional local state; the durable binding identifies the player.
+        validateBinding(effectLedgerMirror.logicalOperations.find((operation) => operation.operationId === operationId)?.playerContinuation);
         const active = {
             operationId,
             effectBoundary,
@@ -2472,12 +2482,8 @@ function createDecidePlaybookRuntime(options, deferredEffects) {
             operationId,
             effectBoundary,
             operation: async ({ playerContinuation, baseline }) => {
-                if (playerContinuation !== false &&
-                    (typeof playerContinuation !== 'string' ||
-                        playerContinuation.trim() === '')) {
-                    throw new TypeError('DECIDE bound deferred player continuation is invalid');
-                }
-                active.playerContinuation = playerContinuation;
+                validateBinding(playerContinuation);
+                active.playerContinuation = selectPlayerResume(effectBoundary.roleId, boundPlayerId);
                 // DR-062 §4: the continuation's own baseline.
                 active.baseline = baseline;
                 readiness.resolve({ status: 'ready' });
@@ -2485,6 +2491,9 @@ function createDecidePlaybookRuntime(options, deferredEffects) {
             },
             completeEffectBoundary: async (completion) => {
                 if (active.input === undefined) {
+                    if (completion.operation.status === 'rejected') {
+                        throw completion.operation.reason;
+                    }
                     throw new TypeError('DECIDE deferred continuation omitted its authored player input');
                 }
                 return completionEvidenceFor(active.input, active.input.role, active.playerId, signal, operationId)(completion);

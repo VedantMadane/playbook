@@ -12,7 +12,7 @@ import {
   type AgentEvent,
   type AgentOptions,
 } from '@sublang/cligent';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { assign, createMachine } from 'xstate';
 import { createXStatePlaybookRuntime } from '../../../src/xstate-runtime.js';
 import codePlaybookRegistryEntry from './code.registry.js';
@@ -27,6 +27,8 @@ class RecoveryAdapter implements AgentAdapter {
   static cwd = '';
   static startWithQuestion = false;
   static preparation = 'ready';
+  static holdInitial = false;
+  static interruptPreparation: (() => void) | undefined;
   static calls: Array<{
     kind: string;
     prompt: string;
@@ -53,15 +55,31 @@ class RecoveryAdapter implements AgentAdapter {
     RecoveryAdapter.calls.push({ kind, prompt, options });
     let result: string;
     if (kind === 'prepare') {
+      if (RecoveryAdapter.interruptPreparation) {
+        const interrupt = RecoveryAdapter.interruptPreparation;
+        RecoveryAdapter.interruptPreparation = undefined;
+        await mkdir(join(RecoveryAdapter.cwd, 'node_modules'), { recursive: true });
+        await writeFile(join(RecoveryAdapter.cwd, 'node_modules', 'partial-preparation'), 'preserved');
+        interrupt();
+        throw new Error('injected process interruption during preparation');
+      }
+      const preparation = RecoveryAdapter.holdInitial ? 'blocked' : RecoveryAdapter.preparation;
+      if (preparation === 'timeout') {
+        await new Promise<void>((resolve) => {
+          if (options?.signal?.aborted) resolve();
+          else options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        throw new Error('preparation cancelled by its deadline');
+      }
       const coordinator = createRepositoryEffectCoordinator();
       await expect(
         coordinator.acquire(RecoveryAdapter.cwd, {
           signal: AbortSignal.timeout(30),
         }),
       ).rejects.toThrow();
-      if (RecoveryAdapter.preparation === 'network')
+      if (preparation === 'network')
         throw new Error('ECONNRESET: injected interruption during preparation');
-      if (RecoveryAdapter.preparation === 'aborted') {
+      if (preparation === 'aborted') {
         yield createEvent(
           'done',
           this.agent,
@@ -75,7 +93,7 @@ class RecoveryAdapter implements AgentAdapter {
         );
         return;
       }
-      if (RecoveryAdapter.preparation === 'ready') {
+      if (preparation === 'ready') {
         await mkdir(join(RecoveryAdapter.cwd, 'node_modules'), {
           recursive: true,
         });
@@ -90,16 +108,18 @@ class RecoveryAdapter implements AgentAdapter {
           );
       }
       result =
-        RecoveryAdapter.preparation === 'malformed'
+        preparation === 'malformed'
           ? 'I might be done.'
           : JSON.stringify({
               status:
-                RecoveryAdapter.preparation === 'stale'
+                preparation === 'stale'
                   ? 'ready'
-                  : RecoveryAdapter.preparation,
+                  : preparation === 'missing-transition' ? 'blocked'
+                  : preparation,
               summary:
-                RecoveryAdapter.preparation === 'ready'
+                preparation === 'ready'
                   ? 'Prepared and checked the missing tool.'
+                  : preparation === 'missing-transition' ? 'The playbook has no transition for this outcome. Boss must clarify the playbook before it can continue.'
                   : 'The tool needs Boss input.',
             });
     } else if (kind === 'decision') {
@@ -262,6 +282,10 @@ const parentEntry = {
 
 describe('Captain preparation through a durable session', () => {
   for (const scenario of [
+    { startWithQuestion: false, preparation: 'ready', automatic: true },
+    { startWithQuestion: false, preparation: 'ready', automatic: true, nested: true },
+    { startWithQuestion: false, preparation: 'ready', automatic: true, nested: true, throws: true },
+    { startWithQuestion: false, preparation: 'ready', interrupted: true, nested: true },
     { startWithQuestion: false, preparation: 'ready' },
     { startWithQuestion: true, preparation: 'ready' },
     { startWithQuestion: false, preparation: 'ready', nested: true },
@@ -272,6 +296,9 @@ describe('Captain preparation through a durable session', () => {
       'aborted',
       'stale',
       'unresolved',
+      'missing-transition',
+      'save-failure',
+      'timeout',
     ].map((preparation) => ({ startWithQuestion: false, preparation })),
   ])
     it(
@@ -279,6 +306,10 @@ describe('Captain preparation through a durable session', () => {
       withFixture('captain-preparation-', async (dir) => {
         const { startWithQuestion, preparation } = scenario;
         const nested = 'nested' in scenario && scenario.nested;
+        const automatic = 'automatic' in scenario && scenario.automatic;
+        const interrupted = 'interrupted' in scenario && scenario.interrupted;
+        RecoveryAdapter.holdInitial = !automatic && !interrupted;
+        RecoveryAdapter.interruptPreparation = undefined;
         const cwd = await initializeTestRepository(dir);
         await writeFile(join(cwd, '.gitignore'), 'node_modules/\n');
         await execFileAsync('git', ['add', '.gitignore'], { cwd });
@@ -322,6 +353,13 @@ describe('Captain preparation through a durable session', () => {
                     );
                     return {
                       ...runtime,
+                      ...('throws' in scenario ? {
+                        async handleBossInput(input: Parameters<typeof runtime.handleBossInput>[0]) {
+                          const result = await runtime.handleBossInput(input);
+                          if (result.outcome === 'failed') throw new Error('injected unexpected exception after the child parked');
+                          return result;
+                        },
+                      } : {}),
                       describe: () => {
                         const view = runtime.describe!();
                         return preparation === 'stale' &&
@@ -335,9 +373,16 @@ describe('Captain preparation through a durable session', () => {
                   },
                 },
         });
-        const store = createSessionStore({
+        const realStore = createSessionStore({
           sessionsDir: join(dir, 'sessions'),
         });
+        const store = preparation !== 'save-failure' ? realStore : {
+          ...realStore,
+          async acquire(id: string) {
+            const lease = await realStore.acquire(id);
+            return { ...lease, async checkpointRecovery() { throw new Error('injected recovery storage failure'); } };
+          },
+        };
         const plan = await loadLaunchPlan({
           userConfigPath: configPath,
           loadModule,
@@ -351,10 +396,43 @@ describe('Captain preparation through a durable session', () => {
           loadModule,
           adapterImports,
         });
+        let timeoutOverride: ReturnType<typeof vi.spyOn> | undefined;
         try {
+          if (interrupted) {
+            RecoveryAdapter.interruptPreparation = () => controller.host.abortActiveTurn();
+            await expect(controller.handleBossTurn('/wrapper implement the original task')).rejects.toThrow();
+            const saved = await controller.read();
+            expect(saved?.state).toBe('uncertain');
+            expect(saved?.uncertain?.recovery?.snapshot.frames).toHaveLength(2);
+            expect(saved?.uncertain?.recovery?.snapshot.frames.at(-1).runtime.state.stateId).toBe('failed');
+            expect(JSON.stringify(saved?.uncertain?.recovery)).not.toContain('resumeToken');
+            await expect(controller.lease.discard({ attemptId: saved!.uncertain!.attemptId })).rejects.toThrow('resume its saved step');
+            const id = controller.sessionId;
+            await controller.dispose();
+            controller = await openSessionHost({ store, mode: 'recover', sessionId: id, config, loadModule, adapterImports });
+            const resumed = await controller.recover();
+            expect(resumed.state).toBe('settled');
+            expect(resumed.snapshot.frames).toHaveLength(2);
+            expect(resumed.snapshot.frames.at(-1).runtime.state.stateId).toBe('awaitBossReply');
+            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'decision')).toHaveLength(0);
+            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'player')).toHaveLength(2);
+            expect(await readFile(join(cwd, 'node_modules', 'partial-preparation'), 'utf8')).toBe('preserved');
+            return;
+          }
           const first = await controller.handleBossTurn(
             `${nested ? '/wrapper' : '/code'} implement the original task`,
           );
+          if (automatic) {
+            expect(first.state).toBe('settled');
+            expect(first.snapshot.frames).toHaveLength(nested ? 2 : 1);
+            expect(first.snapshot.frames!.at(-1)!.runtime.state.stateId).toBe('awaitBossReply');
+            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'prepare')).toHaveLength(2);
+            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'player')).toHaveLength(3);
+            expect(await readFile(join(cwd, 'tracked.txt'), 'utf8')).toBe('repaired prerequisite\n');
+            return;
+          }
+          RecoveryAdapter.holdInitial = false;
+          RecoveryAdapter.calls = RecoveryAdapter.calls.filter(({ kind }) => kind !== 'prepare');
           const sourceId = first.snapshot.frames!.at(-1)!.sessionId;
           expect(first.snapshot.frames).toHaveLength(nested ? 2 : 1);
           expect(first.snapshot.frames!.at(-1)!.runtime.state.stateId).toBe(
@@ -372,11 +450,27 @@ describe('Captain preparation through a durable session', () => {
           });
           const instruction =
             'Install the missing local tool and continue. Use the small test target.';
+          if (preparation === 'timeout') {
+            const original = AbortSignal.timeout.bind(AbortSignal);
+            timeoutOverride = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => original(ms === 150_000 ? 500 : ms));
+            await expect(controller.handleBossTurn(instruction)).rejects.toThrow();
+            const stopped = await controller.read();
+            expect(stopped?.state).toBe('uncertain');
+            expect(stopped?.uncertain?.recovery?.snapshot.frames.at(-1).runtime.state.stateId).toBe('failed');
+            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'player')).toHaveLength(1);
+            return;
+          }
           const resumed = await controller.handleBossTurn(instruction);
           if (preparation !== 'ready') {
             expect(
               RecoveryAdapter.calls.filter((call) => call.kind === 'prepare'),
-            ).toHaveLength(preparation === 'unresolved' ? 0 : 1);
+            ).toHaveLength(['unresolved', 'save-failure'].includes(preparation) ? 0 : 1);
+            if (preparation === 'missing-transition') {
+              const call = RecoveryAdapter.calls.find(({ kind }) => kind === 'prepare')!;
+              expect(call.prompt).toContain('Never patch the running playbook, invent a transition');
+              expect(call.prompt).toContain('declaredResults');
+              expect(JSON.stringify(resumed.snapshot.journal)).toContain('no transition for this outcome');
+            }
             expect(
               RecoveryAdapter.calls.filter((call) => call.kind === 'player'),
             ).toHaveLength(1);
@@ -420,12 +514,14 @@ describe('Captain preparation through a durable session', () => {
           else
             expect(player[1]!.prompt).toContain('implement the original task');
           const answer = 'answer only: use the small target';
+          RecoveryAdapter.holdInitial = true;
           const answered = await controller.handleBossTurn(answer);
-          expect(answered.snapshot.lastAction).toBe('deliver');
+          expect(answered.snapshot.journal).toContainEqual(expect.objectContaining({ kind: 'action', payload: expect.objectContaining({ action: 'deliver' }) }));
           expect(
             RecoveryAdapter.calls.filter(({ kind }) => kind === 'prepare'),
-          ).toHaveLength(1);
+          ).toHaveLength(2);
         } finally {
+          timeoutOverride?.mockRestore();
           await controller.dispose();
         }
       }),

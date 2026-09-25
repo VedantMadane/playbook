@@ -19,6 +19,7 @@ export async function openSessionHost(options) {
     let record = await lease.read();
     if (record !== undefined) await lease.assertContinuable({ cwd: options.cwd });
     record = await lease.recoverUnresolvedEffectAbandonment();
+    if (options.mode === 'recover') retryPending = record?.state === 'uncertain';
     if (options.mode === 'new' && record !== undefined) throw new Error('session already exists');
     if (options.mode !== 'new' && options.sessionId && record === undefined) throw new Error('session does not exist');
     if (record?.state === 'uncertain' && !retryPending) throw new Error('session has an uncertain turn; select Retry or Discard');
@@ -94,7 +95,16 @@ export async function openSessionHost(options) {
       })();
       return closing;
     };
-    return Object.freeze({ sessionId, host: created.host, shell: created.shell, lease, read: () => lease.read(), handleBossTurn: (input) => execute(input, false), listRuntimeActions: () => created.shell.describeRuntimeActions?.() ?? Object.freeze([]), submitRuntimeAction: (actionId) => execute(undefined, false, actionId), listShellActions: () => created.shell.describeShellActions?.() ?? Object.freeze([]), submitShellAction: (actionId) => execute(undefined, false, undefined, actionId), retry: () => execute(undefined, true), dispose });
+    const recover = (input) => {
+      if (retryPending) {
+        if (input !== undefined) throw new Error('Resume the recorded interrupted instruction before supplying new input');
+        return execute(undefined, true);
+      }
+      const text = input ?? 'Resume the interrupted task using its existing instructions.';
+      created.shell.selectRecovery(text, text);
+      return execute(text, false);
+    };
+    return Object.freeze({ sessionId, host: created.host, shell: created.shell, lease, read: () => lease.read(), handleBossTurn: (input) => execute(input, false), recover, listRuntimeActions: () => created.shell.describeRuntimeActions?.() ?? Object.freeze([]), submitRuntimeAction: (actionId) => execute(undefined, false, actionId), listShellActions: () => created.shell.describeShellActions?.() ?? Object.freeze([]), submitShellAction: (actionId) => execute(undefined, false, undefined, actionId), retry: () => execute(undefined, true), dispose });
   } catch (cause) {
     const failures = [cause];
     let disposed = true;

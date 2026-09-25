@@ -371,33 +371,28 @@ workflow outcome. The same restricted recovery survives process restart
 
 ### Preparing a stopped step
 
-For a settled run that failed or is waiting for your answer, tell Captain what to repair and ask it to continue:
+Captain automatically tries to prepare and resume a stopped step. You can also supply a missing answer or ask for a repair:
 
 ```sh
-playbook run --session <id> "Fix the missing local dependency, verify it, then resume the interrupted step."
+playbook run --session <id> "Install the missing dependency and continue."
 ```
 
-The same request works in the interactive Boss pane.
-Captain makes one separate preparation call with tools and the configured Captain permissions.
-It receives your exact instruction, the interrupted step's prompt, and its question or failure.
-It may inspect and repair the prerequisites, but may not perform the remaining specialist task, change session records, skip steps, or discard work or rewrite history without your authorization.
-A blocked or interrupted preparation stays paused and explains what remains.
+This also works in the interactive Boss pane. Captain may inspect prerequisites, prepare local tools, put generated files aside, and adjust local ignore settings. It preserves user work and the task's scope. It cannot do the remaining specialist work, change saved session data, invent a result, or skip a step.
 
-The shared runtime chooses the continuation: deliver your answer to the waiting player, retry the failed invocation, or assess a saved result whose judgment was interrupted after a proven commit.
-Earlier completed steps and commits are preserved, including after reopening a session or inside a nested playbook.
-A plain answer still goes directly to the player; a plain retry does not start a preparation call.
+The runtime checks the continuation. It retries the interrupted step, keeps earlier commits, and uses saved output when only its assessment was interrupted. If a read-only check left unwanted files, retry requires restoring its original files and HEAD; the original failure stays recorded. A waiting player's repository checkpoint must remain intact.
 
-Recovery does not override ambiguous repository effects or a pending question's repository checkpoint.
-External dependency and environment repairs can preserve that checkpoint; a repair requiring changes to the checkpointed worktree may need the runtime's explicit reconciliation controls.
-Historical sessions without an invocation checkpoint and custom runtimes that do not advertise recovery keep their previously available controls.
-The uncertain-turn commands below remain the separate response to a process dying before a safe settlement.
+Captain asks Boss for a real missing decision, uncertain permission, or a missing or contradictory playbook transition. Repository checks alone cannot prove that publishing or another outside action is safe to repeat; Captain must check that separately.
+
+Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline that cancels the host turn if exceeded. A saved point is written before tools run, allowing another process to resume that stopped step after an interruption during preparation. Custom hosts must provide cancellation before preparation is available.
+
+Custom runtimes can provide the same recovery offer: step prompt, optional preparation conditions and evidence, and a continuation they will validate. Captain needs no list of repair tools or error strings. Older checkpoints without this offer keep their existing controls.
 
 ### Recovering an uncertain turn
 
 Before model work, the runner takes one exclusive session lease and writes an
 uncertain marker. If the process is interrupted after effects may
 have begun but before settlement is durable, ordinary continuation refuses
-to guess. Choose explicitly:
+to guess. Retry resumes the saved preparation point when one exists; otherwise it requires proof that replaying the recorded turn is safe. Discard is a separate explicit request:
 
 ```sh
 playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --retry-uncertain
@@ -406,13 +401,12 @@ playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --discard-uncertain
 
 Retry reads no input and reuses the byte-exact recorded turn and its exact
 attempted Captain, player, and per-role model, effort, and fast-mode settings;
-current config cannot retune that attempt, and retry may duplicate external
-effects. Discard
+current config cannot retune that attempt. A saved preparation point retains completed steps. Without one, recorded repository changes or an unresolved operation prevent whole-turn replay; repository evidence does not prove the absence of outside effects. Discard
 reads no input and runs no model: it restores the exact prior settled boundary,
 or deletes a never-settled fresh session, while abandoning the attempted work.
 An interrupted interactive turn uses the same uncertain record and these
 headless recovery commands. Discard preserves the attempt's replay history and
-refuses if the effect ledger has advanced beyond the prior checkpoint.
+refuses if the effect ledger has advanced beyond the prior checkpoint or preparation has a saved recovery point. It does not undo files or commits. Captain never selects discard automatically.
 
 Stop old writers before upgrading. When using the ordinary `~/.spex/sessions`
 default, the CLI imports sessions from

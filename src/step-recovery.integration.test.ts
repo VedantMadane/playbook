@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assign, createMachine } from 'xstate';
 import { describe, expect, it } from 'vitest';
-import { createXStatePlaybookRuntime, RUNTIME_ABI } from './xstate-runtime.js';
+import { assertPlaybookEffectLedger, createXStatePlaybookRuntime, isPlaybookEffectLedgerMonotonicExtension, RUNTIME_ABI } from './xstate-runtime.js';
 import { createWorktreeHostCapabilities } from '../reference/sdlc/code.playbook/host-capabilities.js';
 import type {
   PlaybookPorts,
@@ -127,8 +127,11 @@ const createRuntime = createXStatePlaybookRuntime(machine, {
 
 describe('interrupted-step recovery with real Git', () => {
   for (const restored of [false, true])
-    for (const failedJudge of [false, true])
-      it(`preserves the commit after ${failedJudge ? 'judge network interruption' : 'player network interruption'} (${restored ? 'restored' : 'live'})`, async () => {
+    for (const failureKind of ['player', 'judge', 'files', 'missing-transition']) {
+      const failedJudge = failureKind === 'judge';
+      const unwantedFiles = failureKind === 'files';
+      const missingTransition = failureKind === 'missing-transition';
+      it(`preserves the commit after ${failureKind} failure (${restored ? 'restored' : 'live'})`, async () => {
         const cwd = await mkdtemp(join(tmpdir(), 'playbook-step-recovery-'));
         const git = (...args: string[]) =>
           execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -148,8 +151,19 @@ describe('interrupted-step recovery with real Git', () => {
           });
           let loseAcknowledgement = false;
           let judgeCalls = 0;
+          let injectDrift = false;
           const hostCapabilities = {
             ...baseCapabilities,
+            repository: {
+              ...baseCapabilities.repository,
+              async acquire(options: { signal: AbortSignal }) {
+                const claim = await baseCapabilities.repository.acquire(options);
+                return { assertOwner: () => claim.assertOwner(), async release() {
+                  await claim.release();
+                  if (injectDrift) { injectDrift = false; await writeFile(join(cwd, 'late-change'), 'concurrent work'); }
+                } };
+              },
+            },
             effectLedger: {
               snapshot: () => baseCapabilities.effectLedger.snapshot(),
               writeAhead: async (commands: any) => {
@@ -175,15 +189,23 @@ describe('interrupted-step recovery with real Git', () => {
                 git('commit', '-qm', 'first step');
                 return { status: 'ok', finalText: 'First step committed.' };
               }
-              if (fail && !failedJudge)
+              if (fail && unwantedFiles) {
+                await writeFile(join(cwd, 'intermediate-output'), 'generated');
+                return { status: 'ok', finalText: 'Check passed.' };
+              }
+              if (fail && !failedJudge && !missingTransition)
                 return {
                   status: 'error',
                   error: 'ECONNRESET: injected player network interruption',
                 };
-              return { status: 'ok', finalText: 'Check passed.' };
+              return { status: 'ok', finalText: missingTransition ? 'Boss must decide whether to keep the data; no declared path requests that decision.' : 'Check passed.' };
             },
-            callJudge: async () => {
+            callJudge: async (prompt) => {
               judgeCalls++;
+              if (missingTransition && calls.length === 2) {
+                expect(prompt).toContain('If no declared outcome matches');
+                return '{"blocked":"Boss must choose whether to keep the data, but the playbook offers only done."}';
+              }
               if (fail && failedJudge)
                 throw new Error(
                   'ECONNRESET: injected judge network interruption',
@@ -263,14 +285,53 @@ describe('interrupted-step recovery with real Git', () => {
             await runtime.restore!(session, snapshot);
             expect(calls).toHaveLength(failedJudge ? 1 : 2);
           }
-          const actionId = failedJudge ? 'retry:adjudication' : 'retry:step';
+          if (missingTransition) {
+            expect(judgeCalls).toBe(2);
+            const boundary = hostCapabilities.effectLedger.snapshot().boundaries[1]!;
+            expect(boundary.semanticCandidate).toEqual({ blocked: 'Boss must choose whether to keep the data, but the playbook offers only done.' });
+            expect(boundary.correctionBudget.spent).toBe(false);
+            expect(runtime.describe!().recovery?.evidence).toMatchObject({ savedPlayerText: expect.stringContaining('Boss must decide') });
+            expect(runtime.describe!().lastError).toMatchObject({ cause: { code: 'runtime-defect', evidence: { reason: expect.stringContaining('No declared outcome matches') } } });
+            expect(calls).toHaveLength(2);
+            return;
+          }
+          let actionId = failedJudge ? 'retry:adjudication' : unwantedFiles ? 'retry:restored-step' : 'retry:step';
           expect(runtime.describe!().actions).toContainEqual({
             id: actionId,
             label: failedJudge
               ? 'Retry assessment of the saved result'
-              : 'Retry: Check the completed commit',
+              : unwantedFiles ? 'Restore the repository and retry the read-only step' : 'Retry: Check the completed commit',
             standing: 'ready',
           });
+          if (unwantedFiles) {
+            const original = hostCapabilities.effectLedger.snapshot().boundaries[1]!;
+            expect(await runtime.apply!({ actionId, key: 'before-repair', signal: new AbortController().signal }))
+              .toMatchObject({ disposition: 'failed' });
+            expect(calls).toHaveLength(2);
+            await rm(join(cwd, 'intermediate-output'));
+            expect(runtime.describe!().recovery?.preparation).toContain('read-only');
+            expect(original.physicalReceipt?.classification).toBe('concurrent-or-foreign-change');
+            for (const amendment of [
+              { restored: original.after },
+              { restored: original.baseline, dispositions: ['one-descendant-commit'] },
+              { restored: original.baseline, cohortId: randomUUID() },
+              { restored: original.baseline, logicalOperationId: randomUUID() },
+              { restored: original.baseline, physicalReceipt: undefined },
+            ]) {
+              const corrupted = JSON.parse(JSON.stringify(hostCapabilities.effectLedger.snapshot()));
+              Object.assign(corrupted.boundaries[1], amendment);
+              expect(() => assertPlaybookEffectLedger(corrupted)).toThrow();
+            }
+            if (!restored) {
+              injectDrift = true;
+              expect(await runtime.apply!({ actionId, key: 'drift-after-check', signal: new AbortController().signal })).toMatchObject({ disposition: 'failed' });
+              expect(calls).toHaveLength(2);
+              actionId = 'retry:step';
+              expect(await runtime.apply!({ actionId, key: 'still-drifted', signal: new AbortController().signal })).toMatchObject({ disposition: 'failed' });
+              expect(calls).toHaveLength(2);
+              await rm(join(cwd, 'late-change'));
+            }
+          }
           fail = false;
           if (failedJudge) {
             for (const invalid of ['not JSON', '{"guard":"unknown"}']) {
@@ -316,13 +377,22 @@ describe('interrupted-step recovery with real Git', () => {
             key: 'recover-once',
             signal: new AbortController().signal,
           });
-          expect(receipt).toMatchObject({
+          expect(receipt, JSON.stringify(receipt)).toMatchObject({
             disposition: 'executed',
             run: { outcome: 'terminal' },
           });
           expect(calls).toHaveLength(failedJudge ? 2 : 3);
           if (!failedJudge) expect(calls[2]).toBe(calls[1]);
           expect(calls.at(-1)).toContain('first-completed');
+          if (unwantedFiles) {
+            const saved = hostCapabilities.effectLedger.snapshot().boundaries[1]!;
+            expect(saved.physicalReceipt?.classification).toBe('concurrent-or-foreign-change');
+            expect(saved.restored).toEqual(saved.baseline);
+            const current = hostCapabilities.effectLedger.snapshot();
+            const removed = JSON.parse(JSON.stringify(current));
+            delete removed.boundaries[1].restored;
+            expect(isPlaybookEffectLedgerMonotonicExtension(current as any, removed)).toBe(false);
+          }
           expect(git('rev-list', '--count', 'HEAD')).toBe('2');
           expect(
             await runtime.apply!({
@@ -337,4 +407,5 @@ describe('interrupted-step recovery with real Git', () => {
           await rm(cwd, { recursive: true, force: true });
         }
       });
+    }
 });

@@ -3439,6 +3439,7 @@ export async function createWorktreeHostCapabilities(options = {}) {
           observationOptions,
         );
       },
+      acquire: (options = {}) => coordinator.acquire(cwd, options),
       runExclusive: (runOptions) =>
         runDurableExclusive({
           coordinator,

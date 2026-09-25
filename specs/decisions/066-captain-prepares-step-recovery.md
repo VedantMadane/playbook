@@ -18,7 +18,14 @@ The procedure author should not need to describe exception handling, and neither
 ## Decision
 
 - Ordinary Captain decisions, replies, and adjudication remain tool-free.
-- An explicit Boss recovery request may select one `recover` action: prepare the current leaf, then use its validated continuation.
+- Starting or continuing a task authorizes bounded preparation of its next step; the host may select the same `recover` operation after a recoverable stop without asking Boss to repeat that authorization.
+- Recovery is a contract between the host and the runtime, not a catalog of repair tools or error strings: the runtime supplies the interrupted task and an available continuation, Captain prepares prerequisites with its configured tools, and the runtime checks whether that continuation is now valid.
+- One Boss turn permits at most two automatic recovery attempts and at most five minutes of preparation in total; an unchanged failure may be retried only once, and cancellation stops recovery.
+- A real question requiring a product decision or new authority remains for Boss; a question already answered by the task may continue using that exact task instruction.
+- A missing or contradictory workflow transition is a playbook defect to explain to Boss, never permission to invent a state, report success, or keep retrying.
+  Governed judgment can report that no result fits; this preserves its explanation without forcing an outcome or spending a structural correction.
+- Repository observations do not prove that an external publication or other outside action is safe to repeat.
+  Captain checks that evidence before declaring preparation ready and asks Boss if repetition cannot be shown safe.
 - Preparation uses a fresh Captain call with the configured permissions, the exact Boss instruction, and runtime-owned interrupted-step context.
   It may inspect and repair prerequisites, but may not perform the specialist's remaining task, invent an outcome, select an arbitrary state, edit session storage, or rewrite/discard work without Boss authorization.
 - The shared runtime captures the current invocation before calling its actor and retains that checkpoint with a parked failure or Boss question.
@@ -29,6 +36,13 @@ The procedure author should not need to describe exception handling, and neither
 - Preparation does not prove completion or override repository-effect evidence.
   After preparation, the host re-reads the runtime's controls; a pending question receives the original Boss input, and a failed invocation uses the runtime's recovery action.
   A failure or unsatisfied continuation stays parked with its explanation.
+- A read-only invocation that changed the worktree may be retried after preparation restores its exact original repository observation with no commit movement.
+  The host appends that restoration separately from the original receipt; it authorizes another read-only invocation, not acceptance of the failed result.
+- An unexpected child-runtime exception preserves a valid parked child and its parents instead of converting it to a completed workflow failure.
+- Preparation saves the current parked stack before tool use, so interruption resumes that step rather than the original turn selection.
+  The last settled controller and journal remain the conversational baseline; the attempted turn remains in replay.
+- Uncertain-turn recovery never chooses discard automatically.
+  Without a saved preparation point, a continuation may retry only after the existing effect checks prove whole-turn replay safe; otherwise it explains the missing evidence instead of guessing whether work completed.
 - Recovery is host/runtime behavior, independent of individual playbook source and compiler output.
   Existing checkpoints without the new optional invocation checkpoint keep their existing advertised controls.
 

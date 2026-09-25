@@ -94,6 +94,10 @@ class ScriptedAdapter implements AgentAdapter {
     prompt: string,
     _options?: AgentOptions,
   ): AsyncGenerator<AgentEvent, void, void> {
+    if (prompt.includes('You are Captain preparing an interrupted playbook')) {
+      yield createEvent('done', this.agent, { status: 'success', result: '{"status":"blocked","summary":"This fixture requires Boss input before continuing."}', usage: { toolUses: 0 }, durationMs: 1 }, 'preparation');
+      return;
+    }
     // Every Captain call is hidden control work, so the composer markers —
     // which this test's own scripted Captain sends — and the runtime's own
     // classifier marker decide first; what is left under the hidden-control
@@ -339,7 +343,7 @@ describe('headless failure retry across a continued session (DR-034)', () => {
     expect(receipts.at(-1)).toMatchObject({
       status: 'ok',
       receipt: { disposition: 'executed' },
-      facts: ['Applied "retry:START_CODE" on /code.'],
+      facts: expect.arrayContaining(['Applied "retry:START_CODE" on /code.']),
     });
     expect(ScriptedAdapter.playerCalls).toBe(2);
     expect(secondOut.text()).toContain('The retry ran');
@@ -458,7 +462,7 @@ describe('headless failure retry across a continued session (DR-034)', () => {
     expect(receipts.at(-1)).toMatchObject({
       status: 'ok',
       receipt: { disposition: 'executed' },
-      facts: ['Applied "retry:START_CODE" on /code.'],
+      facts: expect.arrayContaining(['Applied "retry:START_CODE" on /code.']),
     });
     expect(ScriptedAdapter.playerCalls).toBe(3);
     const recovered = await record();

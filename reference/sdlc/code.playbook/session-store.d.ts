@@ -135,6 +135,7 @@ export interface SessionRecovery {
     readonly markedAt: string;
     readonly attemptedExecutionProjection: SessionExecutionProjection;
     readonly abandonment?: Readonly<Record<string, any>>;
+    readonly recovery?: { readonly snapshot: SessionSnapshot; readonly instruction: string };
   };
 }
 export interface SessionReplayCheckpoint {
@@ -215,6 +216,7 @@ export interface PlaybookSessionLifecycle extends PlaybookSessionLease {
   abandonFreshSettled(options: { expected: SessionRecovery }): Promise<boolean>;
   beginTurn(options: { input: string; attemptId: string; attemptedExecutionProjection: SessionExecutionProjection }): Promise<SessionRecovery>;
   beginRetry(options: { expectedAttemptId: string; nextAttemptId: string }): Promise<SessionRecovery>;
+  checkpointRecovery(point: { snapshot: SessionSnapshot; instruction: string }): Promise<void>;
   settle(options: { attemptId: string; snapshot: SessionSnapshot; unresolvedEffects: readonly SessionUnresolvedEffect[]; retentionUpdates?: readonly SessionRetentionUpdate[] }): Promise<SessionRecovery>;
   discard(options: { attemptId: string }): Promise<SessionRecovery | undefined>;
   beginUnresolvedEffectAbandonment(options: any): Promise<any>;

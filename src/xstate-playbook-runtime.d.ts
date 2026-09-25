@@ -196,6 +196,13 @@ interface XStateRepositoryDeferredRestoreResult {
 }
 type XStateEffectBoundarySeed = Omit<PlaybookEffectBoundaryStart, 'playbookId' | 'canonicalWorktree' | 'baseline' | 'cohortId'>;
 export interface XStateRepositoryCapability {
+    observe?(): Promise<PlaybookRepositoryReceipt['baseline']>;
+    acquire?(options: {
+        readonly signal: AbortSignal;
+    }): Promise<{
+        assertOwner(): Promise<void>;
+        release(): Promise<void>;
+    }>;
     runExclusive<T>(options: {
         readonly signal: AbortSignal;
         readonly effectBoundary: XStateEffectBoundarySeed;

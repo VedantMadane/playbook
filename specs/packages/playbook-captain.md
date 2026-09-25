@@ -407,7 +407,7 @@ A missing, empty, or non-string `input` shall settle `rejected` with a
 reason and no effect at the controller port, and shall be a malformed
 required payload field for decision validation and its corrective
 re-ask ([[captain-playbook-18](captain-playbook.md#captain-playbook-18)]).
-The shell shall execute at most one validated action per Boss turn and settle
+The shell shall execute at most one validated controller selection per Boss turn, permit its bounded automatic prerequisite recovery [[recovery-14](recovery.md#recovery-14)], and settle
 the selection with `status`, outcome-report facts, the required exact `unresolvedEffects` list of [[playbook-captain-58](#playbook-captain-58)], an optional rejection
 reason, the receipt where a `runtime` action executed, and the resulting
 `leafStateSummary` ([[playbook-captain-20](#playbook-captain-20)]); settlements shall carry no

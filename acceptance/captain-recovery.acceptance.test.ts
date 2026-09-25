@@ -84,7 +84,7 @@ const machine = createMachine(
             role: 'worker',
             sourceItem: 'FLOW-2',
             prompt: `RECOVERY_LIVE_SECOND: ${context.task}; ${context.prior}. Run node check.mjs and report its exact output. Do not write or commit any files. The required ignored local environment marker is .runtime/ready, prepared by Captain after the interruption.`,
-            result: { done: 'The check is complete.' },
+            result: { done: 'The check confirms the task can finish without any unresolved Boss decision.' },
           }),
           onDone: {
             target: 'done',
@@ -134,6 +134,7 @@ const createRuntime = createXStatePlaybookRuntime(machine, {
 
 class LocalClaude extends ClaudeCodeAdapter {
   static interruptJudge = false;
+  static interruptPreparation: (() => void) | undefined;
   async *run(
     prompt: string,
     options?: AgentOptions,
@@ -156,7 +157,15 @@ class LocalClaude extends ClaudeCodeAdapter {
       );
       return;
     }
-    yield* super.run(prompt, options);
+    for await (const event of super.run(prompt, options)) {
+      if (prompt.includes('You are Captain preparing an interrupted playbook') && event.type === 'done' && LocalClaude.interruptPreparation) {
+        const interrupt = LocalClaude.interruptPreparation;
+        LocalClaude.interruptPreparation = undefined;
+        interrupt();
+        throw new Error('ECONNRESET: interrupted after preparation tools ran');
+      }
+      yield event;
+    }
   }
   constructor() {
     super({
@@ -212,11 +221,12 @@ class InterruptedCodex extends CodexAdapter {
     yield* super.run(prompt, options);
   }
 }
-it.each(['player', 'judge'])(
+it.each(['player', 'judge', 'files', 'preparation', 'missing-transition'])(
   'Captain recovers the real-model %s interruption without a repeated commit',
   async (failure) => {
     LocalClaude.interruptJudge = failure === 'judge';
-    InterruptedCodex.interrupted = failure === 'judge';
+    InterruptedCodex.interrupted = ['judge', 'files', 'missing-transition'].includes(failure);
+    LocalClaude.interruptPreparation = undefined;
     InterruptedCodex.firstCalls = 0;
     InterruptedCodex.secondCalls = 0;
     const root = await mkdtemp(join(tmpdir(), 'captain-recovery-live-'));
@@ -234,6 +244,20 @@ it.each(['player', 'judge'])(
       join(cwd, 'check.mjs'),
       "import {readFileSync} from 'node:fs'; if(readFileSync('.runtime/ready','utf8').trim()!=='ready') throw Error('missing environment'); console.log('RECOVERY_LIVE_OK');\n",
     );
+    if (failure === 'judge') {
+      await mkdir(join(cwd, '.runtime'));
+      await writeFile(join(cwd, '.runtime/ready'), 'ready');
+    }
+    if (failure === 'missing-transition') {
+      await mkdir(join(cwd, '.runtime'));
+      await writeFile(join(cwd, '.runtime/ready'), 'ready');
+      await writeFile(join(cwd, 'check.mjs'), "console.log('Cannot finish: Boss must choose whether to keep or delete data. This playbook offers only done and has no path for requesting that decision.');\n");
+    }
+    if (failure === 'files') {
+      await mkdir(join(cwd, '.runtime'));
+      await writeFile(join(cwd, '.runtime/ready'), 'ready');
+      await writeFile(join(cwd, 'check.mjs'), "import {existsSync,writeFileSync} from 'node:fs'; if(!existsSync('.runtime/no-cache')) writeFileSync('scratch-output','generated check cache'); console.log('RECOVERY_LIVE_OK');\n");
+    }
     git('add', '.');
     git('commit', '-qm', 'fixture');
     const registry = {
@@ -290,36 +314,36 @@ playbooks:
     });
     console.log(`Live recovery evidence: ${root}`);
     try {
-      const broken = await controller.handleBossTurn(
-        '/recover-flow Verify exact-step recovery',
-      );
-      await writeFile(
-        join(root, 'broken.json'),
-        JSON.stringify(broken, null, 2),
-      );
-      expect(broken.snapshot.frames?.[0]?.runtime.state.stateId).toBe('failed');
-      expect(
-        broken.snapshot.frames?.[0]?.runtime.recoveryCheckpoint?.stateId,
-      ).toBe(failure === 'judge' ? 'first' : 'second');
-      expect(git('rev-list', '--count', 'HEAD')).toBe('2');
-      const firstHead = git('rev-parse', 'HEAD');
-      const sessionId = controller.sessionId;
-      await controller.dispose();
-      controller = await openSessionHost({
-        store,
-        mode: 'continue',
-        sessionId,
-        config,
-        loadModule,
-        adapterImports,
-      });
-      const recovered = await controller.handleBossTurn(
-        'Captain, fix the missing local prerequisite: create .runtime/ready containing ready, verify it, then resume the interrupted step. Preserve the completed first commit and do not create a commit for preparation.',
-      );
-      await writeFile(
-        join(root, 'recovered.json'),
-        JSON.stringify(recovered, null, 2),
-      );
+      if (failure === 'preparation') LocalClaude.interruptPreparation = () => controller.host.abortActiveTurn();
+      const task = '/recover-flow Verify exact-step recovery. Prepare required local settings automatically. Generated check caches are disposable after preserving a copy; keep tracked source and completed commits unchanged.';
+      let recovered;
+      if (failure === 'preparation') {
+        await expect(controller.handleBossTurn(task)).rejects.toThrow();
+        const broken = await controller.read();
+        await writeFile(join(root, 'broken.json'), JSON.stringify(broken, null, 2));
+        expect(broken?.uncertain?.recovery?.snapshot.frames?.[0]?.runtime.recoveryCheckpoint?.stateId).toBe('second');
+        expect(git('rev-list', '--count', 'HEAD')).toBe('2');
+        const id = controller.sessionId;
+        await controller.dispose();
+        controller = await openSessionHost({ store, mode: 'recover', sessionId: id, config, loadModule, adapterImports });
+        recovered = await controller.recover();
+      } else {
+        recovered = await controller.handleBossTurn(task);
+      }
+      await writeFile(join(root, 'recovered.json'), JSON.stringify(recovered, null, 2));
+      if (failure === 'missing-transition') {
+        expect(recovered.snapshot.mode).toBe('engaged.parked');
+        expect(recovered.snapshot.lastSettlementStatus).toBe('failed');
+        expect(InterruptedCodex.firstCalls).toBe(1);
+        expect(InterruptedCodex.secondCalls).toBe(1);
+        const second = recovered.effectLedger.boundaries[1];
+        expect(second.semanticCandidate).toHaveProperty('blocked');
+        expect(second.correctionBudget.spent).toBe(false);
+        const facts = recovered.snapshot.journal.filter((entry) => entry.kind === 'outcome');
+        expect(JSON.stringify(facts)).toMatch(/preparation reported.*blocked.*(transition|path|playbook|outcome)/i);
+        expect(git('rev-list', '--count', 'HEAD')).toBe('2');
+        return;
+      }
       expect(await readFile(join(cwd, '.runtime/ready'), 'utf8')).toMatch(
         /^ready\s*$/,
       );
@@ -328,7 +352,8 @@ playbooks:
       expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
       expect(InterruptedCodex.firstCalls).toBe(1);
       expect(InterruptedCodex.secondCalls).toBe(failure === 'judge' ? 1 : 2);
-      expect(git('rev-parse', 'HEAD')).toBe(firstHead);
+      expect(git('rev-list', '--count', 'HEAD')).toBe('2');
+      if (failure === 'files') expect(recovered.effectLedger.boundaries.some((boundary) => boundary.restored !== undefined)).toBe(true);
       expect(git('status', '--porcelain')).toBe('');
     } finally {
       await controller.dispose();

@@ -40,7 +40,7 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
     // Frozen historical inputs remain unshipped reproduction artifacts.
     expect(sha(read('slc/materialize-link.mjs'))).toBe('5024778548509370d899f3709829fd7609d67bc4fe5d72b2c76d5d0ab26f59eb');
     expect(sha(read('scripts/experiments/materialize-link-v2.mjs'))).toBe('fe7336bc4c1511c4170ac3cdaeda4ffc30f3848b40ae7301f6660c20067e58e0');
-    expect(sha(full)).toBe('313b6fbcd9ca42f124971b3012dbc930daf2a5be5be63da3796458afc783be18');
+    expect(sha(full)).toBe('55886b313087f65d730168275794dccdaa843a8dc9bc7cd42132590e75ab5466');
     // Recovery is additive; strip its exact additions before auditing the
     // frozen pre-recovery experiment contracts below.
     const recoveryAdditions = [
@@ -50,7 +50,20 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
       "  recovery?: PlaybookRecoveryOffer;\n",
       "The shared runtime owns the optional recovery context and invocation checkpoint; linked artifacts need no recovery-specific source, event, or actor.\n"
 ];
-    let beforeRecovery = full;
+    let beforeRecovery = full
+      .replace('one closed reason from `no-matching-outcome`, `missing-presentation-evidence`', 'one closed reason from `missing-presentation-evidence`')
+      .replace('  preparation?: string;\n  evidence?: JsonValue;\n', '')
+      .replace('  payload field. The governed form also permits the blocked report above when no outcome matches.\n  Both forms exclude the runtime-injected direct-Captain\n', '  payload field. Both forms exclude the runtime-injected direct-Captain\n')
+      .replace([
+        'When no outcome matches, a governed judge may instead return exactly',
+        '`{ blocked: <nonempty explanation> }`.',
+        'The shared reconciler retains this candidate and returns `no-matching-outcome`',
+        'with its explanation as a `runtime-defect` cause; it authorizes neither a',
+        'corrective judge nor an FSM outcome.',
+        'Both shared and bespoke judge prompts shall state this alternative explicitly',
+        'instead of forcing a match when the declared results are incomplete.',
+        '',
+      ].join('\n'), '');
     for (const addition of recoveryAdditions) {
       expect(beforeRecovery.split(addition)).toHaveLength(2);
       beforeRecovery = beforeRecovery.replace(addition, '');

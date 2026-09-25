@@ -48,7 +48,7 @@ export interface OpenSessionHostOptions {
   readonly store?: SharedSessionStore;
   readonly sessionsDir?: string;
   readonly sessionId?: string;
-  readonly mode?: 'new' | 'continue' | 'retry';
+  readonly mode?: 'new' | 'continue' | 'retry' | 'recover';
   readonly cwd?: string;
   readonly config?: SessionExecutionProjection;
   readonly plan?: any;
@@ -98,6 +98,8 @@ export interface SessionHostController {
    */
   submitShellAction(actionId: string): Promise<SessionRecovery>;
   retry(): Promise<SessionRecovery>;
+  /** Resume a stopped step, or safely retry the recorded uncertain turn. Never discards work. */
+  recover(input?: string): Promise<SessionRecovery>;
   dispose(): Promise<void>;
 }
 export declare function openSessionHost(options: OpenSessionHostOptions): Promise<SessionHostController>;

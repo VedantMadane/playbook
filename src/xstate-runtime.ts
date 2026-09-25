@@ -1364,12 +1364,11 @@ export type PlaybookReconciledSemanticOutput = Readonly<
 /** Retained presentation and semantic evidence, kept separate from output. */
 export interface PlaybookRetainedSemanticEvidence {
   readonly finalText?: string;
-  readonly semanticCandidate: Readonly<Record<string, string>> & {
-    readonly guard: string;
-  };
+  readonly semanticCandidate: Readonly<Record<string, string>>;
 }
 
 export type PlaybookSemanticReconciliationReason =
+  | 'no-matching-outcome'
   | 'missing-presentation-evidence'
   | 'missing-repository-receipt'
   | 'invalid-repository-receipt'
@@ -1468,7 +1467,7 @@ function snapshotSemanticCandidate(
 }
 
 function retainedSemanticEvidence(
-  candidate: Readonly<Record<string, string>> & { readonly guard: string },
+  candidate: Readonly<Record<string, string>>,
   finalText: unknown,
 ): PlaybookRetainedSemanticEvidence {
   return Object.freeze({
@@ -1654,6 +1653,23 @@ function unresolvedSemanticEvidence(
 export function reconcilePlaybookSemanticEvidence(
   input: PlaybookSemanticEvidenceInput,
 ): PlaybookSemanticReconciliation {
+  let report: JsonValue;
+  try {
+    report = snapshotJsonValue(input.semanticCandidate, 'semantic candidate');
+  } catch (error) {
+    semanticCandidateStructureError(`must be detached plain JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (isRecord(report) && Object.keys(report).length === 1 &&
+      typeof report.blocked === 'string' && report.blocked.trim().length > 0) {
+    return unresolvedSemanticEvidence(
+      'no-matching-outcome',
+      retainedSemanticEvidence(report as Readonly<Record<string, string>>, input.finalText),
+      assertPlaybookFailureCause({
+        code: 'runtime-defect',
+        evidence: { reason: `No declared outcome matches: ${report.blocked}` },
+      }),
+    );
+  }
   const { candidate, outcome } = snapshotSemanticCandidate(
     input.semanticCandidate,
     input.outcomes,
@@ -1859,6 +1875,7 @@ function effectBoundary(value: unknown, index: number): PlaybookEffectBoundary {
       'baseline',
       'after',
       'physicalReceipt',
+      'restored',
       'finalText',
       'semanticCandidate',
       'initialSemanticCandidate',
@@ -1938,6 +1955,15 @@ function effectBoundary(value: unknown, index: number): PlaybookEffectBoundary {
   }
   if (own(value, 'finalText') && typeof value.finalText !== 'string') {
     throw new TypeError(`${path}.finalText must be a string`);
+  }
+  if (own(value, 'restored')) {
+    const restored = effectObservation(value.restored, `${path}.restored`);
+    if (!jsonValuesEqual(restored as unknown as JsonValue, baseline as unknown as JsonValue) ||
+        !isRecord(value.physicalReceipt) || after?.head !== baseline.head ||
+        (value.dispositions as string[]).some((item) => item !== 'unchanged') ||
+        value.cohortId !== undefined || value.logicalOperationId !== undefined) {
+      throw new TypeError(`${path}.restored requires a standalone read-only call restored exactly without commit movement`);
+    }
   }
   if (own(value, 'initialSemanticCandidate')) {
     if (
@@ -2359,6 +2385,7 @@ export function isPlaybookEffectLedgerMonotonicExtension(
   const boundaryEvidenceKeys = [
     'after',
     'physicalReceipt',
+    'restored',
     'finalText',
     'initialSemanticCandidate',
   ] as const;

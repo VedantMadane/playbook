@@ -275,6 +275,8 @@ export interface PlaybookEffectBoundary {
     readonly baseline: PlaybookRepositoryObservation;
     readonly after?: PlaybookRepositoryObservation;
     readonly physicalReceipt?: PlaybookRepositoryReceipt;
+    /** A later exact restoration permits replay of this standalone read-only call. */
+    readonly restored?: PlaybookRepositoryObservation;
     readonly finalText?: string;
     readonly semanticCandidate?: JsonValue;
     readonly initialSemanticCandidate?: JsonValue;
@@ -286,7 +288,7 @@ export interface PlaybookEffectBoundary {
     readonly logicalOperationId?: string;
 }
 /** One physical boundary before the host assigns attempt and sequence data. */
-export type PlaybookEffectBoundaryStart = Omit<PlaybookEffectBoundary, 'sequence' | 'attemptId' | 'attemptNumber' | 'after' | 'physicalReceipt' | 'finalText' | 'semanticCandidate' | 'initialSemanticCandidate'>;
+export type PlaybookEffectBoundaryStart = Omit<PlaybookEffectBoundary, 'sequence' | 'attemptId' | 'attemptNumber' | 'after' | 'physicalReceipt' | 'restored' | 'finalText' | 'semanticCandidate' | 'initialSemanticCandidate'>;
 /** One deferred logical operation spanning its ordered physical boundaries. */
 export interface PlaybookEffectLogicalOperation {
     readonly sequence: number;
@@ -409,6 +411,10 @@ export interface PlaybookControlAction {
 export interface PlaybookRecoveryOffer {
     prompt: string;
     description?: string;
+    /** Runtime-owned conditions to satisfy; these never authorize task completion. */
+    preparation?: string;
+    /** Saved observations and result choices for diagnosing the stopped step. */
+    evidence?: JsonValue;
     continuation: {
         kind: 'reply';
     } | {

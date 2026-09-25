@@ -2298,8 +2298,9 @@ async function consume(): Promise<void> {
     await observeGitRepository('/repo');
   // @ts-expect-error a receipt classification is not a declared disposition
   await captureRepositoryReceipt(observation, { allowedDispositions: ['multiple-commits'] });
-  // @ts-expect-error the facade carries no lease acquisition
-  capabilities.repository.acquire;
+  const claim = await capabilities.repository.acquire({ signal });
+  await claim.assertOwner();
+  await claim.release();
   // @ts-expect-error the facade carries no cohort transaction
   capabilities.repository.runCohort;
   // @ts-expect-error the facade carries no session lease

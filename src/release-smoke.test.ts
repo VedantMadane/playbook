@@ -324,7 +324,7 @@ describe('deterministic packed release lane smoke', () => {
       expect(source).toContain(JSON.stringify(value));
     }
     expect(source).toContain(
-      "['identity', 'observe', 'runExclusive', 'runDeferred']",
+      "['identity', 'observe', 'acquire', 'runExclusive', 'runDeferred']",
     );
     expect(source).toContain("['snapshot', 'writeAhead']");
     expect(source).toContain("kind: 'replace-boundaries'");

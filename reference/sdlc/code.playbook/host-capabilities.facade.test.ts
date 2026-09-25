@@ -233,6 +233,7 @@ describe('createWorktreeHostCapabilities (playbook-cli-88)', () => {
       'repository',
     ]);
     expect(Object.keys(capabilities.repository).sort()).toEqual([
+      'acquire',
       'identity',
       'observe',
       'runDeferred',

@@ -2324,7 +2324,7 @@ describe('DECIDE deferred effect continuation', () => {
     };
   }
 
-  it('binds one cumulative operation and uses only its saved continuation', async () => {
+  it('binds the player identity and continues without a provider hint', async () => {
     const fixture = stagedFixture();
     await fixture.init();
 
@@ -2343,7 +2343,7 @@ describe('DECIDE deferred effect continuation', () => {
     expect(firstLedger.logicalOperations[0]).toMatchObject({
       originalBaseline: REPLAY_BASELINE,
       pendingQuestion: { question: 'Approve this checkpoint?' },
-      playerContinuation: 'coder-token-2',
+      playerContinuation: { v: 1, playerId: 'coder' },
     });
     expect(fixture.statuses).toContain(
       'coder asks: Approve this checkpoint?',
@@ -2362,8 +2362,8 @@ describe('DECIDE deferred effect continuation', () => {
       ledgerBeforeInvalid,
     );
 
-    // The durable binding, not a later store read, selects the continuation.
-    fixture.playerSessions.update('coder', 'foreign-token');
+    // A missing local provider hint must not invalidate a durable Boss wait.
+    fixture.playerSessions.restore({});
     await expect(
       fixture.runtime.handleBossInput({
         text: 'Yes, continue.',
@@ -2373,13 +2373,13 @@ describe('DECIDE deferred effect continuation', () => {
       outcome: 'quiescent',
       state: { stateId: 'awaitBossReply' },
     });
-    expect(fixture.playerCalls.at(-1)?.options.resume).toBe('coder-token-2');
+    expect(fixture.playerCalls.at(-1)?.options.resume).toBe(false);
     const repeated = fixture.harness.readEffectLedger();
     expect(repeated.logicalOperations[0]).toMatchObject({
       operationId,
       originalBaseline: REPLAY_BASELINE,
       pendingQuestion: { question: 'Approve the second checkpoint?' },
-      playerContinuation: 'coder-token-3',
+      playerContinuation: { v: 1, playerId: 'coder' },
     });
     expect(repeated.logicalOperations[0]?.boundaryIds).toHaveLength(2);
 
@@ -2391,11 +2391,13 @@ describe('DECIDE deferred effect continuation', () => {
     ).resolves.toMatchObject({ outcome: 'suspended' });
     expect(fixture.playerCalls.at(-1)?.options.resume).toBe('coder-token-3');
     const continuations = fixture.playerCalls.filter(
-      ({ options }) => options.freshPrompt !== undefined,
-    );
+      ({ roleId }) => roleId === 'coder',
+    ).slice(2);
     expect(continuations).toHaveLength(2);
     for (const call of continuations) {
-      for (const prompt of [call.prompt, call.options.freshPrompt]) {
+      for (const prompt of [call.prompt, call.options.freshPrompt].filter(
+        (value) => value !== undefined,
+      )) {
         expect(prompt).toContain('> Original topic: Choose the durable design.');
         expect(prompt).toContain(
           "> Reviewer's independent proposal: Reviewer proposal",
@@ -2540,7 +2542,7 @@ describe('DECIDE deferred effect continuation', () => {
     ).toMatchObject({
       checkpointRestorationEligible: true,
       pendingQuestion: { question: 'Approve this checkpoint?' },
-      playerContinuation: 'coder-token-2',
+      playerContinuation: { v: 1, playerId: 'coder' },
     });
 
     const parkedSnapshot = fixture.runtime.exportSnapshot?.();

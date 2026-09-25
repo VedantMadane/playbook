@@ -2553,6 +2553,8 @@ async function createLease({
   let released = false;
   let operationActive = false;
   let indeterminateEffectLedgerWrite;
+  let releasing = false;
+  const ownerChecks = new Set();
 
   const requireActive = () => {
     if (released) throw new Error('Captain session lease was already released');
@@ -2580,7 +2582,14 @@ async function createLease({
     return current;
   };
 
-  const assertOwner = () => runExclusive(assertOwnerUnchecked);
+  const assertOwner = () => {
+    if (releasing) return Promise.reject(new Error('Captain session lease is releasing'));
+    // This reads only the lease token. Parallel players must not compete
+    // for the mutation guard, but release must still join admitted reads.
+    const check = assertOwnerUnchecked();
+    ownerChecks.add(check);
+    return check.finally(() => ownerChecks.delete(check));
+  };
 
   const replayWriter = await createLeaseReplayWriter({
     sessionsDir,
@@ -3113,6 +3122,7 @@ async function createLease({
         ...settledAbandonmentMember(prior),
         uncertain: {
           baseUpdatedAt: prior.uncertain.baseUpdatedAt,
+          ...(prior.uncertain.recovery === undefined ? {} : { recovery: prior.uncertain.recovery }),
           input: prior.uncertain.input,
           attemptId: nextAttemptId,
           attemptNumber: prior.uncertain.attemptNumber + 1,
@@ -3607,6 +3617,23 @@ async function createLease({
       return record.effectLedger;
     });
 
+  const checkpointRecovery = (point) => runExclusive(async () => {
+    await assertOwnerUnchecked();
+    const prior = await readRecord(sessionId, { missing: 'undefined' });
+    if (prior?.state !== 'uncertain' || prior.uncertain.abandonment) {
+      throw new Error('Preparation requires an active uncertain turn');
+    }
+    if (!isDeepStrictEqual(point?.snapshot?.effectLedger, prior.effectLedger)) {
+      throw new Error('Preparation recovery point must contain the current effect ledger');
+    }
+    const record = validateCaptainSessionRecord(projectRecovery({
+      ...prior, uncertain: { ...prior.uncertain, recovery: point },
+    }));
+    await assertOwnerUnchecked();
+    await writeRecord(record, { noReplace: false });
+    await assertOwnerUnchecked();
+  });
+
   const discard = ({ attemptId } = {}) =>
     runExclusive(async () => {
       assertUuid(attemptId, 'Captain session attempt id');
@@ -3619,6 +3646,9 @@ async function createLease({
         throw new Error(
           'Captain session unresolved-effect abandonment must recover before discard',
         );
+      }
+      if (prior.uncertain.recovery !== undefined) {
+        throw new Error('Captain preparation may have changed prerequisites; resume its saved step instead of discarding');
       }
       if (!isDeepStrictEqual(prior.effectLedger, prior.snapshot.effectLedger)) {
         throw new Error(
@@ -3657,16 +3687,22 @@ async function createLease({
   const release = () => {
     replayWriter.closeAppendAdmission();
     return runExclusive(async () => {
-      await replayWriter.prepareRelease();
-      if (replayWriter.status().incomplete && previousManifest?.replay?.incomplete !== true) {
-        const record = await readRecord(sessionId, { missing: 'undefined' });
-        if (record !== undefined) await writeRecord(record, { noReplace: false });
+      releasing = true;
+      try {
+        await Promise.allSettled([...ownerChecks]);
+        await replayWriter.prepareRelease();
+        if (replayWriter.status().incomplete && previousManifest?.replay?.incomplete !== true) {
+          const record = await readRecord(sessionId, { missing: 'undefined' });
+          if (record !== undefined) await writeRecord(record, { noReplace: false });
+        }
+        const current = await assertOwnerUnchecked();
+        await retireObservedLease(sessionId, current);
+        released = true;
+        portableWriters.delete(sessionId);
+        return replayWriter.status();
+      } finally {
+        releasing = false;
       }
-      const current = await assertOwnerUnchecked();
-      await retireObservedLease(sessionId, current);
-      released = true;
-      portableWriters.delete(sessionId);
-      return replayWriter.status();
     });
   };
 
@@ -3691,6 +3727,7 @@ async function createLease({
     completeUnresolvedEffectAbandonment,
     recoverUnresolvedEffectAbandonment,
     writeEffectLedger,
+    checkpointRecovery,
     settle,
     discard,
     assertOwner,
@@ -4034,7 +4071,7 @@ function validateCanonicalCaptainSessionRecord(
     exactOptionalKeys(
       uncertain,
       UNCERTAIN_KEYS,
-      ['abandonment'],
+      ['abandonment', 'recovery'],
       'Captain session record uncertain',
     );
     if (uncertain.baseUpdatedAt !== null) {
@@ -4112,6 +4149,21 @@ function validateCanonicalCaptainSessionRecord(
       uncertain.attemptedExecutionProjection,
       artifactSchemas,
     );
+    if (uncertain.recovery !== undefined) {
+      const point = requireRecord(uncertain.recovery, 'Captain preparation recovery point');
+      rejectUnknownOrMissingKeys(point, ['snapshot', 'instruction'], 'Captain preparation recovery point');
+      assertAcceptedInput(point.instruction);
+      const prepared = assertPlaybookCaptainShellSnapshot(point.snapshot);
+      assertSnapshotMatchesStructure(prepared, structural, artifactSchemas);
+      if (prepared.mode !== 'engaged.parked' ||
+          !isDeepStrictEqual(prepared.captain, snapshot.captain) ||
+          !isDeepStrictEqual(prepared.journal, snapshot.journal) ||
+          !isDeepStrictEqual(prepared.sequences, snapshot.sequences) ||
+          !isPlaybookEffectLedgerMonotonicExtension(snapshot.effectLedger, prepared.effectLedger) ||
+          !isPlaybookEffectLedgerMonotonicExtension(prepared.effectLedger, effectLedger)) {
+        throw new Error('Captain preparation recovery point must retain the settled controller and current parked work');
+      }
+    }
     if (uncertain.baseUpdatedAt === null) {
       if (!isDeepStrictEqual(lastApplied, attempted)) {
         throw new Error(
@@ -4436,6 +4488,7 @@ const EFFECT_BOUNDARY_IDENTITY_KEYS = [
 const EFFECT_BOUNDARY_OPTIONAL_KEYS = [
   'after',
   'physicalReceipt',
+  'restored',
   'finalText',
   'semanticCandidate',
   'initialSemanticCandidate',
@@ -5018,6 +5071,7 @@ function assertMonotonicBoundaryReplacement(expected, next, path) {
   for (const key of [
     'after',
     'physicalReceipt',
+    'restored',
     'finalText',
     'initialSemanticCandidate',
   ]) {

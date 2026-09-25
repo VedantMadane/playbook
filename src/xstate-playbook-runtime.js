@@ -918,6 +918,7 @@ function buildGovernedJudgePrompt(input, finalText, outcomes, correction) {
         '```',
         '',
         'Pick exactly one declared `guard` and reply with exactly that outcome\'s reply shape below: `guard` plus its semantic-owned fields and nothing else.',
+        'If no declared outcome matches the player output, instead reply exactly {"blocked":"explain the missing outcome or contradictory requirements"}. Never force a match or invent a guard. A blocked reply pauses the playbook for Boss; it is not completion.',
         'A field listed as runtime-supplied is owned by presentation, effect, or runtime evidence; the runtime fills it itself, and a reply that includes one is structurally invalid.',
         '',
     ];
@@ -2432,7 +2433,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // cumulative receipt from its original baseline, not by its own step.
         function boundaryExcludesEffect(boundary) {
             return (boundary.logicalOperationId === undefined &&
-                boundary.physicalReceipt?.classification === 'unchanged');
+                (boundary.physicalReceipt?.classification === 'unchanged' || boundary.restored !== undefined));
         }
         function boundaryNeedsSemanticReconciliation(candidate, ledger) {
             if (!runtimeBoundaryIsOwned(candidate))
@@ -2487,7 +2488,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
             const candidate = reconstructedGovernedPrefixSequence === undefined
                 ? owned.at(-1)
                 : owned.find(({ sequence }) => sequence > reconstructedGovernedPrefixSequence);
-            if (candidate === undefined || candidate.sourceStateId !== state.stateId) {
+            if (candidate === undefined || candidate.restored !== undefined || candidate.sourceStateId !== state.stateId) {
                 return;
             }
             const persisted = persistedBoundaryReconciliation(candidate, ledger);
@@ -3579,7 +3580,10 @@ export function createXStatePlaybookRuntime(machine, spec) {
             return (boundaries.length > 0 &&
                 boundaries.every(({ physicalReceipt }) => physicalReceipt?.classification === 'unchanged'));
         }
+        let requiredRecoveryBaseline;
         function captureRecoveryCheckpoint(stateId, prompt) {
+            if (requiredRecoveryBaseline !== undefined)
+                return;
             // Capture after the entry emissions drain: the invocation is now a
             // real active child in XState's persisted snapshot, before host work.
             recoveryCheckpoint = undefined;
@@ -3607,7 +3611,45 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 .slice(recoveryCheckpoint.boundaryPrefix)
                 .every((boundary) => runtimeBoundaryIsOwned(boundary) &&
                 boundary.logicalOperationId === undefined &&
-                boundary.physicalReceipt?.classification === 'unchanged');
+                (boundary.physicalReceipt?.classification === 'unchanged' || boundary.restored !== undefined));
+        }
+        function repairableReadOnlyBoundary() {
+            if (!recoveryCheckpoint || !repositoryCapability?.observe || !repositoryCapability.acquire ||
+                retainedEffectReconciliationRequired || deferredReconciliationOperationId !== undefined)
+                return undefined;
+            const suffix = currentEffectLedger().boundaries.slice(recoveryCheckpoint.boundaryPrefix);
+            if (suffix.length !== 1)
+                return undefined;
+            const saved = suffix[0];
+            if (!runtimeBoundaryIsOwned(saved) || saved.restored !== undefined ||
+                saved.sourceStateId !== recoveryCheckpoint.stateId || saved.cohortId !== undefined ||
+                saved.logicalOperationId !== undefined || saved.dispositions.some((item) => item !== 'unchanged') ||
+                saved.physicalReceipt === undefined || saved.after?.head !== saved.baseline.head ||
+                saved.physicalReceipt.classification === 'unchanged' ||
+                [...unresolvedSemanticBoundaryIds].some((id) => id !== saved.boundaryId))
+                return undefined;
+            return saved;
+        }
+        async function confirmReadOnlyRestoration(saved, signal) {
+            const claim = await repositoryCapability.acquire({ signal });
+            try {
+                await claim.assertOwner();
+                const restored = snapshotJsonValue(await repositoryCapability.observe());
+                if (!isDeepStrictEqual(restored, saved.baseline)) {
+                    throw new Error(`${label} preparation has not restored the stopped step's repository; it remains paused`);
+                }
+                signal.throwIfAborted();
+                effectLedgerMirror = assertPlaybookEffectLedger(await effectLedgerCapability.writeAhead([
+                    { kind: 'replace-boundaries', replacements: [{ expected: saved, next: { ...saved, restored } }] },
+                ]));
+                if (!isDeepStrictEqual(effectLedgerMirror.boundaries.find(({ boundaryId }) => boundaryId === saved.boundaryId)?.restored, restored)) {
+                    throw new Error(`${label} repository restoration was not durably acknowledged`);
+                }
+                refreshUnresolvedSemanticReconciliation(effectLedgerMirror);
+            }
+            finally {
+                await claim.release();
+            }
         }
         // A completed commit with saved presentation needs only the missing
         // tool-free judgment. Never repeat the player to recover that evidence.
@@ -3980,7 +4022,15 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             // captured it under this exclusive claim. A host that supplies
                             // none states no pre-existing change, exactly as an empty
                             // baseline projection does.
-                            operation: (context) => runTracedPlayerCall(selectedResume, effectAuthorizedPreExistingBlock(effectBoundary, context?.baseline)),
+                            operation: async (context) => {
+                                if (requiredRecoveryBaseline !== undefined) {
+                                    if (!isDeepStrictEqual(snapshotJsonValue(context.baseline), requiredRecoveryBaseline)) {
+                                        throw new Error(`${label} repository changed after preparation; the stopped step remains paused`);
+                                    }
+                                    requiredRecoveryBaseline = undefined;
+                                }
+                                return runTracedPlayerCall(selectedResume, effectAuthorizedPreExistingBlock(effectBoundary, context?.baseline));
+                            },
                             completeEffectBoundary: completionEvidenceFor(input, roleId, playerId, signal, undefined),
                         });
                         return acknowledgeGovernedPlayerResult(exclusive, effectBoundary.boundaryId);
@@ -5131,6 +5181,13 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 return [];
             }
             const derived = [];
+            const repairable = state.stateId === 'failed' ? repairableReadOnlyBoundary() : undefined;
+            if (repairable !== undefined)
+                derived.push({
+                    action: { id: 'retry:restored-step', label: 'Restore the repository and retry the read-only step', standing: 'ready' },
+                    retryStep: true,
+                    restoreReadOnly: repairable,
+                });
             const judgment = state.stateId === 'failed' ? recoverableJudgment() : undefined;
             if (judgment !== undefined)
                 derived.push({
@@ -5990,9 +6047,20 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 const actions = deriveControlActions(snapshot).map(({ action }) => action);
                 const retry = actions.find(({ id, standing }) => id.startsWith('retry:') &&
                     (standing ?? 'ready') === 'ready');
+                const stoppedBoundary = recoveryCheckpoint === undefined ? undefined :
+                    currentEffectLedger().boundaries.slice(recoveryCheckpoint.boundaryPrefix).at(-1);
                 const recovery = recoveryCheckpoint === undefined ||
                     (pending === undefined && retry === undefined) ? undefined : {
                     prompt: recoveryCheckpoint.prompt,
+                    ...(stoppedBoundary === undefined ? {} : { evidence: snapshotJsonValue({
+                            declaredResults: stoppedBoundary.sourceOutcomeSchema,
+                            ...(stoppedBoundary.finalText === undefined ? {} : { savedPlayerText: stoppedBoundary.finalText }),
+                            ...(stoppedBoundary.semanticCandidate === undefined ? {} : { selectedResult: stoppedBoundary.semanticCandidate }),
+                            ...(stoppedBoundary.physicalReceipt === undefined ? {} : { repositoryReceipt: stoppedBoundary.physicalReceipt }),
+                        }) }),
+                    ...(repairableReadOnlyBoundary() === undefined ? {} : {
+                        preparation: `This read-only step changed the repository. Restore its exact original HEAD and visible files before retrying; do not accept its saved result. Preserve user work. You may put generated outputs aside and prevent their return using local environment or ignore settings. Original observation: ${JSON.stringify(repairableReadOnlyBoundary().baseline)}. Observed after the failed step: ${JSON.stringify(repairableReadOnlyBoundary().after)}.`,
+                    }),
                     ...(stateDescriptions.get(recoveryCheckpoint.stateId) === undefined ? {} :
                         { description: stateDescriptions.get(recoveryCheckpoint.stateId) }),
                     continuation: pending === undefined
@@ -6202,7 +6270,12 @@ export function createXStatePlaybookRuntime(machine, spec) {
                                         : 'quiescent');
                                 }
                                 else if (candidate.retryStep) {
+                                    if (candidate.restoreReadOnly !== undefined) {
+                                        await confirmReadOnlyRestoration(candidate.restoreReadOnly, signal);
+                                    }
                                     const checkpoint = recoveryCheckpoint;
+                                    requiredRecoveryBaseline = currentEffectLedger().boundaries
+                                        .slice(checkpoint.boundaryPrefix).find(({ restored }) => restored !== undefined)?.restored;
                                     stopActor();
                                     actor = buildActor(runtimePorts, checkpoint.machine);
                                     suppressInspectionEmissions = false;

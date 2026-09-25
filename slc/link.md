@@ -577,7 +577,7 @@ interface XStatePlaybookRuntimeConstruction<
 
 The shared type-only contract module shall export `PlaybookRepositoryDisposition`, `PlaybookRepositoryObservation`, `PlaybookRepositoryReceipt`, `PlaybookEffectBoundary`, `PlaybookEffectBoundaryStart`, `PlaybookEffectLogicalOperation`, `PlaybookEffectLedger`, `PlaybookEffectLedgerCommand`, `PlaybookEffectLedgerCommandBatch`, and `PlaybookEffectLedgerCapability`; the executable `@sublang/playbook/xstate-runtime` module shall export `assertPlaybookEffectLedger`, `emptyPlaybookEffectLedger`, and `isPlaybookEffectLedgerMonotonicExtension` over those types.
 That executable module shall also export the centralized schema-3 semantic surface: `PlaybookSemanticFieldAuthority`, `PlaybookSemanticOutcomeSpec`, `PlaybookSemanticEvidenceInput`, `PlaybookReconciledSemanticOutput`, `PlaybookRetainedSemanticEvidence`, `PlaybookSemanticReconciliationReason`, `PlaybookSemanticReconciliation`, `PlaybookSemanticCandidateStructureError`, and `reconcilePlaybookSemanticEvidence`.
-The pure reconciler shall accept the declared state-local outcomes, an unknown semantic candidate, and optional unknown `finalText`, repository receipt, and runtime-field evidence; shall return a detached frozen `resolved` or `deferred` decision with exact output and retained evidence, or an `unresolved` decision with retained evidence and one closed reason from `missing-presentation-evidence`, `missing-repository-receipt`, `invalid-repository-receipt`, `repository-disposition-mismatch`, `missing-effect-evidence`, `missing-runtime-evidence`, and `inconsistent-runtime-evidence`; and shall reserve `PlaybookSemanticCandidateStructureError` for candidate defects eligible for the bounded correction path rather than effect-evidence disagreement.
+The pure reconciler shall accept the declared state-local outcomes, an unknown semantic candidate, and optional unknown `finalText`, repository receipt, and runtime-field evidence; shall return a detached frozen `resolved` or `deferred` decision with exact output and retained evidence, or an `unresolved` decision with retained evidence and one closed reason from `no-matching-outcome`, `missing-presentation-evidence`, `missing-repository-receipt`, `invalid-repository-receipt`, `repository-disposition-mismatch`, `missing-effect-evidence`, `missing-runtime-evidence`, and `inconsistent-runtime-evidence`; and shall reserve `PlaybookSemanticCandidateStructureError` for candidate defects eligible for the bounded correction path rather than effect-evidence disagreement.
 The empty ledger shall be exactly `{ schemaVersion: 1, revision: 0, boundaries: [], logicalOperations: [] }`, and revision shall be zero if and only if both ordered ledgers are empty.
 The validator shall capture the complete supplied ledger once as detached frozen JSON and enforce every closed member, identity, ordering, receipt, cross-reference, correction-budget, and logical-operation invariant represented above.
 One optional host-owned UUID `cohortId` shall identify every member of exactly one contiguous, distinct-role, all-`unchanged` physical cohort in declared role order; every member shall share attempt, playbook, runtime-session, turn, canonical-worktree, and baseline identity and shall be uniformly started or uniformly complete, complete members shall carry the identical after observation and receipt, and the id shall never be reused by another group.
@@ -1280,6 +1280,13 @@ field.
 It shall reject an absent required field, an undeclared or extra field, a
 field supplied by the wrong authority, an invalid value, or any mutually
 inconsistent candidate before FSM delivery.
+When no outcome matches, a governed judge may instead return exactly
+`{ blocked: <nonempty explanation> }`.
+The shared reconciler retains this candidate and returns `no-matching-outcome`
+with its explanation as a `runtime-defect` cause; it authorizes neither a
+corrective judge nor an FSM outcome.
+Both shared and bespoke judge prompts shall state this alternative explicitly
+instead of forcing a match when the declared results are incomplete.
 
 For a non-deferred candidate, reconciliation shall require a complete durable
 physical receipt, or the complete cumulative logical receipt of a deferred
@@ -1353,7 +1360,8 @@ Two default adjudication strategies, in selection order:
   answer keyed to exactly one of the declared guards: a nongoverned player uses
   `{ guard, …structuralPayloadFields }`, while a governed schema-3 player uses
   `{ guard, …semanticOwnedPayloadFields }` and explicitly forbids every other
-  payload field. Both forms exclude the runtime-injected direct-Captain
+  payload field. The governed form also permits the blocked report above when no outcome matches.
+  Both forms exclude the runtime-injected direct-Captain
   `question` and `response` fields above. The prompt shall identify hidden control work,
   prohibit tool use, file inspection, and external evidence, direct the judge
   to decide only from the supplied actor output and declared outcomes, and
@@ -2094,6 +2102,8 @@ interface PlaybookControlAction {
 interface PlaybookRecoveryOffer {
   prompt: string;
   description?: string;
+  preparation?: string;
+  evidence?: JsonValue;
   continuation: { kind: 'reply' } | { kind: 'runtime'; actionId: string };
 }
 

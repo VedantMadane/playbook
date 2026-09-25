@@ -16,6 +16,7 @@ import { createTmuxPlayRuntime } from "@sublang/cligent/tmux-play";
 import {
   assertPlaybookEffectLedger,
   emptyPlaybookEffectLedger,
+  isPlaybookEffectLedgerMonotonicExtension,
 } from "../../../../src/xstate-runtime.js";
 import {
   assertPlaybookCaptainShellSnapshot,
@@ -961,18 +962,21 @@ function isCaptainSessionHostCleanupIncomplete(error) {
   );
 }
 
-function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog) {
+function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, stoppedStep = false) {
   const checkpoint = assertPlaybookEffectLedger(snapshot.effectLedger);
   const current = assertPlaybookEffectLedger(ledger);
   const checkpointBoundaryCount = checkpoint.boundaries.length;
   const currentPrefix = current.boundaries.slice(0, checkpointBoundaryCount);
-  if (!isDeepStrictEqual(currentPrefix, checkpoint.boundaries)) {
+  if (!isPlaybookEffectLedgerMonotonicExtension(checkpoint, current)) {
+    throw new Error('Captain recovery evidence changed incompatibly');
+  }
+  if (!stoppedStep && !isDeepStrictEqual(currentPrefix, checkpoint.boundaries)) {
     throw new Error(
       "Captain uncertain turn repository-effect reconciliation cannot restore a changed pre-turn boundary",
     );
   }
   if (
-    !isDeepStrictEqual(current.logicalOperations, checkpoint.logicalOperations)
+    !stoppedStep && !isDeepStrictEqual(current.logicalOperations, checkpoint.logicalOperations)
   ) {
     throw new Error(
       "Captain uncertain turn repository-effect reconciliation found deferred logical-operation progress and cannot replay the Boss turn",
@@ -982,7 +986,7 @@ function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog) {
   const blocking = suffix.find(
     (boundary) => boundary.physicalReceipt?.classification !== "unchanged",
   );
-  if (blocking !== undefined) {
+  if (!stoppedStep && blocking !== undefined) {
     const classification =
       blocking.physicalReceipt?.classification ?? "incomplete";
     throw new Error(
@@ -1057,7 +1061,10 @@ export async function createCaptainSessionHost({
   }
   const currentEffectLedger = () =>
     effectLedgerSnapshotFromCapabilities(hostCapabilities);
-  let sourceSnapshot = restoreSnapshot;
+  const interrupted = reconcileUncertainTurnReplay && typeof sessionLease.read === 'function'
+    ? await sessionLease.read() : undefined;
+  const recovery = interrupted?.uncertain?.recovery;
+  let sourceSnapshot = recovery?.snapshot ?? restoreSnapshot;
   if (
     sourceSnapshot !== undefined &&
     !isDeepStrictEqual(sourceSnapshot.effectLedger, currentEffectLedger())
@@ -1078,6 +1085,7 @@ export async function createCaptainSessionHost({
       sourceSnapshot,
       currentEffectLedger(),
       config.catalog,
+      recovery !== undefined,
     );
   } else if (
     sourceSnapshot !== undefined &&
@@ -1087,7 +1095,7 @@ export async function createCaptainSessionHost({
       "Captain session effect ledger requires reconciliation before source-state restoration",
     );
   }
-  if (sourceSnapshot !== undefined && typeof sessionLease.consumeHints === "function") {
+  if (sourceSnapshot !== undefined && !recovery && typeof sessionLease.consumeHints === "function") {
     sourceSnapshot = attachSessionHints(sourceSnapshot, await sessionLease.consumeHints());
   }
   const bufferedRecords = [];
@@ -1104,8 +1112,12 @@ export async function createCaptainSessionHost({
     else await forwardRecord(record);
   } }];
   const shell = createPlaybookCaptainShell(captainOptionsFromConfig(config), {
+    abortPreparation: () => host?.abortActiveTurn('Captain preparation exceeded its 150-second limit'),
     loadModule,
     hostCapabilities,
+    ...(typeof sessionLease.checkpointRecovery === 'function' ? {
+      checkpointRecovery: (point) => sessionLease.checkpointRecovery(point),
+    } : {}),
     continuity: {
       async beforeCall(participantId) { sessionLease.clearHint?.(participantId); await sessionLease.assertOwner(); },
       acknowledged(participantId, token) { sessionLease.acknowledgeHint?.(participantId, token); },
@@ -1163,6 +1175,7 @@ export async function createCaptainSessionHost({
     }
     presentationReady = true;
     for (const record of bufferedRecords) await forwardRecord(record);
+    if (recovery) shell.selectRecovery(interrupted.uncertain.input, recovery.instruction);
     return { shell, host, snapshot, reconcileRepositoryEffects };
   } catch (error) {
     let cleanupError;

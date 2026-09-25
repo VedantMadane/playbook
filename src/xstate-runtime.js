@@ -1102,6 +1102,20 @@ function unresolvedSemanticEvidence(reason, evidence, cause = assertPlaybookFail
  * repository fact is inferred from that prose or from the semantic candidate.
  */
 export function reconcilePlaybookSemanticEvidence(input) {
+    let report;
+    try {
+        report = snapshotJsonValue(input.semanticCandidate, 'semantic candidate');
+    }
+    catch (error) {
+        semanticCandidateStructureError(`must be detached plain JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (isRecord(report) && Object.keys(report).length === 1 &&
+        typeof report.blocked === 'string' && report.blocked.trim().length > 0) {
+        return unresolvedSemanticEvidence('no-matching-outcome', retainedSemanticEvidence(report, input.finalText), assertPlaybookFailureCause({
+            code: 'runtime-defect',
+            evidence: { reason: `No declared outcome matches: ${report.blocked}` },
+        }));
+    }
     const { candidate, outcome } = snapshotSemanticCandidate(input.semanticCandidate, input.outcomes);
     const evidence = retainedSemanticEvidence(candidate, input.finalText);
     const finalText = typeof input.finalText === 'string' ? input.finalText.trim() : undefined;
@@ -1256,6 +1270,7 @@ function effectBoundary(value, index) {
         'baseline',
         'after',
         'physicalReceipt',
+        'restored',
         'finalText',
         'semanticCandidate',
         'initialSemanticCandidate',
@@ -1314,6 +1329,15 @@ function effectBoundary(value, index) {
     }
     if (own(value, 'finalText') && typeof value.finalText !== 'string') {
         throw new TypeError(`${path}.finalText must be a string`);
+    }
+    if (own(value, 'restored')) {
+        const restored = effectObservation(value.restored, `${path}.restored`);
+        if (!jsonValuesEqual(restored, baseline) ||
+            !isRecord(value.physicalReceipt) || after?.head !== baseline.head ||
+            value.dispositions.some((item) => item !== 'unchanged') ||
+            value.cohortId !== undefined || value.logicalOperationId !== undefined) {
+            throw new TypeError(`${path}.restored requires a standalone read-only call restored exactly without commit movement`);
+        }
     }
     if (own(value, 'initialSemanticCandidate')) {
         if (!own(value, 'semanticCandidate') ||
@@ -1578,6 +1602,7 @@ export function isPlaybookEffectLedgerMonotonicExtension(baselineValue, currentV
     const boundaryEvidenceKeys = [
         'after',
         'physicalReceipt',
+        'restored',
         'finalText',
         'initialSemanticCandidate',
     ];

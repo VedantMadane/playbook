@@ -4408,6 +4408,22 @@ describe('durable Captain session records (PBCLI-23/24/51/52/53/54/63/64)', () =
     expect(getterCalls).toBe(0);
   });
 
+  it('admits concurrent ownership checks and drains them before release', async () => {
+    const { sessionsDir } = await fixtureDir();
+    const store = fixedStore(sessionsDir, tokenO);
+    const lease = await store.acquire(sessionId);
+    await lease.initializeSettledWithPredecessor(freshBoundary());
+    const checks = Array.from({ length: 4 }, () => lease.assertOwner());
+    const writing = lease.beginTurn({ input: 'work', attemptId: attempt1, attemptedExecutionProjection: executionProjection() });
+    await Promise.all([...checks, writing]);
+    const lastChecks = [lease.assertOwner(), lease.assertOwner()];
+    const released = lease.release();
+    await expect(lease.assertOwner()).rejects.toThrow(/releasing/);
+    await Promise.all([...lastChecks, released]);
+    await expect(lease.assertOwner()).rejects.toThrow(/released/);
+    expect((await store.read(sessionId)).state).toBe('uncertain');
+  });
+
   it('requires the current owner and exact uncertain attempt for every mutation', async () => {
     const { sessionsDir } = await fixtureDir();
     const store = fixedStore(sessionsDir, tokenO);

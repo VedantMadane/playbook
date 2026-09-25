@@ -3037,7 +3037,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await target.shell.dispose?.();
   });
 
-  it('retains the real pre-terminal stack across CODE reportedReviewFailure', async () => {
+  it('keeps a stopped REVIEW child and its CODE parent after an unexpected error', async () => {
     let breakReview = false;
     const sourceCode = realEntry(codeRegistryEntry);
     const sourceReview = realEntry(reviewRegistryEntry);
@@ -3089,24 +3089,12 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     breakReview = true;
     await source.turn('Use release 6.0 for the review.', 2);
 
-    expect(source.shell.exportSnapshot()).toMatchObject({ mode: 'chat' });
-    expect(
-      source.telemetry
-        .filter(({ topic }) => topic === 'playbook.fsm.state')
-        .some(
-          ({ payload }) =>
-            (payload as { state?: PlaybookState }).state?.stateId ===
-            'reportedReviewFailure',
-        ),
-    ).toBe(true);
+    const stopped = source.shell.exportSnapshot()!;
+    expect(stopped).toMatchObject({ mode: 'engaged.parked' });
+    expect(stopped.mode === 'engaged.parked' && stopped.frames.map(frame => frame.runtime.state.stateId)).toEqual(['reviewFirstCommit', 'failed']);
+    expect(traceEvents(source).filter(({ type }) => type === 'playbook.call.finished')).toHaveLength(0);
     const retainedAfterTerminal = retainedGeneration(source);
-    expect(retainedAfterTerminal).toEqual(preTerminal);
-    expect(retainedAfterTerminal.frames[0]?.runtime.state.stateId).toBe(
-      'reviewFirstCommit',
-    );
-    expect(retainedAfterTerminal.frames[1]?.runtime.state.stateId).toBe(
-      'awaitBossReply',
-    );
+    expect(retainedAfterTerminal.frames).toHaveLength(2);
     await source.shell.dispose?.();
 
     const targetCode = realEntry(codeRegistryEntry);
@@ -3131,13 +3119,10 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
       { sessionNamespace: '5a40' },
     );
     await adoptWithoutDriving(target, retainedAfterTerminal);
-    await target.turn('Use release 6.0 and finish the review.', 2);
+    await target.turn('Retry using release 6.0 and finish the review.', 2);
 
-    expect(target.playerCalls).toEqual(['review-reviewer']);
-    expect(classifierPrompts(target)).toHaveLength(1);
-    expect(classifierPrompts(target)[0]).toContain(
-      'Current state: awaitBossReply',
-    );
+    expect(target.playerCalls, target.decisionPrompts().at(-1)).toEqual(['review-reviewer']);
+    expect(classifierPrompts(target)).toHaveLength(0);
     expectNoReadyClassification(target);
     expectCleanCompletion(target);
     await target.shell.dispose?.();

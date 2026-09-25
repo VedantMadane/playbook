@@ -639,6 +639,8 @@ export interface PlaybookEffectBoundary {
   readonly baseline: PlaybookRepositoryObservation;
   readonly after?: PlaybookRepositoryObservation;
   readonly physicalReceipt?: PlaybookRepositoryReceipt;
+  /** A later exact restoration permits replay of this standalone read-only call. */
+  readonly restored?: PlaybookRepositoryObservation;
   readonly finalText?: string;
   readonly semanticCandidate?: JsonValue;
   readonly initialSemanticCandidate?: JsonValue;
@@ -655,6 +657,7 @@ export type PlaybookEffectBoundaryStart = Omit<
   | 'attemptNumber'
   | 'after'
   | 'physicalReceipt'
+  | 'restored'
   | 'finalText'
   | 'semanticCandidate'
   | 'initialSemanticCandidate'
@@ -817,6 +820,10 @@ export interface PlaybookControlAction {
 export interface PlaybookRecoveryOffer {
   prompt: string;
   description?: string;
+  /** Runtime-owned conditions to satisfy; these never authorize task completion. */
+  preparation?: string;
+  /** Saved observations and result choices for diagnosing the stopped step. */
+  evidence?: JsonValue;
   continuation: { kind: 'reply' } | { kind: 'runtime'; actionId: string };
 }
 
