@@ -177,6 +177,7 @@ export interface PlaybookPorts {
     callCaptain(prompt: string, signal: AbortSignal, options: CaptainCallOptions): Promise<CaptainResult>;
     callJudge(prompt: string, signal: AbortSignal): Promise<string>;
     callPlaybook(request: PlaybookCallRequest, signal: AbortSignal): Promise<PlaybookCallStart>;
+    /** Mark question presentation with data.kind = "boss-question"; Captain relays it from pendingQuestions. */
     emitStatus(message: string, data?: unknown): Promise<void>;
     emitTelemetry(event: {
         topic: string;

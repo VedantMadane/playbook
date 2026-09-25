@@ -31,10 +31,11 @@ Where a factory-backed artifact supplies linker-emitted `roleStates` and no arti
 - Before sending a selected Boss event, emit its bare type such as `START_CODE` as Captain speech.
 - Emit exact `→ <acceptedOutcome>` with no payload tally, rider, or leading whitespace only from the confirmed accepted-outcome evidence of [[playbook-runtime-81](#playbook-runtime-81)].
 - On entry to a state named by `roleStates`, emit `⤷ <Role>: <label>` from that metadata with no source-item or context rider.
-- On entry to a Boss-reply wait, emit the untruncated `<asker> asks: <question>` as Captain speech followed by `◆ awaiting Boss reply · <resumeStateId> · <asker> · <sourceItem>` with no question excerpt, rendering the Captain asker as `Captain` and a role asker by its local role id.
+- On entry to a Boss-reply wait, mark both status lines with `{ kind: "boss-question" }` status data and emit the untruncated `<asker> asks: <question>` as Captain speech followed by `◆ awaiting Boss reply · <resumeStateId> · <asker> · <sourceItem>` with no question excerpt, rendering the Captain asker as `Captain` and a role asker by its local role id.
 - On entry to failure, emit `◆ workflow failed; awaiting Boss recovery.` with the compact normalized error, carrying its cause [[playbook-runtime-96](#playbook-runtime-96)], as status data.
 - Emit no canonical status on entry to an idle, terminal, or other unlisted state.
 
+The shell shall replace marked question statuses with its Captain reply, using the full pending question [[playbook-captain-9](playbook-captain.md#playbook-captain-9)], while standalone hosts may render the original lines ([DR-067](../decisions/067-captain-relays-player-questions.md)).
 The runtime shall compose only each line's meaningful content, while the host owns speaker chrome, wrapping, and visual nesting and keeps judge calls hidden per [[playbook-runtime-15](#playbook-runtime-15)].
 
 ### Host configuration

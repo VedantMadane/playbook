@@ -43,6 +43,7 @@ An ordinary player answer shall retain exact-text delivery, and a retry needing 
 Where the host supplies cancellation of admitted calls, when executing `recover`, the shell shall hold the worktree's exclusive claim and make exactly one fresh, hidden Captain preparation call on its existing serialized queue, using configured permissions and tools, the exact current Boss text, the offered step prompt, pending question, and structured failure:
 
 - inspect and repair only prerequisites necessary for that continuation;
+- decide first whether every required Boss choice is already supplied; if any is missing, report blocked before tools, even when no preparation or repair is otherwise needed;
 - preserve a waiting player's tracked and non-ignored repository checkpoint; report blocked when preparation requires changing it;
 - preserve a recoverable copy before removing or replacing unexpected files;
 - preserve Boss's work and constraints; do not discard changes or rewrite history without explicit Boss authorization;

@@ -1655,10 +1655,11 @@ function makeDefaultStatusesForState(roleStates) {
             }
             return [
                 ...statuses,
-                { message: `${askerLabel(pending.asker)} asks: ${pending.question}` },
+                { message: `${askerLabel(pending.asker)} asks: ${pending.question}`, data: { kind: 'boss-question' } },
                 {
                     message: `◆ awaiting Boss reply · ${pending.resumeStateId} · ` +
                         `${askerLabel(pending.asker)} · ${pending.sourceItem}`,
+                    data: { kind: 'boss-question' },
                 },
             ];
         }

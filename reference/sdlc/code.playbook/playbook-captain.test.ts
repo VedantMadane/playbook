@@ -2909,7 +2909,7 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       resumeStateId: 'review',
       sourceItem: 'CODE-7',
       player: 'Coder',
-      question: 'Which branch should I use?',
+      question: 'Which branch should I use? ' + 'Preserve the existing setup. '.repeat(24) + 'Choose staging only with Boss approval.',
     };
     const registry = fakeCodeEntry(async (runtime, runtimeTurn) => {
       if (!runtime.ports) throw new Error('runtime ports missing');
@@ -2957,7 +2957,7 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       expect(prompt).not.toContain('stackDepth');
       expect(prompt).not.toContain('latestSubRuntimeStateId');
     }
-    expect(decisionPrompts[0]).toContain('Which branch should I use?');
+    expect(decisionPrompts[0]).toContain(JSON.stringify(pendingBossQuestion.question));
     expect(decisionPrompts[1]).toContain(
       'Last error: {"name":"TypeError","message":"boom"}',
     );
@@ -5125,7 +5125,7 @@ describe('createPlaybookCaptainShell turn summaries (CAPTAIN-21)', () => {
     // The grounding and no-raw-vocabulary instructions live in the compiled
     // closing-reply prompt the shell wraps verbatim (CAPPLAY-20 pin 5).
     expect(summary?.prompt).toContain(
-      'compose the closing reply and turn summary only from the outcome-report facts',
+      'report effects only from the outcome-report facts',
     );
     expect(summary?.prompt).toContain(
       'claim no work the report does not contain',
@@ -5136,7 +5136,7 @@ describe('createPlaybookCaptainShell turn summaries (CAPTAIN-21)', () => {
     expect(summary?.prompt).toContain(
       'Do not mention counts for states the report does not name',
     );
-    expect(summary?.prompt).toContain('Keep a natural chat-like tone');
+    expect(summary?.prompt).toContain('Use familiar words and usually one to three short sentences');
   });
 
   it('derives schema-3 saved counts only from accepted outcomes', async () => {

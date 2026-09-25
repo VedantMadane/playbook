@@ -2093,6 +2093,7 @@ function createDecidePlaybookRuntime(
   const emitBoundaryStatus = async (
     message: string,
     state: PlaybookState,
+    data?: JsonValue,
   ): Promise<void> => {
     const bossRelevantStateIds = state.activeStateIds.filter((stateId) =>
       STATUS_STATE_IDS.has(stateId),
@@ -2105,9 +2106,10 @@ function createDecidePlaybookRuntime(
           : {}),
         message,
         state,
+        ...(data === undefined ? {} : { data }),
       },
       { turnId: currentTurnId },
-      (runtimePorts) => runtimePorts.emitStatus(message),
+      (runtimePorts) => runtimePorts.emitStatus(message, data),
     );
   };
 
@@ -3599,10 +3601,12 @@ function createDecidePlaybookRuntime(
             scheduleStatus(
               `${pending.asker.roleId} asks: ${pending.question}`,
               activeStateId,
+              { kind: 'boss-question' },
             );
             scheduleStatus(
               `◆ awaiting Boss reply · ${pending.resumeStateId} · ${pending.asker.roleId} · ${pending.sourceItem}`,
               activeStateId,
+              { kind: 'boss-question' },
             );
           }
           continue;
@@ -4011,10 +4015,12 @@ function createDecidePlaybookRuntime(
       await emitBoundaryStatus(
         `${pending.asker.roleId} asks: ${pending.question}`,
         state,
+        { kind: 'boss-question' },
       );
       await emitBoundaryStatus(
         `◆ awaiting Boss reply · ${pending.resumeStateId} · ${pending.asker.roleId} · ${pending.sourceItem}`,
         state,
+        { kind: 'boss-question' },
       );
       await flush();
     }

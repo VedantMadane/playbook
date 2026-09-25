@@ -508,6 +508,7 @@ export interface PlaybookPorts {
     request: PlaybookCallRequest,
     signal: AbortSignal,
   ): Promise<PlaybookCallStart>;
+  /** Mark question presentation with data.kind = "boss-question"; Captain relays it from pendingQuestions. */
   emitStatus(message: string, data?: unknown): Promise<void>;
   emitTelemetry(event: { topic: string; payload: unknown }): Promise<void>;
 }

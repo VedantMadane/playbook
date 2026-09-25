@@ -93,6 +93,7 @@ meta.md       The spec of specs
 | [DR-065](decisions/065-prompt-prefix-pass.md) | 065-prompt-prefix-pass.md | The prompt-prefix pass: a second GEARS pass moves each prompt's relayed runtime values after its instructions so repeated runs share a cacheable prefix, realized by a deterministic tool and accepted by the fidelity checker through its provenance section |
 
 | [DR-066](decisions/066-captain-prepares-step-recovery.md) | 066-captain-prepares-step-recovery.md | Bounded Captain preparation and runtime-owned interrupted-step recovery |
+| [DR-067](decisions/067-captain-relays-player-questions.md) | 067-captain-relays-player-questions.md | Captain explains complete player questions; Boss communicates only through Captain between turns |
 
 ## Packages
 

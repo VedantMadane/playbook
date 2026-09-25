@@ -86,7 +86,7 @@ shall resume its suspended state with the answer in context.
 Where the Playbook Captain shell is running under tmux-play, while
 a playbook is engaged, when the engaged runtime emits status or
 telemetry, the shell shall pass those emissions through to the host
-in order.
+in order, except question statuses marked `{ kind: "boss-question" }`, whose wording the Captain supplies from the complete pending questions [[playbook-captain-9](#playbook-captain-9)] in its closing reply.
 Where the Playbook Captain shell is running under tmux-play, when
 the shell engages, dismisses, or disposes an enabled external root playbook,
 the shell shall emit Boss-visible Captain status lines
@@ -562,6 +562,7 @@ opens a labeled block the model reads as host-authored. The shell shall
 therefore escape and bound at the one seam through which a value it did
 not author becomes part of a digest line, so a line added to a digest
 later carries the property without restating it.
+Pending question text is an exception to length bounding: it shall enter every decision and reply digest complete, JSON-quoted on one physical line so its final choices and constraints remain available without forging prompt blocks.
 Digests and session-Captain prompts shall exclude session and call
 UUIDs, resume tokens, trace payloads, module specifiers, option
 values, player rosters, raw recovery records, and ledger JSON; player
@@ -1620,8 +1621,7 @@ each of those replies reflecting the state's published meaning and
 carrying no raw state id.
 The suite shall fail unless: with an acting-agent question pending, the
 Boss's answer settles as `deliver` and `BOSS_REPLY` resumes the same
-state with the answer in context, the full question having surfaced
-as captain speech; a mid-run status question while busy or parked is
+state with the answer in context, the complete question having reached Captain and its explanation having surfaced as captain speech; a mid-run status question while busy or parked is
 answered from `describe()` alone — zero `apply` calls, zero FSM
 events, the snapshot identical before and after, the surfaced reply
 reflecting the state's published meaning and the pending question and

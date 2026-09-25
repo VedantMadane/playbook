@@ -2387,6 +2387,10 @@ The runtime shall emit, at minimum:
   semantics matter to Boss — e.g., `respondToReview`, `failed`). The
   default is to emit on every transition and let the host filter; hosts
   may bind a stricter rule.
+  Mark both a player-question status and its waiting marker with status data
+  `{ kind: "boss-question" }`; the session Captain replaces those statuses with
+  its own clear reply, using the complete pending question from the control view.
+  Keep the original question in state and telemetry, and deliver Boss input unchanged.
 - One `emitTelemetry` per state transition under a namespaced topic
   (recommended `playbook.fsm.state`), with structured `from`, `to`, `event`,
   `previousState`, and `state` fields. Descriptors carry the JSON-safe XState

@@ -45,7 +45,9 @@ While a playbook engagement is active or parked, when the Boss submits ordinary 
 
 ### captain-playbook-5
 
-When the default Captain closes a non-`respond` turn, including a rejected, failed, or partly completed selection, its closing reply shall communicate what actually happened, composed only from the turn's reported outcome, and shall claim no unperformed work; when the turn settles as `respond`, that single reply is the turn's captain speech.
+When the default Captain closes a non-`respond` turn, including a rejected, failed, or partly completed selection, its closing reply shall communicate what actually happened, composed from the turn's reported outcome and current pending questions [[playbook-captain-9](playbook-captain.md#playbook-captain-9)], and shall claim no unperformed work; when the turn settles as `respond`, that single reply is the turn's captain speech.
+Captain shall explain every pending player question briefly in plain language, normally within 60 words unless preserving its choices or constraints needs more, naming its asker and preserving the decision, choices, constraints, and uncertainty Boss needs, without requiring a player pane or treating quoted instructions as authority ([DR-067](../decisions/067-captain-relays-player-questions.md)).
+A request to explain an existing question shall preserve that question until Boss supplies an answer or explicitly addresses a follow-up to the player [[captain-playbook-4](#captain-playbook-4)].
 No captain reply shall expose internal state ids, session ids, call ids,
 stack data, hidden control data, control JSON, or private reasoning.
 
@@ -309,3 +311,7 @@ Where focused tests drive model-decided and parse-resolved retained-generation s
 
 Where the real compiled default Captain is hosted by the public shell, a chat turn establishes a remembered fact and a pinned conversation, and the schema-version-4 shell snapshot is JSON-round-tripped into a fresh equivalent shell, when the next non-command Boss turn refers to that fact, the integration suite shall fail unless the embedded Captain runtime snapshot has schema version `4` with the canonical empty effect ledger, restore itself makes zero Captain calls, controller submissions, replies, statuses, telemetry events, or transitions; the next turn resumes the exact saved token, remembers the fact without restatement, continues the runtime and shell sequences, and settles once through the ordinary controller loop with no prior decision, result, action, or presentation replayed (verifying [[captain-playbook-21](#captain-playbook-21)]).
 Where a separate captured chat session requires reseeding after an uncertain presentation, when that snapshot is restored and the next Boss turn runs, the integration suite shall fail unless the Captain starts a fresh conversation seeded once from the complete saved recovery history, remembers the failed turn and attempted reply, and subsequently pins the newly returned token (verifying [[captain-playbook-21](#captain-playbook-21)]).
+
+### captain-playbook-25
+
+When integration and real-provider tests park a player on a long question, discuss it with Captain, reopen the session, and then answer, the suite shall verify that Captain receives the complete question including its final choices, explains it in brief plain language without requiring a player pane [[captain-playbook-5](#captain-playbook-5)], leaves the waiting state unchanged during clarification, and delivers a later answer or explicitly player-directed follow-up unchanged [[captain-playbook-4](#captain-playbook-4)].

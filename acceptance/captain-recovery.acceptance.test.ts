@@ -192,6 +192,7 @@ class LocalClaude extends ClaudeCodeAdapter {
 }
 class InterruptedCodex extends CodexAdapter {
   static interrupted = false;
+  static injectStrayFile = false;
   static firstCalls = 0;
   static secondCalls = 0;
   async *run(
@@ -218,13 +219,22 @@ class InterruptedCodex extends CodexAdapter {
         return;
       }
     }
-    yield* super.run(prompt, options);
+    for await (const event of super.run(prompt, options)) {
+      if (InterruptedCodex.injectStrayFile && prompt.includes('RECOVERY_LIVE_SECOND:') && event.type === 'done') {
+        InterruptedCodex.injectStrayFile = false;
+        // Inject after the real worker finishes, so its own tidying cannot
+        // erase the failure this acceptance scenario is meant to exercise.
+        await writeFile(join(options!.cwd!, 'scratch-output'), 'injected generated output');
+      }
+      yield event;
+    }
   }
 }
 it.each(['player', 'judge', 'files', 'preparation', 'missing-transition'])(
   'Captain recovers the real-model %s interruption without a repeated commit',
   async (failure) => {
     LocalClaude.interruptJudge = failure === 'judge';
+    InterruptedCodex.injectStrayFile = failure === 'files';
     InterruptedCodex.interrupted = ['judge', 'files', 'missing-transition'].includes(failure);
     LocalClaude.interruptPreparation = undefined;
     InterruptedCodex.firstCalls = 0;

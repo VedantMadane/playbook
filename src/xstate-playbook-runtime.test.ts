@@ -1897,9 +1897,10 @@ describe('player + script workflow over the shared factory', () => {
     expect(suspended.state.stateId).toBe('awaitBossReply');
     expect(statuses.slice(-3)).toEqual([
       { message: '→ needsBossReply' },
-      { message: 'coder asks: Which database should I use?' },
+      { message: 'coder asks: Which database should I use?', data: { kind: 'boss-question' } },
       {
         message: '◆ awaiting Boss reply · implement · coder · WF-1',
+        data: { kind: 'boss-question' },
       },
     ]);
 

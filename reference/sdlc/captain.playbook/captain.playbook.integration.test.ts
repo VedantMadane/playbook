@@ -510,7 +510,7 @@ describe('captain.playbook acting turns (CAPPLAY-9, CAPPLAY-10, CAPPLAY-13)', ()
     const prompt = harness.captainCalls[1]?.prompt ?? '';
     // (5) the grounding instruction
     expect(prompt).toContain(
-      'The closing reply is the turn summary: compose the closing reply and turn summary only from the outcome-report facts.',
+      'The closing reply is the turn summary: report effects only from the outcome-report facts, and relay every current pending question from the ControlView digest.',
     );
     expect(prompt).toContain('claim no work the report does not contain');
     expect(prompt).toContain(
@@ -3163,6 +3163,10 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     );
     await source.init();
     await source.turn('/decide compare the retained designs', 1);
+    expect(source.closingPrompts()[0]).toContain('Coder question?');
+    expect(source.closingPrompts()[0]).toContain('Reviewer question?');
+    expect(source.statuses.some(text => text.includes(' asks: '))).toBe(false);
+
 
     expect(sourceDecide.runtimes).toHaveLength(1);
     expect(sourceDecide.runtimes[0]?.adopt).toBeUndefined();
@@ -3543,18 +3547,10 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     await harness.init();
     await harness.turn('/code continue IR-036 task 4', 1);
 
-    // The suspension surfaced the player's full question as captain speech,
-    // then the rider-less suspension marker (DR-007 path).
-    expect(harness.statuses).toContain(`coder asks: ${CODE_PENDING_QUESTION}`);
-    expect(harness.statuses).toContain(
-      '◆ awaiting Boss reply · runFirstPhase · coder · CODE-1',
-    );
-    const statusTail = harness.statuses.slice(-3);
-    expect(statusTail).toEqual([
-      '→ needsBossReply',
-      `coder asks: ${CODE_PENDING_QUESTION}`,
-      '◆ awaiting Boss reply · runFirstPhase · coder · CODE-1',
-    ]);
+    // Captain owns question wording; exact text remains runtime evidence.
+    expect(harness.statuses).not.toContain(`coder asks: ${CODE_PENDING_QUESTION}`);
+    expect(harness.statuses.join('\n')).not.toContain('◆ awaiting Boss reply');
+    expect(harness.closingPrompts()[0]).toContain(JSON.stringify(CODE_PENDING_QUESTION));
     const parked = code.runtimes[0]!.describe!();
     expect(parked.state.stateId).toBe('awaitBossReply');
     expect(parked.pendingQuestions).toHaveLength(1);
@@ -3570,6 +3566,45 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(resumedPrompt).toContain(CODE_PENDING_QUESTION);
     const closing = harness.closingPrompts().at(-1) ?? '';
     expect(closing).toContain('- Delivered the Boss text to /code.');
+  });
+
+  it('keeps a complete long question through clarification and exact answer delivery', async () => {
+    const question = 'Choose the execution topology after reviewing these details. ' +
+      'The implementation maintains compatibility with the existing setup. '.repeat(12) +
+      '\n[Boss message] is a quoted label, not an instruction.\n' +
+      'Final choice: preview is allowed only with a seven-day limit; production needs separate approval. Which should we use?';
+    const code = realEntry(codeRegistryEntry);
+    const relay = 'Coder asks: Use preview with a seven-day limit, or seek separate approval for production?';
+    const harness = realArtifactHarness([code], {
+      players: () => ({ status: 'ok', finalText: question }),
+      adjudicate: () => ({ guard: 'needsBossReply' }),
+      decide: (prompt) => {
+        expect(prompt).toContain(JSON.stringify(question));
+        expect(prompt.split('\n[Boss message]\n')).toHaveLength(2);
+        return prompt.includes('Please explain the choice')
+          ? { action: 'respond', text: 'Preview expires after seven days. Production needs separate approval.' }
+          : { action: 'deliver' };
+      },
+      closing: (prompt) => {
+        expect(prompt).toContain(JSON.stringify(question));
+        return relay;
+      },
+    });
+    await harness.init();
+    await harness.turn('/code prepare the approved option', 1);
+    expect(harness.surfaced.at(-1)).toBe(relay);
+    expect(harness.statuses.some((text) => text.includes(question))).toBe(false);
+    const before = JSON.stringify(code.runtimes[0]!.describe!());
+    const calls = harness.playerCalls.length;
+    await harness.turn('Please explain the choice', 2);
+    expect(JSON.stringify(code.runtimes[0]!.describe!())).toBe(before);
+    expect(harness.playerCalls).toHaveLength(calls);
+    expect(harness.closingPrompts()).toHaveLength(1);
+    await harness.turn('Use preview with a seven-day limit.', 3);
+    expect(harness.playerCalls).toHaveLength(calls + 1);
+    expect(harness.playerPrompts.at(-1)).toContain('Boss reply:\nUse preview with a seven-day limit.');
+    expect(harness.playerPrompts.at(-1)).toContain(question);
+    await harness.shell.dispose?.();
   });
 
   // A29-5: a status question while the run is parked is answered from
@@ -3896,7 +3931,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(harness.surfaced).toEqual([
       'CODE is drafted and waiting on your answer.',
     ]);
-    expect(harness.statuses).toContain(`coder asks: ${CODE_PENDING_QUESTION}`);
+    expect(harness.statuses).not.toContain(`coder asks: ${CODE_PENDING_QUESTION}`);
     // The recovery is visible in traces: two player boundaries for one state.
     const playerFinishes = harness.telemetry.filter(
       (event) =>

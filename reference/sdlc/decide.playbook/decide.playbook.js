@@ -1276,7 +1276,7 @@ function createDecidePlaybookRuntime(options, deferredEffects) {
             await runtimePorts.emitStatus(message);
         }, aborts);
     };
-    const emitBoundaryStatus = async (message, state) => {
+    const emitBoundaryStatus = async (message, state, data) => {
         const bossRelevantStateIds = state.activeStateIds.filter((stateId) => STATUS_STATE_IDS.has(stateId));
         await enqueueTracedEmission('status.emitted', {
             ...(bossRelevantStateIds.length === 1
@@ -1284,7 +1284,8 @@ function createDecidePlaybookRuntime(options, deferredEffects) {
                 : {}),
             message,
             state,
-        }, { turnId: currentTurnId }, (runtimePorts) => runtimePorts.emitStatus(message));
+            ...(data === undefined ? {} : { data }),
+        }, { turnId: currentTurnId }, (runtimePorts) => runtimePorts.emitStatus(message, data));
     };
     const emitCallStarted = async (startedType, finishedType, identity, meta, signal) => {
         const aborts = abortReasonClassifier(signal);
@@ -2324,8 +2325,8 @@ function createDecidePlaybookRuntime(options, deferredEffects) {
                 if (WAIT_STATE_IDS.has(activeStateId)) {
                     const pending = questionForWaitState(activeStateId, pendingQuestions);
                     if (pending) {
-                        scheduleStatus(`${pending.asker.roleId} asks: ${pending.question}`, activeStateId);
-                        scheduleStatus(`◆ awaiting Boss reply · ${pending.resumeStateId} · ${pending.asker.roleId} · ${pending.sourceItem}`, activeStateId);
+                        scheduleStatus(`${pending.asker.roleId} asks: ${pending.question}`, activeStateId, { kind: 'boss-question' });
+                        scheduleStatus(`◆ awaiting Boss reply · ${pending.resumeStateId} · ${pending.asker.roleId} · ${pending.sourceItem}`, activeStateId, { kind: 'boss-question' });
                     }
                     continue;
                 }
@@ -2600,8 +2601,8 @@ function createDecidePlaybookRuntime(options, deferredEffects) {
             throw new TypeError('DECIDE restored deferred wait does not equal its FSM question');
         }
         if (publishQuestion) {
-            await emitBoundaryStatus(`${pending.asker.roleId} asks: ${pending.question}`, state);
-            await emitBoundaryStatus(`◆ awaiting Boss reply · ${pending.resumeStateId} · ${pending.asker.roleId} · ${pending.sourceItem}`, state);
+            await emitBoundaryStatus(`${pending.asker.roleId} asks: ${pending.question}`, state, { kind: 'boss-question' });
+            await emitBoundaryStatus(`◆ awaiting Boss reply · ${pending.resumeStateId} · ${pending.asker.roleId} · ${pending.sourceItem}`, state, { kind: 'boss-question' });
             await flush();
         }
         return 'restored';
