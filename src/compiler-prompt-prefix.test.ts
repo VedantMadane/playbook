@@ -443,6 +443,35 @@ describe('fidelity checker reads the prefix-first layout from each prompt (compi
     ]);
   });
 
+  it('reports a relay block kept before the last instruction while another trails', () => {
+    const source = [
+      ...FLOW_HEAD,
+      'When step 1 starts, Captain shall relay the request in quotes (`>`):',
+      '', '> Request: <caller-input>', '',
+      'and then give Coder this instruction:',
+      '', '```markdown', 'Do X.', '```', '',
+      'then relay the context in quotes (`>`):',
+      '', '> Context: <context>', '',
+      'and give Coder this one:',
+      '', '```markdown', 'Do Y.', '```', '',
+    ].join('\n');
+    const request = '> Request: <caller-input>';
+    const context = '> Context: <context>';
+    const authored = oneItem([request, '', 'Do X.', '', context, '', 'Do Y.']);
+    expect(checkSourceGearsContract(source, authored)).toEqual([]);
+    // The tool moves both standalone relay blocks after the last instruction.
+    const { text } = prefix(dir, authored);
+    expect(prompts(text).get('FLOW-1')).toEqual(['Do X.', '', 'Do Y.', '', request, '', context]);
+    expect(checkSourceGearsContract(source, text)).toEqual([]);
+    // Fragments in Source order would tile a prompt that trails only the
+    // request and keeps the context in place, but a standalone relay block
+    // before an instruction line is not the pass's layout.
+    const partly = oneItem(['Do X.', '', context, '', 'Do Y.', '', request]);
+    expect(checkSourceGearsContract(source, partly)).toEqual([
+      'FLOW-1: authored prompt fragments are out of Source order',
+    ]);
+  });
+
   it('orders every occurrence, so a relay block repeated after a later fragment fails', () => {
     // DECIDE-3's trailing block relays the topic and then the proposal, so a
     // repeated block puts a topic after the proposal; CODE-4's first block
