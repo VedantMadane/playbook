@@ -83,6 +83,8 @@ playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 "continue"
 
 `playbook run` prints the one Boss-visible Captain reply to stdout and operational status to stderr; CODE and DECIDE can complete their nested REVIEW calls there too.
 
+If a step fails or needs preparation before your answer, ask Captain to fix the prerequisite and resume; see [Preparing a stopped step](docs/cli.md#preparing-a-stopped-step).
+
 See [Using the CLI](docs/cli.md) for flags and durable continuation, [Configuring agents](docs/configuration.md) for the shared lineup, [Embedding](docs/embedding.md) for custom hosts, and the [changelog](https://github.com/sublang-ai/playbook/blob/main/CHANGELOG.md) for releases.
 
 ## Create your own playbook

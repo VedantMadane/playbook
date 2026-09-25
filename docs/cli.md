@@ -369,6 +369,29 @@ abandonment disposes the complete engagement without claiming an authored
 workflow outcome. The same restricted recovery survives process restart
 ([DR-040](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/040-outcome-authority-effect-reconciliation.md)).
 
+### Preparing a stopped step
+
+For a settled run that failed or is waiting for your answer, tell Captain what to repair and ask it to continue:
+
+```sh
+playbook run --session <id> "Fix the missing local dependency, verify it, then resume the interrupted step."
+```
+
+The same request works in the interactive Boss pane.
+Captain makes one separate preparation call with tools and the configured Captain permissions.
+It receives your exact instruction, the interrupted step's prompt, and its question or failure.
+It may inspect and repair the prerequisites, but may not perform the remaining specialist task, change session records, skip steps, or discard work or rewrite history without your authorization.
+A blocked or interrupted preparation stays paused and explains what remains.
+
+The shared runtime chooses the continuation: deliver your answer to the waiting player, retry the failed invocation, or assess a saved result whose judgment was interrupted after a proven commit.
+Earlier completed steps and commits are preserved, including after reopening a session or inside a nested playbook.
+A plain answer still goes directly to the player; a plain retry does not start a preparation call.
+
+Recovery does not override ambiguous repository effects or a pending question's repository checkpoint.
+External dependency and environment repairs can preserve that checkpoint; a repair requiring changes to the checkpointed worktree may need the runtime's explicit reconciliation controls.
+Historical sessions without an invocation checkpoint and custom runtimes that do not advertise recovery keep their previously available controls.
+The uncertain-turn commands below remain the separate response to a process dying before a safe settlement.
+
 ### Recovering an uncertain turn
 
 Before model work, the runner takes one exclusive session lease and writes an

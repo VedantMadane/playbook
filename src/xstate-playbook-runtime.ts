@@ -8623,7 +8623,7 @@ export function createXStatePlaybookRuntime<
             : undefined;
         const actions = deriveControlActions(snapshot).map(({ action }) => action);
         const retry = actions.find(({ id, standing }) =>
-          (id.startsWith('retry:') || id === UNRESOLVED_EFFECT_RECONCILIATION_ACTION_ID) &&
+          id.startsWith('retry:') &&
           (standing ?? 'ready') === 'ready');
         const recovery = recoveryCheckpoint === undefined ||
           (pending === undefined && retry === undefined) ? undefined : {

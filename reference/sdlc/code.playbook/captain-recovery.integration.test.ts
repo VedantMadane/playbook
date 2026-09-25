@@ -27,7 +27,6 @@ class RecoveryAdapter implements AgentAdapter {
   static cwd = '';
   static startWithQuestion = false;
   static preparation = 'ready';
-  static onPrepare: (() => void) | undefined;
   static calls: Array<{
     kind: string;
     prompt: string;
@@ -60,7 +59,6 @@ class RecoveryAdapter implements AgentAdapter {
           signal: AbortSignal.timeout(30),
         }),
       ).rejects.toThrow();
-      RecoveryAdapter.onPrepare?.();
       if (RecoveryAdapter.preparation === 'network')
         throw new Error('ECONNRESET: injected interruption during preparation');
       if (RecoveryAdapter.preparation === 'aborted') {
@@ -303,7 +301,6 @@ describe('Captain preparation through a durable session', () => {
         RecoveryAdapter.startWithQuestion = startWithQuestion;
         RecoveryAdapter.preparation = preparation;
         RecoveryAdapter.calls = [];
-        RecoveryAdapter.onPrepare = undefined;
         const configPath = join(dir, 'playbook.config.yaml');
         await writeFile(
           configPath,

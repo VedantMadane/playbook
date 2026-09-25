@@ -30,7 +30,7 @@ A missing checkpoint shall preserve the existing retry behavior; an unsafe check
 
 ### recovery-5
 
-While a leaf has an invocation checkpoint and either a pending Boss question or a ready retry, saved-result assessment, or checkpoint-reconciliation action, its control view shall offer `recovery` containing the captured `prompt`, optional source-state `description`, and a runtime-owned `continuation` of exactly `{kind:'reply'}` or `{kind:'runtime',actionId}`.
+While a leaf has an invocation checkpoint and either a pending Boss question or a ready step retry or saved-result assessment, its control view shall offer `recovery` containing the captured `prompt`, optional source-state `description`, and a runtime-owned `continuation` of exactly `{kind:'reply'}` or `{kind:'runtime',actionId}`.
 The shell shall advertise only the availability and description to ordinary Captain decisions, keeping the full prompt for preparation [[playbook-captain-9](playbook-captain.md#playbook-captain-9)].
 
 ### recovery-6
