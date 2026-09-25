@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Source-to-GEARS checker no longer demands a quote marker on a command line the Source authored.** `pr.md` relays the pull request in quotes to `code` and then compares it as a single-quoted shell word inside the two commands it authors verbatim; the checker exempted those lines only once the optimize pass had turned their items into scripts, so the raw GEARS an exact `text2gears` compile writes — where the same commands are still Captain's own items — was rejected for `pullRequestUrl` lacking a literal quote marker. A prompt line the Source itself authored now keeps the Source's form, and the marker is owed only by a line the compiler composed ([[release-8](specs/packages/release.md#release-8)]).
+
 ## [15.1.0] - 2026-09-24
 
 ### Added

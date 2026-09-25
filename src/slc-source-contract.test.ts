@@ -262,6 +262,70 @@ After planning, Captain shall prompt Coder:
     );
   });
 
+  it('keeps a relayed value the Source authored inside a command line in its own form', () => {
+    // pr.md relays the pull request in quotes to `code` and then compares it
+    // as a single-quoted shell word inside two commands it authors verbatim.
+    const source = [
+      'When the checks fail, Captain shall call playbook `code` with the pull request in quotes (`>`):',
+      '',
+      '> Pull request: \\<pull-request-url\\>',
+      '',
+      '`pr` makes no more than one fix attempt.',
+      'Only after `code` succeeds does `pr` publish the fix.',
+      'The checkout can change while the nested `code` call suspends.',
+      'The command therefore compares the pull request as data.',
+      '',
+      'When `code` succeeds, Captain shall publish the fix by running exactly the following command:',
+      '',
+      `> [ "$(gh pr view --json url --jq .url)" = '<pull-request-url>' ] || exit 1`,
+      '> git push',
+      '',
+    ].join('\n');
+    const command = [
+      `> [ "$(gh pr view --json url --jq .url)" = '<pull-request-url>' ] || exit 1`,
+      '> git push',
+    ].join('\n');
+    const results = [
+      'Results:',
+      '- `published`: The command exited with status zero.',
+      '- `notPublished`: The command exited with a nonzero status.',
+    ].join('\n');
+    const gears = (acting: string, lines: string) =>
+      `### PR-3\n\nWhen the checks fail, Captain shall call playbook \`code\`:\n\n> > Pull request: <pull-request-url>\n\n### PR-4\n\n${acting}\n\n${lines}\n\n${results}\n`;
+
+    // Before the optimize pass the item is Captain's own work; after it, a
+    // script. Both carry the Source's line, so neither owes a quote marker.
+    expect(
+      checkSourceGearsContract(
+        source,
+        gears(
+          'When `code` succeeds, Captain shall publish the fix by running exactly the following command:',
+          command,
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      checkSourceGearsContract(
+        source,
+        gears('When `code` succeeds, Captain shall run:', command),
+      ),
+    ).toEqual([]);
+
+    // A line the compiler composed still owes the marker.
+    expect(
+      checkSourceGearsContract(
+        source,
+        gears(
+          'When `code` succeeds, Captain shall prompt Coder:',
+          `> Publish the fix to <pull-request-url>.\n${command}`,
+        ),
+      ),
+    ).toEqual([
+      'PR-4: prompt line is not an authored fragment: "Publish the fix to <pull-request-url>."',
+      'PR-4: relayed player field pullRequestUrl lacks a literal quote marker',
+    ]);
+  });
+
   it('fails when link omits a GEARS-derived verbatim field', () => {
     expect(checkLinkedVerbatimContract(GEARS, [])).toEqual([
       'linked runtime omits verbatim field coderOutput',

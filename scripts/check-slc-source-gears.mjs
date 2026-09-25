@@ -575,6 +575,10 @@ export function checkSourceGearsContract(sourceText, gearsText) {
     // into a prompt; the literal quote marker does not apply to it.
     if (item.script) continue;
     for (const line of item.prompt) {
+      // A line the Source authored keeps the Source's own form — a command
+      // that compares the value as a single-quoted shell word, for instance —
+      // so the marker is owed only by a line the compiler composed.
+      if (allPromptLines.has(line)) continue;
       for (const match of line.matchAll(PLACEHOLDER)) {
         const field = placeholderField(match[1]);
         if (!relayedFields.has(field)) continue;
