@@ -40,7 +40,11 @@ function fixture(name: 'code' | 'dev' | 'decide', specific: Record<string, unkno
   const module = ts.createSourceFile('fixture.ts', readFileSync(join(originalDir, `${name}.playbook.ts`), 'utf8'), ts.ScriptTarget.Latest, true);
   const declaration = module.statements.flatMap((s) => ts.isVariableStatement(s) ? [...s.declarationList.declarations] : []).find((d) => d.name.getText(module) === 'runtimeSpec')!;
   const spec = (declaration.initializer as ts.SatisfiesExpression).expression as ts.ObjectLiteralExpression;
-  const member = (key: string) => literal((spec.properties.find((p) => p.name?.getText(module) === key) as ts.PropertyAssignment).initializer);
+  // A materializer-emitted module carries its literal metadata in one spread
+  // object literal with quoted keys; a hand-linked one names each member.
+  const properties = spec.properties.flatMap((p) => ts.isSpreadAssignment(p) && ts.isObjectLiteralExpression(p.expression) ? [...p.expression.properties] : [p]);
+  const nameOf = (p: ts.ObjectLiteralElementLike) => p.name !== undefined && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : undefined;
+  const member = (key: string) => literal((properties.find((p) => nameOf(p) === key) as ts.PropertyAssignment).initializer);
   // Execute the compiled input on every supported Node version; its unchanged
   // TypeScript sibling supplies the erased player-input type to strict checks.
   const typedSource = readFileSync(join(originalDir, `${name}.fsm.ts`), 'utf8');

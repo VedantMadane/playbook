@@ -71,16 +71,14 @@ const PR_COMPLETE = {
 const CONTEXT: DevContext = {
   runResults: '',
   developmentRequest: 'Plan the request.',
-  discussionExchanges: [],
+  discussionContext: '',
   planningResult: 'Proceed with code.',
   decideCommit: 'decide123',
   evaluatedRevision: 'rev456',
-  deliveryViaPullRequest: false,
 };
 
 const PULL_REQUEST_CONTEXT: DevContext = {
   ...CONTEXT,
-  deliveryViaPullRequest: true,
   pullRequestPath: 'code',
   branch: BRANCH_COMPLETE.branch,
   baseRevision: BRANCH_COMPLETE.baseRevision,
@@ -144,13 +142,13 @@ const codeCallFixtures = (
 ): Record<string, readonly TransitionFixture[]> => ({
   [onDoneKey]: [
     {
-      guard: 'isCodeSuccessViaPullRequest',
+      guard: 'codeSucceededOnPullRequestPath',
       target: 'openPullRequest',
       context: pullRequestContext,
       event: done(CODE_COMPLETE),
     },
     {
-      guard: 'isPlainCodeSuccess',
+      guard: 'codeSucceededOnPlainPath',
       target: 'done',
       context: CONTEXT,
       event: done(CODE_COMPLETE),
@@ -168,7 +166,7 @@ const codeCallFixtures = (
   ],
   [onErrorKey]: [
     {
-      guard: 'authoredCodeFailure',
+      guard: 'authoredCodeResult',
       target: 'reportedChildFailure',
       context: CONTEXT,
       event: { type: 'xstate.error.actor.code', error: authoredFailure('code') },
@@ -188,19 +186,33 @@ const codeCallFixtures = (
 const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   'planAnalysis.invoke.onDone': [
     {
-      guard: 'isDiscussionComplete',
+      guard: 'needsBossReplyWithQuestion',
+      target: 'awaitBossReply',
+      context: CONTEXT,
+      event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
+    },
+    {
+      // A Boss question without question text cannot be presented, so it
+      // parks as malformed output instead of suspending.
+      guard: 'needsBossReplyWithoutQuestion',
+      target: 'failed',
+      context: CONTEXT,
+      event: done({ guard: 'needsBossReply' }),
+    },
+    {
+      guard: 'discussionCompleteAfterBossReply',
       target: 'discussionComplete',
       context: { ...pendingContext, bossReply: 'Thanks, stop here.' },
       event: done({ guard: 'discussionComplete' }),
     },
     {
-      guard: 'isCodePath',
+      guard: 'codePlanned',
       target: 'callCode',
       context: CONTEXT,
       event: done({ guard: 'code', planningResult: 'Proceed with code.' }),
     },
     {
-      guard: 'isDecideThenCode',
+      guard: 'decideThenCodePlanned',
       target: 'callDecide',
       context: CONTEXT,
       event: done({
@@ -209,7 +221,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       }),
     },
     {
-      guard: 'isCodeViaPullRequest',
+      guard: 'codeViaPullRequestPlanned',
       target: 'createBranch',
       context: CONTEXT,
       event: done({
@@ -218,19 +230,13 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       }),
     },
     {
-      guard: 'isDecideThenCodeViaPullRequest',
+      guard: 'decideThenCodeViaPullRequestPlanned',
       target: 'createBranch',
       context: CONTEXT,
       event: done({
         guard: 'decideThenCodeViaPullRequest',
         planningResult: 'Decide the design, then deliver issue #12 through a pull request.',
       }),
-    },
-    {
-      guard: 'needsBossReply',
-      target: 'awaitBossReply',
-      context: CONTEXT,
-      event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
     },
     {
       // Discussion complete without a preceding Boss reply is unavailable
@@ -241,21 +247,36 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       event: done({ guard: 'discussionComplete' }),
     },
   ],
+  'awaitBossReply.on.BOSS_REPLY': [
+    {
+      guard: 'emptyBossReply',
+      target: 'failed',
+      context: pendingContext,
+      event: { type: 'BOSS_REPLY', questionId: 'planAnalysis', answer: '  ' },
+    },
+    {
+      // The resume arm's guard is an inline function of the machine config.
+      guard: '<inline>',
+      target: '#planAnalysis',
+      context: pendingContext,
+      event: {
+        type: 'BOSS_REPLY',
+        questionId: 'planAnalysis',
+        answer: 'Use the narrow scope.',
+      },
+    },
+  ],
   'createBranch.invoke.onDone': [
     {
-      guard: 'isBranchSuccessForCode',
+      guard: 'branchSucceededForCode',
       target: 'callCode',
-      context: { ...CONTEXT, deliveryViaPullRequest: true, pullRequestPath: 'code' },
+      context: { ...CONTEXT, pullRequestPath: 'code' },
       event: done(BRANCH_COMPLETE),
     },
     {
-      guard: 'isBranchSuccessForDecide',
+      guard: 'branchSucceededForDecide',
       target: 'callDecide',
-      context: {
-        ...CONTEXT,
-        deliveryViaPullRequest: true,
-        pullRequestPath: 'decide-then-code',
-      },
+      context: { ...CONTEXT, pullRequestPath: 'decide-then-code' },
       event: done(BRANCH_COMPLETE),
     },
     {
@@ -263,7 +284,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       // path: DEV never substitutes an empty default.
       guard: '<fallback>',
       target: 'reportedChildFailure',
-      context: { ...CONTEXT, deliveryViaPullRequest: true, pullRequestPath: 'code' },
+      context: { ...CONTEXT, pullRequestPath: 'code' },
       event: done({
         status: 'branched',
         branch: 'issue-12-flaky-retry',
@@ -273,7 +294,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   ],
   'createBranch.invoke.onError': [
     {
-      guard: 'authoredBranchFailure',
+      guard: 'authoredBranchResult',
       target: 'reportedChildFailure',
       context: PULL_REQUEST_CONTEXT,
       event: {
@@ -298,7 +319,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   ),
   'callDecide.invoke.onDone': [
     {
-      guard: 'isDecideSuccess',
+      guard: 'decideSucceeded',
       target: 'callCodeAfterDecide',
       context: CONTEXT,
       event: done(DECIDE_COMPLETE),
@@ -312,7 +333,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   ],
   'callDecide.invoke.onError': [
     {
-      guard: 'authoredDecideFailure',
+      guard: 'authoredDecideResult',
       target: 'reportedChildFailure',
       context: CONTEXT,
       event: {
@@ -337,7 +358,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   ),
   'openPullRequest.invoke.onError': [
     {
-      guard: 'authoredPrFailure',
+      guard: 'authoredPrResult',
       target: 'reportedChildFailure',
       context: PULL_REQUEST_CONTEXT,
       event: {
@@ -357,24 +378,6 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       event: {
         type: 'xstate.error.actor.pr',
         error: new Error('control-plane failure'),
-      },
-    },
-  ],
-  'awaitBossReply.on.BOSS_REPLY': [
-    {
-      guard: 'emptyBossReply',
-      target: '#failed',
-      context: pendingContext,
-      event: { type: 'BOSS_REPLY', questionId: 'planAnalysis', answer: '  ' },
-    },
-    {
-      guard: 'resumesPlanAnalysis',
-      target: '#planAnalysis',
-      context: pendingContext,
-      event: {
-        type: 'BOSS_REPLY',
-        questionId: 'planAnalysis',
-        answer: 'Use the narrow scope.',
       },
     },
   ],
@@ -410,6 +413,7 @@ function orderedTransitions(
 
 function guardName(guard: unknown): string | undefined {
   if (typeof guard === 'string') return guard;
+  if (typeof guard === 'function') return '<inline>';
   if (!isRecord(guard)) return undefined;
   return typeof guard.type === 'string' ? guard.type : undefined;
 }
@@ -505,12 +509,12 @@ describe('DEV FSM transition coverage', () => {
       fixtures.forEach((fixture, index) => {
         const evaluations = arms.slice(0, index + 1).map((arm) => {
           const name = guardName(arm.guard);
-          return name === undefined
-            ? true
-            : guards[name](
-                { context: fixture.context, event: fixture.event },
-                undefined,
-              );
+          const args = { context: fixture.context, event: fixture.event };
+          if (name === undefined) return true;
+          if (name === '<inline>') {
+            return (arm.guard as (value: typeof args) => boolean)(args);
+          }
+          return guards[name](args, undefined);
         });
         expect(evaluations, `${location}[${index}]`).toEqual([
           ...Array.from({ length: index }, () => false),
@@ -528,13 +532,18 @@ describe('DEV FSM transition coverage', () => {
     }).config.states;
     expect(states.openPullRequest?.invoke?.onDone).toEqual({
       target: 'done',
-      actions: 'completeWithChildSuccess',
+      actions: {
+        type: 'completeWithChildSuccess',
+        params: { childPlaybookId: 'pr' },
+      },
     });
   });
 
   // On a pull-request path the `pr` call consumes the exact final evaluated
   // revision, so a CODE success that omits it proves neither the plain nor
-  // the pull-request completion: both success guards stay false.
+  // the pull-request completion: both success guards stay false. CODE's
+  // catalog success interface requires that revision on every path
+  // (DR-066), so the plain path no longer accepts its absence either.
   it('never completes a pull-request path from a CODE result without the evaluated revision', () => {
     const guards = devMachine.implementations.guards as unknown as Record<
       string,
@@ -546,20 +555,33 @@ describe('DEV FSM transition coverage', () => {
       allReviewsPassed: true,
     });
     expect(
-      guards.isCodeSuccessViaPullRequest(
+      guards.codeSucceededOnPullRequestPath(
         { context: PULL_REQUEST_CONTEXT, event },
         undefined,
       ),
     ).toBe(false);
     expect(
-      guards.isPlainCodeSuccess(
+      guards.codeSucceededOnPlainPath(
         { context: PULL_REQUEST_CONTEXT, event },
         undefined,
       ),
     ).toBe(false);
-    expect(guards.isPlainCodeSuccess({ context: CONTEXT, event }, undefined)).toBe(
-      true,
-    );
+    expect(
+      guards.codeSucceededOnPlainPath({ context: CONTEXT, event }, undefined),
+    ).toBe(false);
+    // Positive controls: the complete CODE result proves each path's success.
+    expect(
+      guards.codeSucceededOnPullRequestPath(
+        { context: PULL_REQUEST_CONTEXT, event: done(CODE_COMPLETE) },
+        undefined,
+      ),
+    ).toBe(true);
+    expect(
+      guards.codeSucceededOnPlainPath(
+        { context: CONTEXT, event: done(CODE_COMPLETE) },
+        undefined,
+      ),
+    ).toBe(true);
   });
 
   it('marks exactly the six accepted governed outcomes with stable identities', () => {
@@ -569,9 +591,19 @@ describe('DEV FSM transition coverage', () => {
     const onDone = states.planAnalysis?.invoke?.onDone;
     expect(Array.isArray(onDone)).toBe(true);
     const arms = onDone as readonly RawTransition[];
-    expect(arms).toHaveLength(7);
-    expect(arms.slice(0, -1).map((arm) => acceptedOutcomeMarkers(arm))).toEqual(
+    expect(arms).toHaveLength(8);
+    // The question-less Boss question (index 1) and the fallback accept no
+    // outcome; every other arm carries exactly its own marker.
+    expect(
+      arms.filter((_, index) => index !== 1 && index !== arms.length - 1)
+        .map((arm) => acceptedOutcomeMarkers(arm)),
+    ).toEqual(
       [
+        {
+          source: 'planAnalysis',
+          target: 'awaitBossReply',
+          acceptedOutcome: 'needsBossReply',
+        },
         {
           source: 'planAnalysis',
           target: 'discussionComplete',
@@ -597,13 +629,9 @@ describe('DEV FSM transition coverage', () => {
           target: 'createBranch',
           acceptedOutcome: 'decideThenCodeViaPullRequest',
         },
-        {
-          source: 'planAnalysis',
-          target: 'awaitBossReply',
-          acceptedOutcome: 'needsBossReply',
-        },
       ].map((marker) => [marker]),
     );
+    expect(acceptedOutcomeMarkers(arms[1]!)).toEqual([]);
     expect(acceptedOutcomeMarkers(arms.at(-1)!)).toEqual([]);
     for (const stateId of [
       'createBranch',
@@ -828,7 +856,6 @@ describe('DEV FSM transition coverage', () => {
     ]);
     // Every pull-request identity came from a child's canonical result.
     expect(snapshot.context).toMatchObject({
-      deliveryViaPullRequest: true,
       pullRequestPath: 'code',
       branch: BRANCH_COMPLETE.branch,
       baseRevision: BRANCH_COMPLETE.baseRevision,
@@ -1089,7 +1116,10 @@ describe('DEV FSM transition coverage', () => {
       value.matches('failed'),
     );
     expect(snapshot.status).toBe('active');
-    expect(snapshot.context.lastError).toBeInstanceOf(Error);
+    expect(snapshot.context.lastError).toMatchObject({
+      name: 'Error',
+      message: 'bridge failure',
+    });
     expect(snapshot.context.completion).toBeUndefined();
   });
 
@@ -1312,7 +1342,10 @@ describe('DEV FSM transition coverage', () => {
       value.matches('failed'),
     );
     expect(snapshot.status).toBe('active');
-    expect(snapshot.context.lastError).toBeInstanceOf(Error);
+    expect(snapshot.context.lastError).toMatchObject({
+      name: 'Error',
+      message: 'bridge failure',
+    });
     expect(snapshot.context.completion).toBeUndefined();
   });
 
@@ -1326,8 +1359,9 @@ describe('DEV FSM transition coverage', () => {
       value.matches('failed'),
     );
     expect(snapshot.status).toBe('active');
-    expect(String(snapshot.context.lastError)).toContain(
-      'did not match an available outcome',
-    );
+    expect(snapshot.context.lastError).toMatchObject({
+      name: 'MalformedActorOutput',
+      message: expect.stringContaining('did not match an available declared result'),
+    });
   });
 });

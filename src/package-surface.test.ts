@@ -1341,7 +1341,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'default',
       'validateDecideOptions',
     ],
-    './dev/playbook': ['_internal', 'default'],
+    './dev/playbook': ['_internal', 'default', 'validateOptions'],
     './dev/registry': [
       'default',
       'devCopyPasteGuardNames',
@@ -1804,8 +1804,6 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
     './dev/playbook': [
       'CaptainCallOptions',
       'CaptainResult',
-      'DevPlaybookHostCapabilities',
-      'DevPlaybookOptions',
       'JsonValue',
       'NormalizedError',
       'PlaybookCallRequest',
@@ -1813,11 +1811,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1829,6 +1829,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerSessionStore',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './dev/registry': [
       'DevOptions',
@@ -2442,7 +2443,7 @@ import type { ReviewPlaybookHostCapabilities } from '@sublang/playbook/review/pl
 import { decidePlaybookRegistryEntry } from '@sublang/playbook/decide/registry';
 import type { DecidePlaybookHostCapabilities } from '@sublang/playbook/decide/playbook';
 import { devPlaybookRegistryEntry } from '@sublang/playbook/dev/registry';
-import type { DevPlaybookHostCapabilities } from '@sublang/playbook/dev/playbook';
+import type { PlaybookHostCapabilities as DevPlaybookHostCapabilities } from '@sublang/playbook/dev/playbook';
 import { branchPlaybookRegistryEntry } from '@sublang/playbook/branch/registry';
 import type { PlaybookHostCapabilities as BranchPlaybookHostCapabilities } from '@sublang/playbook/branch/playbook';
 import { prPlaybookRegistryEntry } from '@sublang/playbook/pr/registry';
@@ -2521,10 +2522,11 @@ declare const hostCapabilities: PlaybookHostConstructionCapabilities;
 declare const codeHostCapabilities: CodePlaybookHostCapabilities;
 declare const reviewHostCapabilities: ReviewPlaybookHostCapabilities;
 declare const decideHostCapabilities: DecidePlaybookHostCapabilities;
-declare const devHostCapabilities: DevPlaybookHostCapabilities;
 // The materialized modules type authority as opaque; each registry entry takes
-// the Captain's construction capabilities alongside it (BRANCH for the
+// the Captain's construction capabilities alongside it (DEV and BRANCH for the
 // governed worktree, PR for the script working directory).
+declare const devHostCapabilities: PlaybookHostConstructionCapabilities &
+  DevPlaybookHostCapabilities;
 declare const branchHostCapabilities: PlaybookHostConstructionCapabilities &
   BranchPlaybookHostCapabilities;
 declare const prHostCapabilities: PlaybookHostConstructionCapabilities &

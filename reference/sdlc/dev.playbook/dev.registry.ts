@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
+import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
 import createPlaybookRuntime, {
-  type DevPlaybookHostCapabilities,
+  type PlaybookHostCapabilities,
   type PlaybookRuntime,
 } from './dev.playbook.js';
 
@@ -33,9 +34,12 @@ export interface DevPlaybookRegistryEntry {
   concurrentRoleSets: readonly [];
   summaryPolicy: PlaybookSummaryPolicy;
   validateOptions(optionSlice: unknown): DevOptions;
+  // The linked module types live authority as opaque (link-materialization);
+  // the Captain entry binds its own construction capabilities here.
   createRuntime(
     options: DevOptions,
-    hostCapabilities: DevPlaybookHostCapabilities,
+    hostCapabilities: PlaybookHostConstructionCapabilities &
+      PlaybookHostCapabilities,
   ): PlaybookRuntime;
 }
 
