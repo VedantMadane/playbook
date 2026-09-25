@@ -1890,7 +1890,7 @@ Where the retained-resumption end-to-end suite drives the maintained real CODE a
 | Current parked generation | A quiescent CODE park resumes in place from the generation exported at that settlement. |
 | Recoverable failure | The resumed failure advertises its existing retry, and the shell applies that action once without a fresh start before the engagement completes. |
 | Real nested suspension | The CODE-to-REVIEW stack adopts root to leaf without starting a replacement child, and child completion resumes CODE exactly once. |
-| Artifact-declared unfinished terminal | CODE's `reportedReviewFailure` retains and adopts the preceding active generation rather than a final snapshot. |
+| Artifact-declared unfinished terminal | CODE's `reviewFailed` retains and adopts the preceding active generation rather than a final snapshot. |
 | Dismissed root | The exact turn-start generation survives dismissal and later resumes. |
 | Adapter-swap fresh session | Current-ledger binding selects the replacement adapter with a fresh player conversation without returning the machine to its initial state. |
 | Stale external world | Resumed REVIEW surfaces the post-capture change through its ordinary findings round before eventual completion. |

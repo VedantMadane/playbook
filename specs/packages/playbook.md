@@ -205,14 +205,14 @@ Where CODE runs under artifact schema `3`, each delegated Coder outcome shall de
 
 | Source state | Accepted outcome | Payload authority | Repository disposition | Target state |
 | --- | --- | --- | --- | --- |
-| `runFirstPhase` | `directCommit` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewFirstCommit` |
-| `runFirstPhase` | `irCommit` | presentation `coderOutput`; semantic `irNumber`; effect `latestCommit` | `one-descendant-commit` | `reviewFirstCommit` |
-| `runFirstPhase` | `moreTasks` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTask` |
-| `runFirstPhase` | `finalTask` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTask` |
-| `runFirstPhase` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
-| `runIrTask` | `moreTasks` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTask` |
-| `runIrTask` | `finalTask` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTask` |
-| `runIrTask` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
+| `firstPhase` | `directCommit` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewNewIntentPhase` |
+| `firstPhase` | `irCommit` | presentation `coderOutput`; semantic `irNumber`; effect `latestCommit` | `one-descendant-commit` | `reviewNewIntentPhase` |
+| `firstPhase` | `moreTasks` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTaskPhase` |
+| `firstPhase` | `finalTask` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTaskPhase` |
+| `firstPhase` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
+| `irTaskPhase` | `moreTasks` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTaskPhase` |
+| `irTaskPhase` | `finalTask` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTaskPhase` |
+| `irTaskPhase` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
 
 The Coder prompts shall continue to require the phase's one commit but shall prescribe no `Commit:` marker or other response formatting, while the reconciler shall treat `coderOutput` as opaque presentation, obtain `latestCommit` only from the matching receipt OID, and retain `irNumber`, `irTask` naming the exact implemented task, and the `moreTasks` versus `finalTask` choice as exact semantic evidence under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)].
 Each accepted matrix arm shall execute one stable `playbook.acceptedOutcome` marker carrying its exact source, target, and accepted outcome under [[playbook-runtime-81](playbook-runtime.md#playbook-runtime-81)], and each deferred arm shall use the checkpoint-bound continuation of [[playbook-30](#playbook-30)].
