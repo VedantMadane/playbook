@@ -1,34 +1,46 @@
 export type BranchStateId = 'createBranch';
 export type BranchSourceItem = 'BRANCH-1';
+/**
+ * Stable working-leaf ids that may suspend on a Boss question and be resumed
+ * by `BOSS_REPLY`. The machine has at most one active player task, so the
+ * scalar Boss-reply form applies.
+ */
+declare const RESUMABLE_STATE_IDS: readonly ["createBranch"];
+export type ResumableStateId = (typeof RESUMABLE_STATE_IDS)[number];
+/** JSON-safe normalization of a rejected invocation, retained for inspection. */
+export type NormalizedError = {
+    readonly name: string;
+    readonly message: string;
+    readonly stack?: string;
+};
+/** Question record raised by the suspended Coder working leaf. */
 export type PendingBossQuestion = {
-    readonly questionId: 'createBranch';
-    readonly resumeStateId: 'createBranch';
-    readonly sourceItem: 'BRANCH-1';
+    readonly questionId: ResumableStateId;
+    readonly resumeStateId: ResumableStateId;
+    readonly sourceItem: BranchSourceItem;
     readonly asker: {
         readonly kind: 'role';
         readonly roleId: 'coder';
     };
     readonly question: string;
 };
+/** Typed input for the delegated `player` actor. */
 export type PlayerInput = {
     readonly stateId: 'createBranch';
     readonly role: 'coder';
     readonly sourceItem: 'BRANCH-1';
     readonly prompt: string;
     readonly result: Readonly<Record<string, string>>;
+    /** Backs the prompt's `<caller-input>` placeholder with the exact caller input. */
     readonly callerInput: string;
     readonly pendingBossQuestion?: PendingBossQuestion;
     readonly bossReply?: string;
 };
+/** Discriminated result contract of the delegated `player` actor. */
 export type PlayerOutput = {
     readonly guard: 'branched';
     readonly branch: string;
-    /**
-     * Receipt-owned effect evidence (DR-045): the branching call's
-     * `unchanged` receipt observes the commit the branch was created from
-     * as HEAD, so the linked runtime injects it and never takes it from
-     * Coder's prose.
-     */
+    /** Exact base revision from repository authority, not from Coder's prose. */
     readonly baseRevision: string;
     readonly issueSummary: string;
 } | {
@@ -38,47 +50,55 @@ export type PlayerOutput = {
     readonly guard: 'needsBossReply';
     readonly question: string;
 };
+/**
+ * Terminal result: exactly the packaged `branch` workflow's public output
+ * interface (workflow-contracts.json), derived from typed context.
+ */
 export type BranchPlaybookOutput = {
     readonly status: 'branched';
-    /** Exact name of the new branch now checked out. */
+    /** Exact new branch name. */
     readonly branch: string;
-    /** Exact receipt-observed revision the branch was created from. */
+    /** Exact receipt-observed repository revision the branch was created from. */
     readonly baseRevision: string;
-    /** Coder's concise summary of the issue and its comments, or of the request. */
+    /** Concise issue-and-comments or request summary. */
     readonly issueSummary: string;
 } | {
     readonly status: 'refused';
-    /** Coder's complete report carrying the reason no branch was created. */
+    /** Complete refusal report. */
     readonly coderOutput: string;
 };
-export type BranchInput = Readonly<Record<string, never>>;
+/** The machine reads no input: the caller input arrives on `START_BRANCH`. */
+export type BranchInput = Readonly<Record<never, never>>;
+export type BranchCompletion = 'branched' | 'refused';
 export type BranchContext = {
     readonly callerInput?: string;
     readonly branch?: string;
-    /** Observed HEAD of the branching call's unchanged receipt (DR-045). */
     readonly baseRevision?: string;
     readonly issueSummary?: string;
     readonly coderOutput?: string;
-    readonly completion?: 'branched' | 'refused';
-    readonly lastError?: unknown;
+    readonly completion?: BranchCompletion;
+    readonly lastError?: NormalizedError;
     readonly pendingBossQuestion?: PendingBossQuestion;
     readonly bossReply?: string;
 };
+/** Typed Boss surfaces: the caller's entry event and the Boss reply. */
 export type BranchEvent = {
     readonly type: 'START_BRANCH';
     readonly callerInput: string;
 } | {
     readonly type: 'BOSS_REPLY';
     readonly answer: string;
-    readonly questionId?: 'createBranch';
+    readonly questionId?: ResumableStateId;
 };
+/** No parallel group in this playbook. */
+export declare const concurrentRoleSets: readonly (readonly string[])[];
 export declare const branchMachine: import("xstate").StateMachine<BranchContext, {
     readonly type: "START_BRANCH";
     readonly callerInput: string;
 } | {
     readonly type: "BOSS_REPLY";
     readonly answer: string;
-    readonly questionId?: "createBranch";
+    readonly questionId?: ResumableStateId;
 }, {
     [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | undefined;
 }, {
@@ -96,16 +116,22 @@ export declare const branchMachine: import("xstate").StateMachine<BranchContext,
     type: "rememberActorError";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberPendingQuestion";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberBossReply";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberEmptyBossReplyError";
-    params: import("xstate").NonReducibleUnknown;
-} | {
     type: "rememberMalformedPlayerOutput";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "rememberMalformedBossReply";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "setPendingBossQuestion";
+    params: {
+        readonly stateId: ResumableStateId;
+        readonly sourceItem: BranchSourceItem;
+    };
+} | {
+    type: "clearBossReplyContext";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "acceptBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "startBranch";
@@ -118,9 +144,16 @@ export declare const branchMachine: import("xstate").StateMachine<BranchContext,
     params: import("xstate").NonReducibleUnknown;
 }, {
     type: "needsBossReply";
-    params: unknown;
+    params: {
+        readonly stateId: ResumableStateId;
+    };
 } | {
-    type: "emptyBossReply";
+    type: "canResume";
+    params: {
+        readonly stateId: ResumableStateId;
+    };
+} | {
+    type: "givesRequest";
     params: unknown;
 } | {
     type: "isBranched";
@@ -128,20 +161,17 @@ export declare const branchMachine: import("xstate").StateMachine<BranchContext,
 } | {
     type: "isRefused";
     params: unknown;
-} | {
-    type: "resumesCreateBranch";
-    params: unknown;
-}, never, "failed" | "ready" | "awaitBossReply" | "refused" | "createBranch" | "branched", string, Readonly<Record<string, never>>, {
+}, never, "failed" | "ready" | "awaitBossReply" | "refused" | "createBranch" | "branched", string, Readonly<Record<never, never>>, {
     readonly status: "branched";
-    /** Exact name of the new branch now checked out. */
+    /** Exact new branch name. */
     readonly branch: string;
-    /** Exact receipt-observed revision the branch was created from. */
+    /** Exact receipt-observed repository revision the branch was created from. */
     readonly baseRevision: string;
-    /** Coder's concise summary of the issue and its comments, or of the request. */
+    /** Concise issue-and-comments or request summary. */
     readonly issueSummary: string;
 } | {
     readonly status: "refused";
-    /** Coder's complete report carrying the reason no branch was created. */
+    /** Complete refusal report. */
     readonly coderOutput: string;
 }, import("xstate").EventObject, import("xstate").MetaObject, {
     id: "branch";

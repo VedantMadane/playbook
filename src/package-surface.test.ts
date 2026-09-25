@@ -761,9 +761,10 @@ describe('canonical Captain compiler bundle (CAPPLAY-11)', () => {
 
 describe('artifact schema cutover (RELEASE-15)', () => {
   it('keeps every shipped runtime and registry sibling on schema 3', () => {
-    const schemaDeclaration = /artifactSchema:\s*3/;
+    // A materialized module declares its compat block as JSON, key quoted.
+    const schemaDeclaration = /\bartifactSchema"?:\s*3/;
     const legacyDeclaration =
-      /artifactSchema:\s*2|SchemaV2|RegistryEntryV2/;
+      /artifactSchema"?:\s*2|SchemaV2|RegistryEntryV2/;
 
     for (const id of BUNDLED_WORKFLOW_IDS) {
       const base = `reference/sdlc/${id}.playbook/`;
@@ -1360,7 +1361,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'devSummaryPolicy',
       'validateDevOptions',
     ],
-    './branch/playbook': ['_internal', 'default'],
+    './branch/playbook': ['_internal', 'default', 'validateOptions'],
     './branch/registry': [
       'branchCopyPasteGuardNames',
       'branchPlaybookRegistryEntry',
@@ -1855,8 +1856,6 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'validateDevOptions',
     ],
     './branch/playbook': [
-      'BranchPlaybookHostCapabilities',
-      'BranchPlaybookOptions',
       'CaptainCallOptions',
       'CaptainResult',
       'JsonValue',
@@ -1866,11 +1865,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1882,6 +1883,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerSessionStore',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './branch/registry': [
       'BranchOptions',
@@ -2457,7 +2459,7 @@ import type {
 import { devPlaybookRegistryEntry } from '@sublang/playbook/dev/registry';
 import type { DevPlaybookHostCapabilities } from '@sublang/playbook/dev/playbook';
 import { branchPlaybookRegistryEntry } from '@sublang/playbook/branch/registry';
-import type { BranchPlaybookHostCapabilities } from '@sublang/playbook/branch/playbook';
+import type { PlaybookHostCapabilities as BranchPlaybookHostCapabilities } from '@sublang/playbook/branch/playbook';
 import { prPlaybookRegistryEntry } from '@sublang/playbook/pr/registry';
 import type { PrPlaybookHostCapabilities } from '@sublang/playbook/pr/playbook';
 import type {
@@ -2535,7 +2537,10 @@ declare const codeHostCapabilities: CodePlaybookHostCapabilities;
 declare const reviewHostCapabilities: ReviewPlaybookHostCapabilities;
 declare const decideHostCapabilities: DecidePlaybookHostCapabilities;
 declare const devHostCapabilities: DevPlaybookHostCapabilities;
-declare const branchHostCapabilities: BranchPlaybookHostCapabilities;
+// BRANCH's materialized module types live authority as opaque; its registry
+// entry takes the Captain's construction capabilities alongside it.
+declare const branchHostCapabilities: PlaybookHostConstructionCapabilities &
+  BranchPlaybookHostCapabilities;
 declare const prHostCapabilities: PrPlaybookHostCapabilities;
 declare const ports: PlaybookPorts;
 declare const v3Entry: PlaybookCaptainRegistryEntryV3;
@@ -2648,10 +2653,17 @@ void prCapabilities;
     '%s visibly re-exports PlayerSessionStore from the shared contract',
     (id) => {
       const dts = declarationSourceOf(`./${id}/playbook`);
-      const imported = dts.match(
-        /import type \{([\s\S]*?)\} from '@sublang\/playbook\/runtime';/,
+      // A materialized module re-exports straight from the shared contract
+      // in one `export type { … } from` statement.
+      const direct = dts.match(
+        /^export type \{([^}]*)\} from '@sublang\/playbook\/runtime';$/m,
       );
-      const reexported = dts.match(/^export type \{([\s\S]*?)\};$/m);
+      const imported =
+        direct ??
+        dts.match(
+          /import type \{([\s\S]*?)\} from '@sublang\/playbook\/runtime';/,
+        );
+      const reexported = direct ?? dts.match(/^export type \{([\s\S]*?)\};$/m);
       const names = (body: string | undefined): string[] =>
         (body ?? '')
           .split(',')

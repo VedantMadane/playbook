@@ -35,9 +35,9 @@ const BRANCHED_REPLY = {
   issueSummary: ISSUE_SUMMARY,
 } as const;
 const BRANCHED_DESCRIPTION =
-  "A new branch for the request is checked out at the caller's current commit; no file changed and no commit was made.";
+  'A new branch for the request was created at the current commit and checked out; the workflow returns its exact name, the exact base revision taken from repository authority, and the issue summary.';
 const REFUSED_DESCRIPTION =
-  'No branch was created: Coder reported the obstacle with its reason — a dirty working tree, an unauthenticated `gh`, an unreadable issue, or a branch-name collision.';
+  "No branch was created: Coder reported the failure with its reason, and the workflow fails and reports Coder's complete result to its caller.";
 
 type RepositoryEffect = 'unchanged' | 'branch' | 'commit' | 'worktree';
 
@@ -408,7 +408,7 @@ describe('linked BRANCH runtime', () => {
       // the effect-owned base revision is named as runtime-supplied.
       expect(host.judgePrompts).toHaveLength(1);
       expect(host.judgePrompts[0]).toContain(
-        '{ "guard": "branched", "branch": <exact branch name>, "issueSummary": <concise summary> }',
+        '{ "guard": "branched", "branch": <exact branch name>, "issueSummary": <concise summary of the issue and its comments, or of the request when no issue is named> }',
       );
       expect(host.judgePrompts[0]).toContain('`baseRevision` (effect-owned)');
       expect(host.judgePrompts[0]).toContain('`coderOutput` (presentation-owned)');
