@@ -224,18 +224,18 @@ Where REVIEW runs under artifact schema `3`, each delegated outcome shall declar
 
 | Source state | Accepted outcome | Payload authority | Repository disposition | Target state |
 | --- | --- | --- | --- | --- |
-| `reviewInitial` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `addressFindings` |
-| `reviewInitial` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
-| `reviewInitial` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
-| `addressFindings` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewAfterCommit` |
-| `addressFindings` | `rejectedAll` | presentation `coderOutput` | `unchanged` | `reviewAfterRebuttal` |
-| `addressFindings` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
-| `reviewAfterCommit` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `addressFindings` |
-| `reviewAfterCommit` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
+| `reviewFirstRound` | `findings` | presentation `reviewerOutput` | `unchanged` | `fixFindings` |
+| `reviewFirstRound` | `clean` | effect `evaluatedRevision` | `unchanged` | `done` |
+| `reviewFirstRound` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
+| `fixFindings` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewAfterCommit` |
+| `fixFindings` | `rejectedAll` | presentation `coderOutput` | `unchanged` | `reviewAfterRejection` |
+| `fixFindings` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
+| `reviewAfterCommit` | `findings` | presentation `reviewerOutput` | `unchanged` | `fixFindings` |
+| `reviewAfterCommit` | `clean` | effect `evaluatedRevision` | `unchanged` | `done` |
 | `reviewAfterCommit` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
-| `reviewAfterRebuttal` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `addressFindings` |
-| `reviewAfterRebuttal` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
-| `reviewAfterRebuttal` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
+| `reviewAfterRejection` | `findings` | presentation `reviewerOutput` | `unchanged` | `fixFindings` |
+| `reviewAfterRejection` | `clean` | effect `evaluatedRevision` | `unchanged` | `done` |
+| `reviewAfterRejection` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
 
 The reconciler shall treat `reviewerOutput`, `coderOutput`, and `question` as opaque presentation and shall require a matching `unchanged` receipt for every Reviewer arm, including each question and its separately governed authored continuation under [[playbook-12](#playbook-12)].
 The reconciler shall obtain `latestCommit` only from the matching receipt OID and `evaluatedRevision` only from the matching `unchanged` receipt's observed HEAD per [DR-045](../decisions/045-unchanged-receipt-revision-authority.md).
