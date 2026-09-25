@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai> -->
 
-# CODE: Commit-Based Coding Workflow
+# Code
 
 Roles:
 
@@ -11,11 +11,12 @@ Roles:
 
 ### CODE-1
 
-When the first coding phase begins, Captain shall prompt Coder:
+Each phase ends with exactly one new Coder commit owned by `code`, and no existing commit is rewritten.
+Captain uses the repository-effect receipt as the authoritative identity of the phase's new commit.
+When the request may continue an existing IR that it does not identify unambiguously, Coder asks Boss before changing files, and Boss's answer resumes this same phase.
 
-> > Original request: <caller-input>
-> > Run results: <run-results>
->
+When the first coding phase begins for the caller's coding request and any relevant context, Captain shall prompt Coder:
+
 > First determine whether the coding request starts a new coding intent or continues an existing IR with unfinished work.
 > If the request may continue an existing IR but does not identify it unambiguously, ask Boss before changing files.
 >
@@ -37,36 +38,39 @@ When the first coding phase begins, Captain shall prompt Coder:
 > Make the commit message explain concisely what changed and why, including relevant verification.
 > Identify every new commit you make.
 > Credit every AI that contributed to this commit: Coder <coder-llm>.
+>
+> > Original request: <caller-input>
+> > Run results: <run-results>
 
 Results:
-- `directCommit`: Coder completed and committed the direct implementation phase. Output shall include `coderOutput: <verbatim final text>` and `latestCommit: <commit identity>`.
-- `irCommit`: Coder created and committed a new IR without implementing an IR task. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, and `irNumber` identifying the created IR.
-- `moreTasks`: Coder continued an existing IR, completed and committed exactly its next unfinished task, and at least one task remains. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, `irNumber` identifying the continued IR, and `irTask` naming the implemented task.
-- `finalTask`: Coder continued an existing IR and completed and committed its final task. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, `irNumber` identifying the continued IR, and `irTask` naming the implemented task.
+- `directCommit`: Coder completed the new coding intent as one direct implementation phase and made its one new commit; Coder's result affirmatively supports this outcome, and no fixed presentation format of the reply is required. Output shall include `coderOutput: <verbatim final text>` and `latestCommit: <commit identity>`.
+- `irCommit`: Coder decomposed the new coding intent into a new IR, implemented no IR task, and made its one new commit; Coder's result affirmatively supports this outcome, and no fixed presentation format of the reply is required. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, and `irNumber` identifying the created IR.
+- `moreTasks`: Coder continued an existing IR, implemented exactly its next unfinished task, made its one new commit, and at least one IR task remains unfinished; Coder's result affirmatively supports this outcome, and no fixed presentation format of the reply is required. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, `irNumber` identifying the continued IR, and `irTask` naming the implemented task.
+- `finalTask`: Coder continued an existing IR, implemented its final unfinished task, and made its one new commit; Coder's result affirmatively supports this outcome, and no fixed presentation format of the reply is required. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, `irNumber` identifying the continued IR, and `irTask` naming the implemented task.
 
 ### CODE-2
 
-When a direct implementation or new-IR phase has one new commit, Captain shall call playbook `review`:
+Captain waits until `review` passes with no unsettled findings; playbook `review` owns every review round and every review-fix commit, and no existing commit is rewritten.
+
+When a direct implementation or new-IR phase ends with its one new `code`-owned commit, Captain shall call playbook `review`:
 
 > > Original intent: <caller-input>
 > > Review scope: the commit <code-commit> from this coding phase and its resulting repository state.
 > > Coder output: <coder-output>
 
-Workflow outcomes:
-- A nested `review` passes the phase only when its result applies to the supplied review scope, returns the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain.
-- A pass after a direct implementation phase completes `code` with the exact last `code`-owned commit, the exact final evaluated repository revision, and the fact that every phase's review passed with no unsettled findings.
-- A pass after a new-IR phase continues with the next unfinished IR-task phase.
-- An authored `review` abort or failure, or a terminal result that does not establish that the supplied scope was evaluated with no unsettled findings, terminates `code` with the failure and the last `code`-owned commit.
-- Any other nested-call error parks `code` as failed and retains the control-plane error.
+A nested `review` passes the phase only when its result applies to that supplied review scope, returns the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain.
+When `review` passes a direct implementation phase, `code` is complete and returns to its caller the exact last `code`-owned commit, the exact final evaluated repository revision, and the fact that every phase's review passed with no unsettled findings.
+When `review` passes a new-IR phase, Captain continues with the next unfinished IR-task phase.
+When `review` returns an authored abort or failure, or a terminal result that does not establish that the supplied scope was evaluated with no unsettled findings, `code` starts no further phase and reports the failure and the last `code`-owned commit to its caller.
+When the nested `review` call fails outside that authored result contract, `code` parks as failed and retains the control-plane error instead of reporting an authored review outcome.
 
 ### CODE-3
 
+Each phase ends with exactly one new Coder commit owned by `code`, and no existing commit is rewritten.
+Captain uses the repository-effect receipt as the authoritative identity of the phase's new commit.
+
 When a later IR-task phase begins, Captain shall prompt Coder:
 
-> > Original request: <caller-input>
-> > IR number: <ir-number>
-> > Run results: <run-results>
->
 > Read the identified IR and implement exactly its next unfinished task, including corresponding tests or specs if any.
 > Do not implement a later task in this phase.
 > Mark the IR's progress and deliverables when relevant.
@@ -78,23 +82,34 @@ When a later IR-task phase begins, Captain shall prompt Coder:
 > Make the commit message explain concisely what changed and why, including relevant verification.
 > Identify every new commit you make.
 > Credit every AI that contributed to this commit: Coder <coder-llm>.
+>
+> > Original request: <caller-input>
+> > IR number: <ir-number>
+> > Run results: <run-results>
 
 Results:
-- `moreTasks`: Coder completed and committed exactly the IR's next unfinished task and at least one task remains. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, `irNumber` identifying the continued IR, and `irTask` naming the implemented task.
-- `finalTask`: Coder completed and committed the IR's final task. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, `irNumber` identifying the continued IR, and `irTask` naming the implemented task.
+- `moreTasks`: Coder implemented exactly the IR's next unfinished task, made its one new commit, and at least one IR task remains unfinished; Coder's result affirmatively supports this outcome, and no fixed presentation format of the reply is required. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, `irNumber` identifying the IR, and `irTask` naming the implemented task.
+- `finalTask`: Coder implemented the IR's final unfinished task and made its one new commit; Coder's result affirmatively supports this outcome, and no fixed presentation format of the reply is required. Output shall include `coderOutput: <verbatim final text>`, `latestCommit: <commit identity>`, `irNumber` identifying the IR, and `irTask` naming the implemented task.
 
 ### CODE-4
 
-When an IR-task phase has one new commit, Captain shall call playbook `review`:
+Captain waits until `review` passes with no unsettled findings; playbook `review` owns every review round and every review-fix commit, and no existing commit is rewritten.
+
+When an IR-task phase, including the first phase for an existing IR, ends with its one new `code`-owned commit, Captain shall call playbook `review`:
 
 > > Original intent: <caller-input>
 > > Review scope: the commit <code-commit> from this coding phase and its resulting repository state.
 > > Coder output: <coder-output>
+>
 > > Current IR task: <ir-task>
 
-Workflow outcomes:
-- A nested `review` passes the phase only when its result applies to the supplied review scope, returns the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain.
-- A pass after a nonfinal IR-task phase continues with the next unfinished IR-task phase.
-- A pass after the final IR-task phase completes `code` with the exact last `code`-owned commit, the exact final evaluated repository revision, and the fact that every phase's review passed with no unsettled findings.
-- An authored `review` abort or failure, or a terminal result that does not establish that the supplied scope was evaluated with no unsettled findings, terminates `code` with the failure and the last `code`-owned commit.
-- Any other nested-call error parks `code` as failed and retains the control-plane error.
+A nested `review` passes the phase only when its result applies to that supplied review scope, returns the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain.
+When `review` passes a nonfinal IR-task phase, Captain continues with the next unfinished IR-task phase.
+When `review` passes the final IR-task phase, `code` is complete and returns to its caller the exact last `code`-owned commit, the exact final evaluated repository revision, and the fact that every phase's review passed with no unsettled findings.
+When `review` returns an authored abort or failure, or a terminal result that does not establish that the supplied scope was evaluated with no unsettled findings, `code` starts no further phase and reports the failure and the last `code`-owned commit to its caller.
+When the nested `review` call fails outside that authored result contract, `code` parks as failed and retains the control-plane error instead of reporting an authored review outcome.
+
+## Prefixed prompts
+
+- CODE-1: relays → tail
+- CODE-3: relays → tail

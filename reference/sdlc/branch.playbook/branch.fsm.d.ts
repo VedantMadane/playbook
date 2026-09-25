@@ -119,7 +119,7 @@ export declare const branchMachine: import("xstate").StateMachine<BranchContext,
     type: "rememberMalformedPlayerOutput";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberMalformedBossReply";
+    type: "clearBossReplyContext";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "setPendingBossQuestion";
@@ -128,7 +128,7 @@ export declare const branchMachine: import("xstate").StateMachine<BranchContext,
         readonly sourceItem: BranchSourceItem;
     };
 } | {
-    type: "clearBossReplyContext";
+    type: "rememberMalformedBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "acceptBossReply";

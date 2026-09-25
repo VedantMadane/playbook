@@ -84,7 +84,7 @@ const linkedWorkflows = [
     linkedFields: codeInternal.VERBATIM_PAYLOAD_FIELDS,
     expectedFields: ['coderOutput'],
     unfinishedFinalStateIds: codeInternal.UNFINISHED_FINAL_STATE_IDS,
-    expectedUnfinishedFinalStateIds: ['reportedReviewFailure'],
+    expectedUnfinishedFinalStateIds: ['reviewFailed'],
   },
   {
     id: 'REVIEW',

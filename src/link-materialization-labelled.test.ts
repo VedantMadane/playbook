@@ -67,8 +67,8 @@ function fixture(name: 'code' | 'dev' | 'decide', specific: Record<string, unkno
 }
 const runResults = { options: { runResults: { type: 'string', required: false } }, inputMapping: { runResults: 'runResults' } };
 const code = fixture('code', {
-  machineExport: 'codingMachine', ...runResults, verbatimPayloadFields: ['coderOutput'],
-  resumableStateIds: ['runFirstPhase', 'runIrTask'], unfinishedFinalStateIds: ['reportedReviewFailure'],
+  machineExport: 'codeMachine', ...runResults, verbatimPayloadFields: ['coderOutput'],
+  resumableStateIds: ['firstPhase', 'irTaskPhase'], unfinishedFinalStateIds: ['reviewFailed'],
   omitEmptyRelayLines: ['> Run results: <run-results>'], identityPlaceholders: { 'coder-llm': 'coder' },
 });
 const dev = fixture('dev', {
@@ -104,10 +104,10 @@ it('renders labelled strings and identities literally through the actual emitted
   const probe = spawnSync(process.execPath, ['--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import { _internal } from ${JSON.stringify(pathToFileURL(compiled).href)};
-    const value = { stateId: 'runFirstPhase', sourceItem: 'CODE-1', role: 'coder', result: {},
+    const value = { stateId: 'firstPhase', sourceItem: 'CODE-1', role: 'coder', result: {},
       prompt: '> Original request: <caller-input>\\r\\n> Run results: <run-results>\\r\\n> Other: <empty>\\r\\nCoder is <coder-llm>; missing <missing>.',
       callerInput: 'one\\r\\n\\r\\ntwo <coder-llm> $&', runResults: '', empty: '',
-      pendingBossQuestion: { questionId: 'q', resumeStateId: 'runFirstPhase', sourceItem: 'CODE-1', asker: { kind: 'role', roleId: 'coder' }, question: 'Original question?' }, bossReply: 'Exact reply $&',
+      pendingBossQuestion: { questionId: 'q', resumeStateId: 'firstPhase', sourceItem: 'CODE-1', asker: { kind: 'role', roleId: 'coder' }, question: 'Original question?' }, bossReply: 'Exact reply $&',
     };
     const original = structuredClone(value), identities = [];
     const identity = role => { identities.push(role); return 'Actual bound model'; };
@@ -120,7 +120,7 @@ it('renders labelled strings and identities literally through the actual emitted
       assert.deepEqual(value, original);
     }
     assert.deepEqual(identities, ['coder', 'coder', 'coder']);
-    assert.equal(_internal.composePlayerPrompt({ stateId: 'runFirstPhase', sourceItem: 'CODE-1', role: 'coder', result: {}, prompt: 'Value: <toString>', toString: 'literal value' }, identity), 'Value: literal value');
+    assert.equal(_internal.composePlayerPrompt({ stateId: 'firstPhase', sourceItem: 'CODE-1', role: 'coder', result: {}, prompt: 'Value: <toString>', toString: 'literal value' }, identity), 'Value: literal value');
     const missing = { ...value, runResults: undefined };
     assert(_internal.composePlayerPrompt(missing, identity).includes('> Run results: <run-results>'));
   `], { cwd: root, encoding: 'utf8' });
@@ -166,6 +166,8 @@ it('passes maintained CODE/DEV real-Git and nested-boundary suites with only the
       .replace(`'./${name}.playbook.js'`, JSON.stringify(value.output))
       .replace(`type ${name === 'code' ? 'Code' : 'Dev'}PlaybookHostCapabilities`, `type PlaybookHostCapabilities as ${name === 'code' ? 'Code' : 'Dev'}PlaybookHostCapabilities`);
     writeFileSync(join(root, `${name}.registry.ts`), registry);
+    // A suite that reads its bundle's GEARS beside itself finds the same text.
+    writeFileSync(join(root, `${name}.gears.md`), readFileSync(join(value.originalDir, `${name}.gears.md`)));
     for (const suite of ['playbook', 'prompt-contract']) {
       const testPath = join(value.originalDir, `${name}.${suite}.test.ts`);
       const text = readFileSync(testPath, 'utf8').replace(/from (['"])(\.[^'"]+)\1/g, (_match, _quote, specifier: string) => {

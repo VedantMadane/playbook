@@ -1148,7 +1148,7 @@ describe('linked PR runtime', () => {
     await runtime.dispose();
   });
 
-  // DR-048: CODE's `reportedReviewFailure` is a declared failure terminal, so
+  // DR-048: CODE's `reviewFailed` is a declared failure terminal, so
   // the bridge rejects PR's actor with the child's own public result and PR
   // relays that output without reading CODE's fields for success.
   it('relays a CODE failure terminal delivered through the error path', async () => {
@@ -1169,7 +1169,7 @@ describe('linked PR runtime', () => {
             childSessionId: 'code-1',
             output: insufficient,
             terminal: {
-              stateId: 'reportedReviewFailure',
+              stateId: 'reviewFailed',
               kind: 'failure',
               description: 'CODE reports the review failure.',
             },

@@ -147,6 +147,15 @@ export declare const decideMachine: import("xstate").StateMachine<DecideContext,
     type: "rememberBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
+    type: "clearBossReplyContext";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "setPendingBossQuestion";
+    params: PendingBossQuestionParams;
+} | {
+    type: "rememberMalformedBossReply";
+    params: import("xstate").NonReducibleUnknown;
+} | {
     type: "copyInterruptedTopic";
     params: import("xstate").NonReducibleUnknown;
 } | {
@@ -177,12 +186,6 @@ export declare const decideMachine: import("xstate").StateMachine<DecideContext,
     type: "rememberMalformedActorOutput";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberMalformedBossReply";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "setPendingBossQuestion";
-    params: PendingBossQuestionParams;
-} | {
     type: "clearBranchBossReplyContext";
     params: {
         stateId: ResumableStateId;
@@ -190,11 +193,11 @@ export declare const decideMachine: import("xstate").StateMachine<DecideContext,
 } | {
     type: "clearProposalRoundContext";
     params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "clearBossReplyContext";
-    params: import("xstate").NonReducibleUnknown;
 }, {
     type: "authoredReviewFailure";
+    params: unknown;
+} | {
+    type: "needsBossReplyWithQuestion";
     params: unknown;
 } | {
     type: "committed";
@@ -206,15 +209,12 @@ export declare const decideMachine: import("xstate").StateMachine<DecideContext,
     type: "reviewerProposed";
     params: unknown;
 } | {
-    type: "needsBossReplyWithQuestion";
-    params: unknown;
-} | {
     type: "needsBossReplyWithoutQuestion";
     params: unknown;
 } | {
     type: "validReviewSuccess";
     params: unknown;
-}, never, "done" | "failed" | "ready" | "awaitBossReply" | "reportedReviewFailure" | "commitCoderProposal" | "reviewCommit" | {
+}, never, "done" | "failed" | "ready" | "awaitBossReply" | "commitCoderProposal" | "reviewCommit" | "reportedReviewFailure" | {
     independentProposals: {
         coder: "complete" | "working" | "waiting";
         reviewer: "complete" | "working" | "waiting";

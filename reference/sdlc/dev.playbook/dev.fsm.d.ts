@@ -178,13 +178,13 @@ export declare const devMachine: import("xstate").StateMachine<DevContext, {
     type: "rememberMalformedPlayerOutput";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberMalformedBossReply";
+    type: "clearBossReplyContext";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "setPendingBossQuestion";
     params: PendingBossQuestionParams;
 } | {
-    type: "clearBossReplyContext";
+    type: "rememberMalformedBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "startDev";
@@ -225,10 +225,10 @@ export declare const devMachine: import("xstate").StateMachine<DevContext, {
         readonly playbookId: DevChildPlaybookId;
     };
 }, {
-    type: "emptyBossReply";
+    type: "needsBossReplyWithQuestion";
     params: unknown;
 } | {
-    type: "needsBossReplyWithQuestion";
+    type: "emptyBossReply";
     params: unknown;
 } | {
     type: "needsBossReplyWithoutQuestion";

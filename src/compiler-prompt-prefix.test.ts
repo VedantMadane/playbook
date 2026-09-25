@@ -426,9 +426,20 @@ describe('fidelity checker accepts prefixed items only with provenance (compiler
     expect(checkSourceGearsContract(source, dropped)).toContain(
       'source relay fragment at line 28 was dropped or changed',
     );
-    expect(
-      checkSourceGearsContract(source, `${gears}\n${SECTION}\n\n- CODE-1: relays → tail\n`),
-    ).toEqual(['CODE-1: listed as prefixed but a relay precedes an instruction']);
+    // The landed CODE GEARS already carries the pass's output, so the
+    // relay-first mutant moves CODE-1's trailing relays back before its first
+    // instruction while the section still lists it.
+    const relays = '>\n> > Original request: <caller-input>\n> > Run results: <run-results>\n';
+    const relayFirst = gears
+      .replace(relays, '')
+      .replace(
+        '> First determine whether',
+        `${relays.slice(2)}>\n> First determine whether`,
+      );
+    expect(relayFirst).not.toBe(gears);
+    expect(checkSourceGearsContract(source, relayFirst)).toEqual([
+      'CODE-1: listed as prefixed but a relay precedes an instruction',
+    ]);
     const twice = `${prefixed}\n${SECTION}\n\n- CODE-2: relays → tail\n`;
     expect(checkSourceGearsContract(source, twice)).toEqual([
       `Prefixed prompts: duplicate section at line ${twice.split('\n').lastIndexOf(SECTION) + 1}`,

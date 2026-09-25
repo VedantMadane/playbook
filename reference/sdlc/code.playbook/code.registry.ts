@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import createPlaybookRuntime, {
-  type CodePlaybookHostCapabilities,
+  type PlaybookHostCapabilities,
   type PlaybookRuntime,
 } from './code.playbook.js';
+import type { PlaybookHostConstructionCapabilities } from './playbook-captain.js';
 
 export interface PlaybookSummaryPolicy {
   stateCountLabels: Readonly<Record<string, string>>;
@@ -33,9 +34,12 @@ export interface CodePlaybookRegistryEntry {
   concurrentRoleSets: readonly [];
   summaryPolicy: PlaybookSummaryPolicy;
   validateOptions(optionSlice: unknown): CodeOptions;
+  // The linked module types live authority as opaque (link-materialization);
+  // the Captain entry binds its own construction capabilities here.
   createRuntime(
     options: CodeOptions,
-    hostCapabilities: CodePlaybookHostCapabilities,
+    hostCapabilities: PlaybookHostConstructionCapabilities &
+      PlaybookHostCapabilities,
   ): PlaybookRuntime;
 }
 

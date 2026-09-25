@@ -2738,7 +2738,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     });
     const parked = retainedGeneration(source);
     expect(parked).toMatchObject({
-      rootStateDescription: 'Waiting for Boss to answer Coder.',
+      rootStateDescription: "Waiting for Boss to answer the acting agent's question.",
       frames: [
         {
           playbookId: 'code',
@@ -2897,7 +2897,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
       {
         playbookId: 'code',
         runtime: {
-          state: { stateId: 'reviewFirstCommit' },
+          state: { stateId: 'reviewNewIntentPhase' },
           suspendedCall: {
             playbookId: 'review',
             childSessionId: generation.frames[1]?.sessionId,
@@ -3064,7 +3064,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await target.shell.dispose?.();
   });
 
-  it('retains the real pre-terminal stack across CODE reportedReviewFailure', async () => {
+  it('retains the real pre-terminal stack across CODE reviewFailed', async () => {
     let breakReview = false;
     const sourceCode = realEntry(codeRegistryEntry);
     const sourceReview = realEntry(reviewRegistryEntry);
@@ -3123,13 +3123,13 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
         .some(
           ({ payload }) =>
             (payload as { state?: PlaybookState }).state?.stateId ===
-            'reportedReviewFailure',
+            'reviewFailed',
         ),
     ).toBe(true);
     const retainedAfterTerminal = retainedGeneration(source);
     expect(retainedAfterTerminal).toEqual(preTerminal);
     expect(retainedAfterTerminal.frames[0]?.runtime.state.stateId).toBe(
-      'reviewFirstCommit',
+      'reviewNewIntentPhase',
     );
     expect(retainedAfterTerminal.frames[1]?.runtime.state.stateId).toBe(
       'awaitBossReply',
@@ -3374,7 +3374,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     await harness.turn('/code continue IR-036 task 4', 1);
     expect(harness.statuses).toContain('START_CODE');
     expect(harness.statuses).toContain(
-      '⤷ coder: Coder is running the first coding phase: a direct implementation, a new intent record, or an existing intent-record task.',
+      '⤷ coder: Coder runs the first coding phase: a direct implementation, a new IR, or the next task of an existing IR.',
     );
     expect(harness.statuses).toContain(
       '◆ workflow failed; awaiting Boss recovery.',
@@ -3409,7 +3409,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // status answer reflects, and an id is not Boss-appropriate text
     // (CAPPLAY-5). The retired `state value <id>` form appears nowhere.
     expect(decision!.prompt).toContain(
-      'Leaf /code: state: The coding workflow failed and is waiting for a new coding intent.; tags playbook.parked; quiescent; status active',
+      'Leaf /code: state: CODE parked after a control-plane failure and waits for Boss to restart or resume it.; tags playbook.parked; quiescent; status active',
     );
     expect(decision!.prompt).not.toContain('state value');
     // PBRT-52 / CAPTAIN-9: the context block is CODE's declared projection,
@@ -3417,9 +3417,9 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // JSON document. Every member CODE does not export — the resolved
     // roster, the option value, and the player-authored text — stays out of
     // the durable conversation entirely.
-    // The only declared projection, `phase`, is unset at this first-phase
-    // failure, so the shell omits the context block instead of exposing the
-    // rest of `CodeContext`.
+    // CODE's declared projection (`phaseOutcome`, `irNumber`, `codeCommit`,
+    // `evaluatedRevision`) is unset at this first-phase failure, so the shell
+    // omits the context block instead of exposing the rest of `CodeContext`.
     expect(decision!.prompt).not.toContain('Leaf context:');
     for (const excluded of [
       'irNumber',
@@ -3437,7 +3437,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       'Last error: {"name":"Error","message":"coder exploded"}',
     );
     expect(decision!.prompt).toContain(
-      '- retry:START_CODE: Retry: Coder is running the first coding phase: a direct implementation, a new intent record, or an existing intent-record task.',
+      '- retry:START_CODE: Retry: Coder runs the first coding phase: a direct implementation, a new IR, or the next task of an existing IR.',
     );
     // The healthy path carries no journal-derived recap.
     expect(decision!.prompt).not.toContain('[Conversation recap]');
@@ -3451,7 +3451,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(closing).toContain('- Applied "retry:START_CODE" on /code.');
     // The settled leaf reaches the result phase by its meaning too.
     expect(closing).toContain(
-      'state: Waiting for Boss to answer Coder.',
+      "state: Waiting for Boss to answer the acting agent's question.",
     );
     expect(closing).not.toContain('awaitBossReply');
     expect(harness.surfaced.at(-1)).toBe(
@@ -3470,7 +3470,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       // Grounded in the state's meaning, and carrying no raw state id — the
       // reply reflects what the digest gave it, and the digest gave it prose.
       expect(reply).toContain(
-        'state: Waiting for Boss to answer Coder.',
+        "state: Waiting for Boss to answer the acting agent's question.",
       );
       expect(reply).not.toContain('awaitBossReply');
     }
@@ -3547,7 +3547,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // the same label, as the process that reached the failure.
     const decision = continued.decisionPrompts().at(-1) ?? '';
     expect(decision).toContain(
-      '- retry:START_CODE: Retry: Coder is running the first coding phase: a direct implementation, a new intent record, or an existing intent-record task.',
+      '- retry:START_CODE: Retry: Coder runs the first coding phase: a direct implementation, a new IR, or the next task of an existing IR.',
     );
     // And it was applied for real: the coder ran again in this process, once.
     expect(continued.playerCalls).toHaveLength(1);
@@ -3592,13 +3592,13 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // then the rider-less suspension marker (DR-007 path).
     expect(harness.statuses).toContain(`coder asks: ${CODE_PENDING_QUESTION}`);
     expect(harness.statuses).toContain(
-      '◆ awaiting Boss reply · runFirstPhase · coder · CODE-1',
+      '◆ awaiting Boss reply · firstPhase · coder · CODE-1',
     );
     const statusTail = harness.statuses.slice(-3);
     expect(statusTail).toEqual([
       '→ needsBossReply',
       `coder asks: ${CODE_PENDING_QUESTION}`,
-      '◆ awaiting Boss reply · runFirstPhase · coder · CODE-1',
+      '◆ awaiting Boss reply · firstPhase · coder · CODE-1',
     ]);
     const parked = code.runtimes[0]!.describe!();
     expect(parked.state.stateId).toBe('awaitBossReply');
@@ -3665,7 +3665,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // description CODE's source publishes, so that is what a grounded answer
     // can say.
     expect(harness.surfaced.at(-1)).toContain(
-      'state: Waiting for Boss to answer Coder.',
+      "state: Waiting for Boss to answer the acting agent's question.",
     );
     expect(harness.surfaced.at(-1)).not.toContain('awaitBossReply');
     expect(harness.surfaced.at(-1)).toContain(CODE_PENDING_QUESTION);
@@ -3712,9 +3712,10 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       '',
       'Failure: the coder call failed: coder exploded.',
       'Controls:',
-      '- Retry: Coder is running the first coding phase: a direct ' +
-        'implementation, a new intent record, or an existing intent-record ' +
-        'task. (ready)',
+      '- Retry: Coder runs the first coding phase: a direct ' +
+        'implementation, a new IR, or the next task of an existing IR. (ready)',
+      '- Resume from: Coder runs the first coding phase: a direct ' +
+        'implementation, a new IR, or the next task of an existing IR. (ready)',
       '- Stop /code (ready)',
     ].join('\n');
     expect(harness.surfaced.slice(-2)).toEqual([
@@ -4501,9 +4502,10 @@ describe('CAPTAIN-38 validated actions and command table', () => {
     expect(harness.playerCalls).toHaveLength(2);
   });
 
-  // The current CODE machine exposes no BOSS_INTERRUPT jump target. A named
-  // state therefore cannot become a machine action unless the runtime
-  // advertises it; the session Captain keeps the failed run untouched.
+  // CODE's IR-task jump target is guarded on an identified IR, which this
+  // first-phase failure lacks. A named state therefore cannot become a machine
+  // action unless the runtime advertises it; the session Captain keeps the
+  // failed run untouched.
   it('does not invent a jump action for an unadvertised state', async () => {
     const code = realEntry(codeRegistryEntry);
     const harness = realArtifactHarness([code], {
@@ -4530,24 +4532,27 @@ describe('CAPTAIN-38 validated actions and command table', () => {
         (event.payload as { type?: unknown }).type === 'apply.started',
     ).length;
 
-    await harness.turn('resume from runFirstPhase', 2);
+    await harness.turn('resume from irTaskPhase', 2);
 
-    // The digest carries only the retry derived from the recorded entry
-    // event, so the prompt-reading controller selects `respond`.
+    // The digest carries the retry derived from the recorded entry event and
+    // the live first-phase jump, but no jump into the unadvertised IR-task
+    // phase, so the prompt-reading controller selects `respond`.
     const digest = harness.decisionPrompts().at(-1) ?? '';
     expect(digest).toContain(
-      '- retry:START_CODE: Retry: Coder is running the first coding phase: a direct implementation, a new intent record, or an existing intent-record task.',
+      '- retry:START_CODE: Retry: Coder runs the first coding phase: a direct implementation, a new IR, or the next task of an existing IR.',
     );
-    expect(digest).not.toContain('jump:');
+    expect(digest).toContain('- jump:firstPhase: ');
+    expect(digest).not.toContain('jump:irTaskPhase');
     expect(harness.surfaced.at(-1)).toBe(
       [
         'Only the advertised retry is available for this run.',
         '',
         'Failure: the coder call failed: coder exploded.',
         'Controls:',
-        '- Retry: Coder is running the first coding phase: a direct ' +
-          'implementation, a new intent record, or an existing intent-record ' +
-          'task. (ready)',
+        '- Retry: Coder runs the first coding phase: a direct ' +
+          'implementation, a new IR, or the next task of an existing IR. (ready)',
+        '- Resume from: Coder runs the first coding phase: a direct ' +
+          'implementation, a new IR, or the next task of an existing IR. (ready)',
         '- Stop /code (ready)',
       ].join('\n'),
     );

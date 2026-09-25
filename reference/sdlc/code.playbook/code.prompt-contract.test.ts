@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
+import { parseGearsContract } from '../../../scripts/check-slc-source-gears.mjs';
 import {
-  codingMachine,
-  type CodingContext,
+  codeMachine,
+  type CodeContext,
   type PlayerInput,
 } from './code.fsm.js';
 import { enumeratePlayerStates } from './code.fsm.introspect.js';
@@ -17,18 +20,22 @@ const promptIdentity = (roleId: string): string =>
 const RETIRED_COMMIT_RESPONSE_INSTRUCTION =
   'Report it as exactly one final-response line beginning `Commit: `, followed only by the exact commit identity.';
 
-const ACTUAL_CONTEXT: CodingContext = {
+const gearsItems = parseGearsContract(
+  readFileSync(fileURLToPath(new URL('./code.gears.md', import.meta.url)), 'utf8'),
+);
+
+const ACTUAL_CONTEXT: CodeContext = {
   runResults: 'tests passed',
   callerInput: 'Implement the intent.',
   coderOutput: 'Completed the preceding phase.',
-  latestCommit: 'abc123',
+  codeCommit: 'abc123',
   irNumber: '048',
   irTask: 'Implement task 14.',
 };
 
 function firstInput(overrides: Partial<PlayerInput> = {}): PlayerInput {
   return {
-    stateId: 'runFirstPhase',
+    stateId: 'firstPhase',
     role: 'coder',
     sourceItem: 'CODE-1',
     prompt: [
@@ -42,12 +49,12 @@ function firstInput(overrides: Partial<PlayerInput> = {}): PlayerInput {
     callerInput: 'line one\nline two',
     runResults: 'test one\ntest two',
     ...overrides,
-  };
+  } as PlayerInput;
 }
 
 describe('CODE player prompt composition', () => {
   it('omits the retired Commit-line response format from every phase', () => {
-    for (const state of enumeratePlayerStates(codingMachine)) {
+    for (const state of enumeratePlayerStates(codeMachine)) {
       const input = state.getInput(ACTUAL_CONTEXT);
       expect(input.prompt).not.toContain(RETIRED_COMMIT_RESPONSE_INSTRUCTION);
       expect(composePlayerPrompt(input, promptIdentity)).not.toContain(
@@ -70,6 +77,38 @@ describe('CODE player prompt composition', () => {
     );
   });
 
+  it('composes each GEARS body with the machine-tracked values relayed last', () => {
+    // The whole prompt is the GEARS blockquote body, instructions first as
+    // the prefix pass left them (DR-065), with each relayed value
+    // substituted from its own field and the Coder identity resolved.
+    const context: CodeContext = {
+      ...ACTUAL_CONTEXT,
+      callerInput: 'Implement the intent.\nKeep the CLI stable.',
+    };
+    const states = enumeratePlayerStates(codeMachine);
+    expect(states.map(({ sourceItem }) => sourceItem)).toEqual([
+      'CODE-1',
+      'CODE-3',
+    ]);
+    for (const state of states) {
+      const body = gearsItems
+        .find(({ id }) => id === state.sourceItem)
+        ?.prompt.join('\n');
+      expect(body).toBeDefined();
+      const prompt = composePlayerPrompt(state.getInput(context), promptIdentity);
+      expect(prompt).toBe(
+        body!
+          .replace('<caller-input>', 'Implement the intent.\n> Keep the CLI stable.')
+          .replace('<ir-number>', '048')
+          .replace('<run-results>', 'tests passed')
+          .replace('<coder-llm>', 'GPT-5.6 Sol'),
+      );
+      expect(prompt).toMatch(
+        /Coder GPT-5\.6 Sol\.\n\n> Original request: Implement the intent\.\n> Keep the CLI stable\.\n/,
+      );
+    }
+  });
+
   it('omits the optional run-results relay when none exists', () => {
     const prompt = composePlayerPrompt(
       firstInput({ runResults: '' }),
@@ -82,7 +121,7 @@ describe('CODE player prompt composition', () => {
 
   it('substitutes caller input, IR number, and Coder identity once', () => {
     const input: PlayerInput = {
-      stateId: 'runIrTask',
+      stateId: 'irTaskPhase',
       role: 'coder',
       sourceItem: 'CODE-3',
       prompt: [
@@ -114,8 +153,8 @@ describe('CODE player prompt composition', () => {
     const prompt = composePlayerPrompt(
       firstInput({
         pendingBossQuestion: {
-          questionId: 'runFirstPhase',
-          resumeStateId: 'runFirstPhase',
+          questionId: 'firstPhase',
+          resumeStateId: 'firstPhase',
           sourceItem: 'CODE-1',
           asker: { kind: 'role', roleId: 'coder' },
           question: 'Which branch?',
