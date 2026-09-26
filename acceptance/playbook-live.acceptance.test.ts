@@ -1520,7 +1520,7 @@ function expectDecideContinuity(record: DurableSessionRecord): string {
   const nestedFindingBoundaries = boundaries.filter(
     (boundary) =>
       boundary.playbookId === 'review' &&
-      boundary.sourceStateId === 'reviewFirstRound' &&
+      boundary.sourceStateId === 'firstReview' &&
       boundary.roleId === 'reviewer',
   );
   expect(nestedFindingBoundaries).toHaveLength(1);
@@ -1532,7 +1532,7 @@ function expectDecideContinuity(record: DurableSessionRecord): string {
   const correctionBoundaries = boundaries.filter(
     (boundary) =>
       boundary.playbookId === 'review' &&
-      boundary.sourceStateId === 'fixFindings' &&
+      boundary.sourceStateId === 'answerFindings' &&
       boundary.physicalReceipt?.classification === 'one-descendant-commit',
   );
   expect(correctionBoundaries.length).toBeGreaterThanOrEqual(1);
@@ -1543,7 +1543,7 @@ function expectDecideContinuity(record: DurableSessionRecord): string {
   const approvalBoundaries = boundaries.filter(
     (boundary) =>
       boundary.playbookId === 'review' &&
-      ['reviewAfterCommit', 'reviewAfterRejection'].includes(
+      ['reviewFixCommit', 'reviewAfterRejection'].includes(
         boundary.sourceStateId,
       ) &&
       boundary.roleId === 'reviewer',

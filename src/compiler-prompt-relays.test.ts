@@ -5,9 +5,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { assign, createActor, fromPromise, setup, waitFor } from "xstate";
+import { createActor, fromPromise, waitFor } from "xstate";
 import { defaultComposePlayerPrompt } from "./xstate-runtime.js";
 import { _internal as reviewModule } from "../reference/sdlc/review.playbook/review.playbook.js";
+import {
+  originalIntentOf,
+  reviewMachine,
+  type PlayerInput as ReviewPlayerInput,
+  type PlayerOutput as ReviewPlayerOutput,
+} from "../reference/sdlc/review.playbook/review.fsm.js";
 
 const compiler = process.env.PLAYBOOK_EXPERIMENT_COMPILER;
 const exactEvidence =
@@ -188,78 +194,22 @@ it("derives a Source-defined labelled section wherever the relayed text is store
     expect(fsm).toContain(clause);
   }
 
-  type Input = {
-    stateId: string;
-    role: string;
-    sourceItem: string;
-    prompt: string;
-    result: Record<string, string>;
-    callerInput?: string;
-    originalIntent?: string;
-  };
-  const FIRST = "Review the scope.\n\n> Original request: <caller-input>";
-  const LATER = "Review the latest fix.\n\n> Original intent: <original-intent>";
-  // The maintained REVIEW module's labelled-relay composer, which quotes every
-  // continuation line of a value it inserts into a quoted prompt line.
-  const compose = (input: Input) =>
-    reviewModule.composePlayerPrompt(input, (role: string) => {
-      throw new Error(`no identity placeholder is authored here: ${role}`);
-    });
+  // The maintained REVIEW machine drives the rounds, and its module's
+  // labelled-relay composer, which quotes every continuation line of a value
+  // it inserts into a quoted prompt line, renders their prompts.
+  const compose = (input: ReviewPlayerInput) =>
+    reviewModule.composePlayerPrompt(input, (role: string) => `${role} identity`);
   const quoted = (value: string) => value.replace(/\n/g, "\n> ");
-  const inputs: Input[] = [];
-  const machine = setup({
-    types: {
-      context: {} as { callerInput: string; originalIntent: string },
-      events: {} as { type: "START_REVIEW"; callerInput: string },
-    },
+  const inputs: ReviewPlayerInput[] = [];
+  // Reviewer's first round raises a finding; Coder's call then fails, parking
+  // the review in `failed`, where the next case's request starts afresh.
+  const machine = reviewMachine.provide({
     actors: {
-      player: fromPromise<{ guard: "done" }, Input>(async ({ input }) => {
+      player: fromPromise<ReviewPlayerOutput, ReviewPlayerInput>(async ({ input }) => {
         inputs.push(input);
-        return { guard: "done" };
+        if (input.sourceItem !== "REVIEW-1") throw new Error("stop after Coder's input");
+        return { guard: "findings", reviewerOutput: "1. Finding." };
       }),
-    },
-    actions: {
-      startReview: assign(({ event }) => ({
-        callerInput: event.callerInput,
-        originalIntent: labelledSection(event.callerInput, "Original intent:", ["Review scope:"]),
-      })),
-    },
-  }).createMachine({
-    context: { callerInput: "", originalIntent: "" },
-    initial: "idle",
-    states: {
-      idle: {
-        tags: ["playbook.parked"],
-        on: { START_REVIEW: { target: "firstRound", actions: "startReview" } },
-      },
-      firstRound: {
-        invoke: {
-          src: "player",
-          input: ({ context }): Input => ({
-            stateId: "firstRound",
-            role: "reviewer",
-            sourceItem: "REVIEW-1",
-            prompt: FIRST,
-            result: { done: "Reviewed." },
-            callerInput: context.callerInput,
-          }),
-          onDone: "laterRound",
-        },
-      },
-      laterRound: {
-        invoke: {
-          src: "player",
-          input: ({ context }): Input => ({
-            stateId: "laterRound",
-            role: "reviewer",
-            sourceItem: "REVIEW-2",
-            prompt: LATER,
-            result: { done: "Reviewed." },
-            originalIntent: context.originalIntent,
-          }),
-          onDone: "idle",
-        },
-      },
     },
   });
   const cases = [
@@ -302,27 +252,32 @@ it("derives a Source-defined labelled section wherever the relayed text is store
       section: "Review the branch.\nMind the docs.",
     },
   ];
-  const actor = createActor(machine).start();
+  const actor = createActor(machine, { input: {} }).start();
   try {
     for (const [index, { name, text, section }] of cases.entries()) {
+      // The stated rule and the compiled machine's own derivation agree.
+      expect(labelledSection(text, "Original intent:", ["Review scope:"]), name).toBe(section);
+      expect(originalIntentOf(text), name).toBe(section);
       // Each fresh entry replaces the text, so the section is derived again.
       actor.send({ type: "START_REVIEW", callerInput: text });
       await waitFor(
         actor,
-        (snapshot) => snapshot.matches("idle") && inputs.length === 2 * (index + 1),
+        (snapshot) => snapshot.matches("failed") && inputs.length === 2 * (index + 1),
       );
       expect(actor.getSnapshot().context.originalIntent, name).toBe(section);
       const [first, later] = inputs.slice(2 * index);
-      expect(first!.callerInput, name).toBe(text);
-      expect(later!.originalIntent, name).toBe(section);
+      expect(first!.sourceItem === "REVIEW-1" && first!.callerInput, name).toBe(text);
+      expect(later!.sourceItem === "REVIEW-2" && later!.originalIntent, name).toBe(section);
       const prompts = [compose(first!), compose(later!)];
-      expect(prompts, name).toEqual([
-        `Review the scope.\n\n> Original request: ${quoted(text)}`,
-        `Review the latest fix.\n\n> Original intent: ${quoted(section)}`,
-      ]);
+      expect(prompts[0]!.endsWith(`\n\n> Original request: ${quoted(text)}`), name).toBe(true);
+      expect(
+        prompts[1]!.endsWith(`\n\n> Original intent: ${quoted(section)}\n> Reviewer findings: 1. Finding.`),
+        name,
+      ).toBe(true);
       // No relayed line escapes its quote.
       for (const prompt of prompts) {
-        expect(prompt.split("\n").slice(2).every((line) => line.startsWith(">")), name).toBe(true);
+        const relays = prompt.slice(prompt.lastIndexOf("\n\n> Original ") + 2);
+        expect(relays.split("\n").every((line) => line.startsWith(">")), name).toBe(true);
       }
     }
   } finally {

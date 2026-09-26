@@ -15,6 +15,8 @@ The caller supplies:
 - the review scope in the caller's own words;
 - optional relevant context and run results.
 
+The caller's request is labelled text: it opens with the `Original intent:` section, which runs to the `Review scope:` line or to the end of the request, and a request without the `Original intent:` label is the original intent as a whole.
+
 The caller's review scope is the baseline for every round, and each review-fix commit joins that scope as it lands, so every later round reviews the cumulative committed state.
 `review` examines committed work only.
 Captain shall take the evaluated repository revision from repository authority, not from either player's prose.
@@ -41,7 +43,7 @@ Read the latest review-fix commit's message and see Coder's feedback below.
 
 Captain shall append the round’s context in quotes (`>`):
 
-> Original request: <caller-input>
+> Original intent: <original-intent>
 > Latest commit: <latest-commit>
 > Coder output: <coder-output>
 
@@ -54,10 +56,10 @@ See Coder's feedback below.
 
 Captain shall append the round’s context in quotes (`>`):
 
-> Original request: <caller-input>
+> Original intent: <original-intent>
 > Coder output: <coder-output>
 
-At the start of *every* review round, Captain shall relay to Reviewer the original intent, the review scope and context, the exact repository revision being evaluated, any Coder feedback from the preceding round, and any relevant run results, in quotes (`>`) after the instruction.
+At the start of the first review round, Captain shall relay the caller's complete request to Reviewer in quotes (`>`) after the instruction; at the start of every later round, Captain shall relay the original intent, any Coder feedback from the preceding round, and any relevant run results the same way, since Reviewer already holds the review scope and context from the first round.
 
 At the start of *every* review round, Captain shall append the following instruction to the end of the prompt:
 
@@ -83,9 +85,9 @@ Consult @specs/meta.md for spec requirements if needed; verify affected specs fo
 Finding numbers are references within this review only.
 No review transition shall depend on numbering or any fixed presentation format of either player's reply.
 
-When Reviewer raises or keeps any finding, Captain shall relay the original intent, the review scope and context, the exact repository revision being evaluated, the Reviewer's findings, and any relevant run results to Coder, in quotes (`>`), along with the following prompt:
+When Reviewer raises or keeps any finding, Captain shall relay the original intent, the Reviewer's findings, and any relevant run results to Coder, in quotes (`>`), along with the following prompt:
 
-> Original request: <caller-input>
+> Original intent: <original-intent>
 > Reviewer findings: <reviewer-output>
 
 ```markdown
@@ -109,7 +111,7 @@ Report every disposition, all relevant run results, and every rebuttal.
 
 Captain shall use the repository-effect receipt as the authoritative identity of any review-fix commit.
 
-When Coder makes a new commit or decides to reject all findings, Captain shall relay the above required context to Reviewer and begin the next review round.
+When Coder makes a new commit or decides to reject all findings, Captain shall relay the round's context above to Reviewer and begin the next review round.
 Reviewer shall read the context information and follow the corresponding instructions.
 Rounds continue until Reviewer affirmatively reports that the requested review is complete and no unsettled findings remain.
 A progress report, status update, or promise of a later result supports no review outcome.

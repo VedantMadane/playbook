@@ -44,8 +44,8 @@ export interface ReviewPlaybookRegistryEntry {
 }
 
 export const reviewStateCountLabels = {
-  reviewFirstRound: 'review round',
-  reviewAfterCommit: 'review round',
+  firstReview: 'review round',
+  reviewFixCommit: 'review round',
   reviewAfterRejection: 'rebuttal',
 } as const;
 

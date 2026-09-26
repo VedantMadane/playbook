@@ -48,9 +48,9 @@ export type PlaybookHostCapabilities = XStatePlaybookRuntimeConstruction<
 const OPTION_SCHEMA = {} as const;
 const INPUT_MAPPING = {} as const;
 const RESUMABLE_STATE_IDS: ReadonlySet<string> = new Set([
-  "reviewFirstRound",
-  "fixFindings",
-  "reviewAfterCommit",
+  "firstReview",
+  "answerFindings",
+  "reviewFixCommit",
   "reviewAfterRejection"
 ]);
 const UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string> = new Set([]);
@@ -115,26 +115,26 @@ const runtimeSpec = {
   },
   "bossEvents": [],
   "roleStates": {
-    "reviewFirstRound": {
+    "firstReview": {
       "role": "reviewer",
-      "label": "Reviewer is running the first review round over the caller's review scope."
+      "label": "Reviewer runs the first review round over the caller's review scope."
     },
-    "fixFindings": {
+    "answerFindings": {
       "role": "coder",
-      "label": "Coder is accepting or rejecting Reviewer's unsettled findings and committing any fixes."
+      "label": "Coder accepts or rejects each of Reviewer's findings, fixing accepted ones in one new review-fix commit."
     },
-    "reviewAfterCommit": {
+    "reviewFixCommit": {
       "role": "reviewer",
-      "label": "Reviewer is reviewing the cumulative committed state after the latest review-fix commit."
+      "label": "Reviewer runs the next review round over the cumulative committed state after the latest review-fix commit."
     },
     "reviewAfterRejection": {
       "role": "reviewer",
-      "label": "Reviewer is reviewing the same committed state after Coder rejected every finding."
+      "label": "Reviewer runs the next review round after Coder rejected every finding without a new commit."
     }
   },
   "outcomeAuthority": {
     "governedPlayerStates": {
-      "reviewFirstRound": {
+      "firstReview": {
         "findings": {
           "fields": {
             "reviewerOutput": "presentation"
@@ -154,7 +154,7 @@ const runtimeSpec = {
           "repositoryDisposition": "unchanged"
         }
       },
-      "fixFindings": {
+      "answerFindings": {
         "committed": {
           "fields": {
             "latestCommit": "effect",
@@ -175,7 +175,7 @@ const runtimeSpec = {
           "repositoryDisposition": "deferred"
         }
       },
-      "reviewAfterCommit": {
+      "reviewFixCommit": {
         "findings": {
           "fields": {
             "reviewerOutput": "presentation"
