@@ -247,6 +247,21 @@ describe('interrupted-step recovery with real Git', () => {
           expect(snapshot.recoveryCheckpoint?.boundaryPrefix).toBe(
             failedJudge ? 0 : 1,
           );
+          if (failureKind === 'player') {
+            for (const kind of ['foreign', 'incomplete']) {
+              const candidate = JSON.parse(JSON.stringify(snapshot));
+              const boundary = candidate.effectLedger.boundaries.at(-1);
+              if (kind === 'foreign') boundary.runtimeSessionId = randomUUID();
+              else { delete boundary.after; delete boundary.physicalReceipt; delete boundary.semanticCandidate; }
+              expect(() => assertPlaybookEffectLedger(candidate.effectLedger)).not.toThrow();
+              const unsafe = createRuntime({ configuredOptions: {}, hostCapabilities: { ...hostCapabilities, effectLedger: { ...hostCapabilities.effectLedger, snapshot: () => candidate.effectLedger } } });
+              try {
+                await unsafe.restore!(session, candidate);
+                expect(unsafe.describe!().actions.map(({ id }) => id)).not.toContain('retry:step');
+                expect(unsafe.describe!().recovery).toBeUndefined();
+              } finally { await unsafe.dispose(); }
+            }
+          }
           if (restored) {
             await runtime.dispose();
             for (const corrupt of [
@@ -268,6 +283,10 @@ describe('interrupted-step recovery with real Git', () => {
               (value: PlaybookRuntimeSnapshot) => {
                 value.recoveryCheckpoint!.stateId = 'ready';
                 (value.recoveryCheckpoint!.machine as any).value = 'ready';
+              },
+              (value: PlaybookRuntimeSnapshot) => {
+                const child = Object.values((value.recoveryCheckpoint!.machine as any).children)[0] as any;
+                child.snapshot.input.stateId = 'another-invocation';
               },
               (value: PlaybookRuntimeSnapshot) => {
                 const child = Object.values((value.recoveryCheckpoint!.machine as any).children)[0] as any;
@@ -319,17 +338,33 @@ describe('interrupted-step recovery with real Git', () => {
             await rm(join(cwd, 'intermediate-output'));
             expect(runtime.describe!().recovery?.preparation).toContain('read-only');
             expect(original.physicalReceipt?.classification).toBe('concurrent-or-foreign-change');
-            for (const amendment of [
-              { restored: original.after },
-              { restored: original.baseline, dispositions: ['one-descendant-commit'] },
-              { restored: original.baseline, cohortId: randomUUID() },
-              { restored: original.baseline, logicalOperationId: randomUUID() },
-              { restored: original.baseline, physicalReceipt: undefined },
-            ]) {
-              const corrupted = JSON.parse(JSON.stringify(hostCapabilities.effectLedger.snapshot()));
-              Object.assign(corrupted.boundaries[1], amendment);
-              expect(() => assertPlaybookEffectLedger(corrupted)).toThrow();
+            // Each base passes before adding only `restored`, so another
+            // malformed field cannot make this guard coverage pass by accident.
+            const ledger = JSON.parse(JSON.stringify(hostCapabilities.effectLedger.snapshot()));
+            const unchanged = { ...original, after: original.baseline,
+              physicalReceipt: { classification: 'unchanged', baseline: original.baseline, after: original.baseline } };
+            const { after: _after, physicalReceipt: _receipt, semanticCandidate: _candidate, ...incomplete } = original;
+            const cohortId = randomUUID();
+            const cohort = { ...unchanged, cohortId };
+            const operationId = randomUUID();
+            const witnesses = [
+              { ...ledger, boundaries: [ledger.boundaries[0]], target: 0 },
+              { ...ledger, boundaries: [ledger.boundaries[0], { ...original, dispositions: ['one-descendant-commit'], physicalReceipt: { ...original.physicalReceipt, classification: 'worktree-only-change' } }], target: 1 },
+              { ...ledger, boundaries: [ledger.boundaries[0], { ...unchanged, dispositions: ['one-descendant-commit'] }], target: 1 },
+              { ...ledger, boundaries: [ledger.boundaries[0], incomplete], target: 1 },
+              { ...ledger, boundaries: [ledger.boundaries[0], { ...incomplete, physicalReceipt: { classification: 'observation-ambiguous', baseline: original.baseline } }], target: 1 },
+              { ...ledger, boundaries: [ledger.boundaries[0], cohort, { ...cohort, sequence: 3, boundaryId: randomUUID(), callId: 'peer-call', roleId: 'peer' }], target: 1 },
+              { ...ledger, boundaries: [ledger.boundaries[0], { ...unchanged, logicalOperationId: operationId }], logicalOperations: [{ sequence: 1, operationId, playbookId: original.playbookId, runtimeSessionId: original.runtimeSessionId, boundaryIds: [original.boundaryId], originalBaseline: original.baseline, checkpointRestorationEligible: false }], target: 1 },
+            ];
+            for (const { target, ...witness } of witnesses) {
+              expect(() => assertPlaybookEffectLedger(witness)).not.toThrow();
+              const corrupted = JSON.parse(JSON.stringify(witness));
+              corrupted.boundaries[target].restored = corrupted.boundaries[target].baseline;
+              expect(() => assertPlaybookEffectLedger(corrupted)).toThrow('.restored requires');
             }
+            const mismatched = JSON.parse(JSON.stringify(ledger));
+            mismatched.boundaries[1].restored = original.after;
+            expect(() => assertPlaybookEffectLedger(mismatched)).toThrow('.restored requires');
             if (failureKind === 'moved-head') {
               git('commit', '--allow-empty', '-qm', 'external commit');
               expect(await runtime.apply!({ actionId, key: 'moved-head', signal: new AbortController().signal })).toMatchObject({ disposition: 'failed' });

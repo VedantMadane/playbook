@@ -884,7 +884,6 @@ export async function driveHeadlessCaptainTurn({
     };
   } catch (error) {
     if (host !== undefined) {
-      await settleStoppedPreparation(shell, sessionLease);
       try {
         await host.dispose();
       } catch (cleanupError) {
@@ -897,6 +896,11 @@ export async function driveHeadlessCaptainTurn({
           : cleanupFailure;
       }
     }
+    try {
+      if ((await sessionLease.read?.())?.state === 'settled') {
+        await writeStream(stderr, 'The latest work is saved. Continue this session with a new instruction.\n');
+      }
+    } catch { /* Preserve the original turn or cleanup error. */ }
     throw error;
   }
 }
@@ -976,7 +980,7 @@ function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, continuatio
   const leaf = snapshot.mode === 'engaged.parked' ? snapshot.frames.at(-1) : undefined;
   const invocation = leaf?.runtime.recoveryCheckpoint;
   const withoutAssessment = (boundaries) => boundaries.map((boundary, index) => {
-    if (!invocation || index < invocation.boundaryPrefix || boundary.runtimeSessionId !== leaf.sessionId || boundary.sourceStateId !== invocation.stateId) return boundary;
+    if (!invocation || index < invocation.boundaryPrefix || ![leaf.sessionId, leaf.runtime.retainedEffectSourceSessionId].includes(boundary.runtimeSessionId) || boundary.sourceStateId !== invocation.stateId) return boundary;
     const { semanticCandidate, restored, ...physical } = boundary;
     return physical;
   });
@@ -1026,12 +1030,12 @@ function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, continuatio
   });
 }
 
-// A drained preparation has not dispatched the player. Keep its latest parked
-// stack so cancellation does not force the same preparation forever.
-export async function settleStoppedPreparation(shell, lease) {
+// A drained turn can retain its actual stopped stack without replaying work.
+// This runs inside the shared Captain boundary, before any host can dispose it.
+export async function settleInterruptedRecovery(shell, lease) {
+  if (typeof lease.read !== 'function') return;
   const record = await lease.read();
-  const point = record?.uncertain?.recovery;
-  if (!point || point.continuation || !isDeepStrictEqual(point.snapshot.effectLedger, record.effectLedger)) return;
+  if (!record?.uncertain?.recovery) return;
   const settlement = shell.exportSettlement();
   if (!settlement) return;
   return lease.settle({ attemptId: record.uncertain.attemptId, ...settlement });
@@ -1156,8 +1160,9 @@ export async function createCaptainSessionHost({
       : {}),
   });
   let host;
+  let interruptedSettlement;
   try {
-    const captain = captainHostBoundary(shell, sourceSnapshot);
+    const captain = captainHostBoundary(shell, sourceSnapshot, sessionLease, (record) => { interruptedSettlement = record; });
     host = await createHostRuntime({
       captain,
       captainConfig: projectHostAgent(
@@ -1198,7 +1203,7 @@ export async function createCaptainSessionHost({
     presentationReady = true;
     for (const record of bufferedRecords) await forwardRecord(record);
     if (recovery) shell.selectRecovery(interrupted.uncertain.input, recovery.instruction, recovery.continuation);
-    return { shell, host, snapshot, reconcileRepositoryEffects };
+    return { shell, host, snapshot, reconcileRepositoryEffects, getInterruptedSettlement: () => interruptedSettlement };
   } catch (error) {
     let cleanupError;
     try {
@@ -1250,13 +1255,24 @@ export async function installRetainedGenerationsForLaunch({
 
 // PBCLI-20: restoration enters through the host's one init boundary. The
 // restored shell is fresh and receives restore instead of init, never both.
-function captainHostBoundary(shell, restoreSnapshot) {
+function captainHostBoundary(shell, restoreSnapshot, sessionLease, onInterrupted) {
   return {
     init: (session) =>
       restoreSnapshot === undefined
         ? shell.init(session)
         : shell.restore(session, restoreSnapshot),
-    handleBossTurn: (turn, context) => shell.handleBossTurn(turn, context),
+    async handleBossTurn(turn, context) {
+      onInterrupted(undefined);
+      try {
+        return await shell.handleBossTurn(turn, context);
+      } catch (error) {
+        try { onInterrupted(await settleInterruptedRecovery(shell, sessionLease)); }
+        catch (settlementError) {
+          throw new AggregateError([error, settlementError], `Captain turn stopped (${message(error)}) and its state could not be saved (${message(settlementError)})`);
+        }
+        throw error;
+      }
+    },
     prepareDispose: () => shell.prepareDispose?.(),
     dispose: () => shell.dispose?.(),
   };
@@ -1759,7 +1775,7 @@ async function reportUncertainSession(stderr, sessionId, hasRecoveryPoint = fals
     [
       `playbook run: Captain session ${JSON.stringify(sessionId)} has an uncertain turn and will not be replayed automatically`,
       hasRecoveryPoint
-        ? "Resume the saved step with Retry. Discard is unavailable because preparation may have changed prerequisites."
+        ? "Retry resumes the saved step and may repeat external effects after it. Discard is unavailable because the saved step preserves work from this turn."
         : "Retry may duplicate external effects from the interrupted attempt; discard abandons that attempted turn.",
       `playbook run --session ${sessionId} --retry-uncertain`,
       ...(hasRecoveryPoint ? [] : [`playbook run --session ${sessionId} --discard-uncertain`]),

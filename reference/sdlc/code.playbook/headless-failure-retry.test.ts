@@ -347,7 +347,7 @@ describe('headless failure retry across a continued session (DR-034)', () => {
     expect(receipts.at(-1)).toMatchObject({
       status: 'ok',
       receipt: { disposition: 'executed' },
-      facts: expect.arrayContaining(['Applied "retry:START_CODE" on /code.']),
+      facts: ['Applied "retry:START_CODE" on /code.'],
     });
     expect(ScriptedAdapter.playerCalls).toBe(2);
     expect(secondOut.text()).toContain('The retry ran');
@@ -466,7 +466,7 @@ describe('headless failure retry across a continued session (DR-034)', () => {
     expect(receipts.at(-1)).toMatchObject({
       status: 'ok',
       receipt: { disposition: 'executed' },
-      facts: expect.arrayContaining(['Applied "retry:START_CODE" on /code.']),
+      facts: ['Applied "retry:START_CODE" on /code.'],
     });
     expect(ScriptedAdapter.playerCalls).toBe(3);
     const recovered = await record();

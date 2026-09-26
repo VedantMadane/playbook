@@ -6063,9 +6063,13 @@ function validateRetainedGenerationFrame(
       'roleBindings',
       'runtime',
     ],
-    ['parentSessionId', 'parentCallId'],
+    ['parentSessionId', 'parentCallId', 'request'],
     path,
   );
+  if (frame.request !== undefined) {
+    if (index !== 0) throw new Error(`${path}.request belongs only to the root`);
+    requireNonblank(frame.request, `${path}.request`);
+  }
   const playbookId = requireCanonicalNonblank(
     frame.playbookId,
     `${path}.playbookId`,

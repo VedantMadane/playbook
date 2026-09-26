@@ -7597,7 +7597,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it.each([true, false])('retries the captured step when the failure state refuses the recorded event (checkpoint=%s)', async (checkpoint) => {
+  it.each([true, false])('offers a retry for a refused event only with a captured step (checkpoint=%s)', async (checkpoint) => {
     let playerCalls = 0;
     const { ports } = makeRecordingPorts({
       callPlayer: async () => {
@@ -7813,7 +7813,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it.each([true, false])('recovers the captured invocation without inventing a missing entry payload (checkpoint=%s)', async (checkpoint) => {
+  it.each([true, false])('offers a retry without an entry payload only with a captured invocation (checkpoint=%s)', async (checkpoint) => {
     const createUnsourcedRuntime = createXStatePlaybookRuntime(checkpoint ? workflowMachine : eventOnlyMachine(workflowMachine), {
       ...workflowSpec,
       label: 'unsourced-workflow',

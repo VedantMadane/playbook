@@ -124,6 +124,7 @@ validated `dismiss` or `switch` dismisses the root engagement, the
 shell shall dispose that engagement and return to its idle state;
 for a validated `switch`, that idle state lasts only until the same
 turn starts the target playbook ([[playbook-captain-2](#playbook-captain-2)]).
+A Boss-turn cancellation signal shall reach a runtime operation only while that operation is active; a previously returned parked child shall remain owned by its suspended parent until explicit return, dismissal or disposal.
 Nested child completion and dismissal shall instead follow
 [[playbook-captain-28](#playbook-captain-28)].
 
@@ -698,7 +699,7 @@ final text, and error without player or resume-token fields, route
 sub-runtime `callJudge` through that same queue to hidden
 `context.callCaptain`, route `callPlaybook` through the stack protocol
 in [[playbook-captain-29](#playbook-captain-29)], and pass sub-runtime
-`emitStatus` and `emitTelemetry` calls through to the host in order.
+`emitStatus` and `emitTelemetry` calls through to the host in order, except the marked question statuses suppressed by [[playbook-captain-3](#playbook-captain-3)].
 Hidden sub-runtime judge calls shall stay fresh and isolated and
 shall never resume or replace the pinned durable-conversation token
 ([[playbook-captain-31](#playbook-captain-31)]).
@@ -1108,7 +1109,7 @@ The module's default shell factory shall return `PlaybookCaptainShell`.
 | Journal record | `{ seq, turnId, kind, payload }`, where `kind` is `boss`, `reply`, `handoff`, `action`, or `outcome`, and `payload` is JSON-safe |
 | `mode: 'chat'` | No frame, pending-question, last-error, or separately derived control-ledger member |
 | `mode: 'engaged.parked'` | Nonempty ordered `frames`; optional JSON-safe `pendingBossQuestions` whose entries use the runtime snapshot's discriminated Captain-or-role asker; optional `lastError: { name: string, message: string }`; optional exact `retainedEffectReconciliation: { sourceGenerationId: UUID, checkpoint: PlaybookEffectLedger }`; and no separately derived control-ledger member |
-| Frame | Exactly `playbookId: string`, `sessionId: UUID`, `rootSessionId: UUID`, nonnegative-integer `depth`, optional `parentSessionId: UUID`, optional nonempty `parentCallId: string`, JSON-safe `options`, exact `roleBindings: Readonly<Record<roleId, playerId>>`, and `runtime: PlaybookRuntimeSnapshot` |
+| Frame | Exactly `playbookId: string`, `sessionId: UUID`, `rootSessionId: UUID`, nonnegative-integer `depth`, optional `parentSessionId: UUID`, optional nonempty `parentCallId: string`, optional nonempty root-only `request: string` [[recovery-14](recovery.md#recovery-14)], JSON-safe `options`, exact `roleBindings: Readonly<Record<roleId, playerId>>`, and `runtime: PlaybookRuntimeSnapshot` |
 
 The Captain and frame `runtime` members shall be complete `PlaybookRuntimeSnapshot` values exported under [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)].
 The shell `effectLedger` shall be the complete detached current-host mirror of [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)]; the internal Captain runtime snapshot shall carry the canonical empty ledger, while every workflow-frame runtime snapshot shall carry a ledger exactly equal to the shell member.
@@ -1631,7 +1632,7 @@ carrying no raw state id; and "what went
 wrong?" asked twice after a failure carries the engine's
 `ControlView.lastError` in both captured decision prompts with no
 `apply` and the machine untouched.
-The question-relay cases shall verify that marked runtime question statuses are suppressed and a failed Captain reply falls back to the complete original question [[playbook-captain-9](#playbook-captain-9)] [[playbook-captain-10](#playbook-captain-10)].
+The question-relay cases shall verify that marked runtime question statuses are suppressed and a failed Captain reply appends the complete original question to the truthful action-outcome reply, without digest state ids [[playbook-captain-3](#playbook-captain-3)] [[playbook-captain-34](#playbook-captain-34)].
 The suite shall fail unless a scripted `failed` receipt with a
 normalized error yields a captured result-phase call carrying the
 disposition, the error `{ name, message }`, and the settlement facts

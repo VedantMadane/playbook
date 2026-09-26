@@ -47,7 +47,7 @@ The store shall encode a manifest as a closed schema-version-7 JSON object with 
 | `state: 'settled' \| 'uncertain'` | `structuralProjection`, `lastAppliedExecutionProjection`, `snapshot`, `effectLedger`, `unresolvedEffects`; optional `retainedGenerations` and `settledAbandonment`; `uncertain` present exactly in uncertain state |
 | `state: 'history-only'` | Nonempty string `reason`; no executable recovery fields |
 
-- uncertain recovery optionally includes exactly `{snapshot,instruction}` for the saved preparation point, whose controller/journal match the preceding settled boundary and whose working stack and effect evidence retain the interrupted task [[recovery-18](recovery.md#recovery-18)];
+- uncertain recovery optionally includes exactly `{snapshot,instruction,continuation?}` for the saved preparation or continuation point, whose controller/journal match the preceding settled boundary and whose working stack and effect evidence retain the interrupted task [[recovery-18](recovery.md#recovery-18)];
 - executable fields preserve the structural/execution projections, uncertainty, settlement, snapshot and ledger relationships of the durable Captain contract [[playbook-cli-23](playbook-cli.md#playbook-cli-23)], in their token-free storage form [[session-storage-7](#session-storage-7)]; stored state never implies lease ownership.
 - unknown manifest or nested recovery versions remain byte-for-byte unchanged; they allow history viewing and deletion with a lease, but no execution or silent downgrade.
 

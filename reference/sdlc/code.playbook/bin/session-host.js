@@ -3,7 +3,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createCaptainSessionStore, projectCaptainSessionStructure } from './session-store.js';
-import { createCaptainSessionHost, executionConfigFromPlan, installRetainedGenerationsForLaunch, settleStoppedPreparation, validateFrozenExecutionConfig } from './run.js';
+import { createCaptainSessionHost, executionConfigFromPlan, installRetainedGenerationsForLaunch, validateFrozenExecutionConfig } from './run.js';
 import { createReplayRecordObserver } from './replay-observer.js';
 
 /** Own one session lease and the same durable turn transaction as the CLIs. */
@@ -44,7 +44,7 @@ export async function openSessionHost(options) {
     await installRetainedGenerationsForLaunch({ lease, shell: created.shell, ...(record === undefined ? { freshBoundary: { cwd, structuralProjection: structure, executionProjection: config, snapshot: created.snapshot } } : {}), retainedGenerations: record?.retainedGenerations ?? {}, reconcileRepositoryEffects: created.reconcileRepositoryEffects });
     record = await lease.read();
     await replay.flushStoredRecords();
-    const execute = async (input, retry, actionId, shellActionId, recovery = false) => {
+    const execute = async (input, retry, actionId, shellActionId) => {
       if (closed || closing) throw new Error('session host is closing');
       if (active) throw new Error('session turn is already active');
       const operation = (async () => {
@@ -73,7 +73,6 @@ export async function openSessionHost(options) {
         await replay.flushStoredRecords();
         await options.onCheckpoint?.(marked);
         await lease.assertOwner();
-        if (recovery) created.shell.selectRecovery(input, input);
         await created.host.runBossTurn(input);
         if (terminal?.type !== "turn_finished" || replies.length !== 1 || typeof replies[0].text !== "string" || replies[0].text.trim().length === 0) throw new Error("Captain turn did not finish with one reply; session remains uncertain");
         const settlement = created.shell.exportSettlement();
@@ -82,18 +81,23 @@ export async function openSessionHost(options) {
         await replay.flushStoredRecords();
         await options.onCheckpoint?.(record);
         return record;
-      })();
-      active = operation;
-      try { return await operation; } catch (error) {
-        const parked = await settleStoppedPreparation(created.shell, lease);
-        if (parked) {
-          record = parked;
-          await replay.flushStoredRecords();
-          await options.onCheckpoint?.(record);
+      })().catch(async (error) => {
+        try {
+          const parked = created.getInterruptedSettlement();
+          if (parked?.state === 'settled') {
+            record = parked;
+            await replay.flushStoredRecords();
+            await options.onCheckpoint?.(record);
+          }
+        } catch (reportError) {
+          throw new AggregateError([error, reportError], 'Captain turn stopped and its saved state could not be reported');
         }
         throw error;
-      } finally { active = undefined; }
+      });
+      active = operation;
+      try { return await operation; } finally { active = undefined; }
     };
+
     const dispose = () => {
       if (closed) return Promise.resolve();
       if (closing) return closing;
@@ -110,7 +114,7 @@ export async function openSessionHost(options) {
         return execute(undefined, true);
       }
       if (typeof input !== 'string' || !input.trim()) throw new Error('Recovery of a paused task requires a Boss instruction');
-      return execute(input, false, undefined, undefined, true);
+      return execute(input, false);
     };
     return Object.freeze({ sessionId, host: created.host, shell: created.shell, lease, read: () => lease.read(), handleBossTurn: (input) => execute(input, false), recover, listRuntimeActions: () => created.shell.describeRuntimeActions?.() ?? Object.freeze([]), submitRuntimeAction: (actionId) => execute(undefined, false, actionId), listShellActions: () => created.shell.describeShellActions?.() ?? Object.freeze([]), submitShellAction: (actionId) => execute(undefined, false, undefined, actionId), retry: () => execute(undefined, true), dispose });
   } catch (cause) {

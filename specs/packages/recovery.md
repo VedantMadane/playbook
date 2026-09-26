@@ -19,7 +19,7 @@ The checkpoint shall be replaced by the next invocation and omitted from snapsho
 ### recovery-2
 
 When validating a recovery checkpoint, the runtime shall require exactly `stateId`, `prompt`, `machine`, and `boundaryPrefix`, with nonempty strings, a JSON machine snapshot active at that source state, and a nonnegative ledger prefix not exceeding the current boundary count.
-Runtime restoration shall additionally require that the checkpoint names a current player or direct-Captain invocation and that its persisted invocation belongs to the declared actor at that state.
+Runtime restoration shall additionally require that the checkpoint names a current player or direct-Captain invocation and that its persisted invocation belongs to the declared actor at that state with matching `input.stateId`.
 An invalid checkpoint shall reject restoration before any actor starts.
 
 ### recovery-3
@@ -31,11 +31,11 @@ A missing checkpoint shall preserve the existing retry behavior; an unsafe check
 ### recovery-5
 
 While a leaf has an invocation checkpoint and either a pending Boss question or a ready step retry, verified-restoration retry, or saved-result assessment, its control view shall offer `recovery` containing the captured `prompt`, optional source-state `description`, optional `preparation` text stating the conditions the runtime will verify, optional JSON `evidence` containing saved player text, declared result choices and repository receipts, and a runtime-owned `continuation` of exactly `{kind:'reply'}` or `{kind:'runtime',actionId}`.
-The shell shall advertise only the availability and description to ordinary Captain decisions, keeping the full prompt for preparation [[playbook-captain-9](playbook-captain.md#playbook-captain-9)].
 
 ### recovery-6
 
 When the default Captain selects preparation under [[captain-playbook-4](captain-playbook.md#captain-playbook-4)], its selection shall be the payload-free `{action:'recover'}` through the ordinary controller port [[captain-playbook-9](captain-playbook.md#captain-playbook-9)].
+An ordinary answer shall select `deliver`; a requested advertised retry needing no preparation shall select `runtime`; a request to repair prerequisites and continue shall select `recover` only when preparation is available.
 
 ### recovery-7
 
@@ -52,7 +52,9 @@ Where the host supplies cancellation of admitted calls, when executing `recover`
 
 A host without cancellation shall not offer or start preparation.
 The call shall use no durable Captain or player conversation token, publish no returned token, make no corrective or transport retry, and receive a cancellation signal with a 150-second preparation limit starting after the working stack is saved; expiry shall cancel and drain the host turn and its admitted calls, while removing the deadline before the subsequent specialist step.
-After a drained preparation stops before continuation, the durable host shall settle an exportable parked stack with unchanged effect evidence, preserving any preparation edits and allowing a new Boss instruction [[playbook-cli-23](playbook-cli.md#playbook-cli-23)].
+After an interrupted recovery turn drains, the shared durable host shall settle its current exportable stack and acknowledged effect evidence before disposal, preserving completed work and preparation edits and allowing a new Boss instruction [[playbook-cli-23](playbook-cli.md#playbook-cli-23)].
+The interactive pane shall remain open after this settlement; headless failure shall explain that the work is saved, and SDK disposal shall await settlement and its reporting.
+A settlement failure shall preserve the original turn failure, still attempt safe disposal, and retain uncertainty.
 A process loss before that settlement shall retain the recovery point [[recovery-18](#recovery-18)].
 A failed, aborted, malformed, or blocked result shall leave the leaf parked and attribute its outcome to recovery, preserving earlier action outcomes and accumulated counts [[playbook-captain-20](playbook-captain.md#playbook-captain-20)] [[playbook-captain-35](playbook-captain.md#playbook-captain-35)].
 
@@ -65,7 +67,7 @@ The preparation and continuation shall settle as one `recover` turn through the 
 ### recovery-10
 
 While the failed invocation checkpoint identifies exactly one owned standalone boundary with a complete single-commit receipt, saved nonempty player text, no spent correction budget, and either no semantic candidate or an already resolved one, the runtime shall advertise `retry:adjudication` as `Retry assessment of the saved result`, provided no other unresolved boundary or retained or deferred fence exists.
-The action shall adjudicate the saved text once through the ordinary tool-free judge only when its semantic candidate is missing, require that candidate to reconcile as resolved against the existing receipt, and durably append every valid candidate without replacing physical evidence, including a blocked explanation.
+The action shall adjudicate the saved text once through the ordinary tool-free judge only when its semantic candidate is missing, require that candidate to reconcile as resolved against the existing receipt, and durably append every valid candidate without replacing physical evidence, including a candidate that remains unresolved.
 A blocked candidate shall replace the old failure explanation, remain unresolved and remove the saved-assessment retry; it shall authorize no invented transition [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)].
 It shall then deliver the acknowledged result to the checkpoint's invocation through ordinary reconstruction, without calling the player or creating another physical boundary; a failed judgment shall leave the invocation parked, and restoration after acknowledgement shall consume the saved resolved candidate without another judge call.
 
@@ -83,7 +85,11 @@ The effect-ledger validators shall reject restoration on a writable, cohort, def
 After a start, resume, switch, answer, or runtime action leaves a recoverable leaf, the host shall attempt the same preparation-and-continuation operation without another Boss turn, at most twice per turn and once for the same leaf, recovery offer, and failure.
 A blocked preparation, cancellation, unavailable offer, or unsuccessful continuation shall end automatic recovery; a conversation-only request or explicit stop shall trigger none.
 For a pending question, the host shall first make one fresh tool-free check on the same serialized Captain queue, without a repository claim or preparation point.
-That check shall select only an exact existing handed-off task or current non-host-selected Boss instruction; an unanswered, malformed, or failed check shall preserve the original question and outcome without claiming blocked preparation.
+The root frame shall retain its exact handed-off request as optional nonempty `request`, through capture, restore and adoption; a child shall carry no independent request.
+The check shall receive only that request as `{label:"Current engagement request",instruction:<exact request>}`, or an empty list when no request was saved.
+It shall return exactly `{instructionIndex:null}` for missing input, or `{instructionIndex:N}` selecting an in-range integer index; an absent, out-of-range, malformed, or failed selection shall preserve the original question and outcome without claiming blocked preparation.
+A previous answer or another engagement's task shall not be a candidate.
+A selected instruction shall become the continuation point's exact instruction; the outcome shall record the asker, full question and exact reused instruction, and Captain's closing reply shall briefly tell Boss what it answered and why.
 A selected existing instruction may be delivered once under the same continuation checks [[recovery-8](#recovery-8)]; a missing product decision, new authority, or contradictory or missing workflow transition shall be explained to Boss without inventing an answer, transition, or completion.
 
 ### recovery-16
@@ -97,19 +103,23 @@ Before Captain uses preparation tools, and before any saved-assessment or verifi
 - the exact point has `snapshot`, `instruction`, and optional `continuation` of `{kind:'reply'}` or `{kind:'runtime',actionId}`; it retains the last settled controller, journal and sequences, while replay retains the attempted input;
 - saving fails before tools or continuation, and excludes provider hints [[session-storage-7](session-storage.md#session-storage-7)];
 - preparation saves a point without `continuation`; immediately before dispatch it replaces that point with the current parked stack and selected continuation;
+- after the continuation parks, the host shall advance the point to that actual stack and acknowledged ledger and remove the earlier continuation before reporting; cancellation shall attempt the same capture after calls drain;
 - retry restores the saved stack and selects either preparation or its recorded continuation directly, without repeating the original routing action or completed preparation;
 - replay checks effect changes relative to that point: every new boundary must be complete and unchanged, and logical operations must be identical; only the two assessment/restoration actions may additionally append monotonic semantic or restoration evidence to existing boundaries [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)];
 - a vanished continuation shall settle a rejected turn through the ordinary controller path, never fail host setup [[playbook-captain-7](playbook-captain.md#playbook-captain-7)];
-- discard refuses a saved point because preparation may have changed prerequisites; without a point, the existing whole-turn checks remain in force, and retry never chooses discard automatically.
+- discard refuses a saved point because it preserves work from the attempted turn; without a point, the existing whole-turn checks remain in force, and retry never chooses discard automatically.
 
-The shared application host's asynchronous `recover` operation shall select that retry for an uncertain attempt with no new input, or require a nonempty Boss instruction for a parked step.
-It shall arm the selection only after reconciliation and durable turn admission, and never invent Boss input [[playbook-captain-7](playbook-captain.md#playbook-captain-7)].
+The shared application host's asynchronous `recover` operation shall select that retry for an uncertain attempt with no new input, or require a nonempty Boss instruction for a settled pause and route it through the ordinary Captain turn, just as the CLI does.
+A saved selection shall be armed only after reconciliation and shall execute only after durable turn admission, without invented Boss input [[playbook-captain-7](playbook-captain.md#playbook-captain-7)].
 
 ## Verification
 
 ### recovery-19
 
 When an integration test interrupts Captain during preparation inside a suspended parent, it shall reopen the real store, resume preparation and verify that the parent is not restarted, uncertain discard is refused, provider hints are absent and failed recovery writes prevent tool use [[recovery-18](#recovery-18)].
+Tests shall separately verify shared cancellation settlement through CLI, interactive and SDK entry points, including abort followed immediately by disposal and a failed settlement preserving both errors [[recovery-7](#recovery-7)].
+Tests shall advance past assessment, step retry and restoration into a child boundary, then interrupt and resume from that child; retained source ownership shall permit assessment evidence, a vanished saved action shall become a rejected turn, and later committed work without an advanced point shall refuse replay [[recovery-18](#recovery-18)].
+Tests shall isolate the recovery-point controller, journal, parked-state and current-ledger checks with otherwise-valid snapshots, and reject new SDK input while an uncertain instruction awaits recovery [[recovery-18](#recovery-18)].
 
 ### recovery-4
 
@@ -119,19 +129,20 @@ Tests shall verify that a completed earlier commit does not block an unchanged f
 ### recovery-9
 
 When integration tests recover an interrupted real leaf through the Captain session host, they shall verify that only an advertised offer exposes preparation context [[recovery-5](#recovery-5)], explicit repair intent selects recovery while ordinary answers retain exact delivery [[recovery-6](#recovery-6)], and one isolated preparation call repairs an actual prerequisite under the worktree claim without changing routing-call permissions [[recovery-7](#recovery-7)].
-The tests shall verify that ready preparation continues the same restored leaf once, while blocked, malformed, aborted, stale, and unresolved cases remain parked with a truthful settlement [[recovery-8](#recovery-8)].
+The tests shall verify that model-selected ready preparation continues the same restored leaf once, its prompt requires missing Boss choices to block before tools, while blocked, malformed, aborted, stale, and unresolved cases remain parked with a truthful settlement [[recovery-8](#recovery-8)].
 
 ### recovery-11
 
-When integration tests interrupt adjudication after a real commit, they shall verify that live and restored runtimes recover the saved result with one judge call, preserve the commit and receipt, run no duplicate player call, reject unresolved or malformed candidates, and continue from an acknowledged candidate after interrupted delivery [[recovery-10](#recovery-10)].
+When integration tests interrupt adjudication after a real commit, they shall verify that live and restored runtimes recover the saved result with one judge call, preserve the commit and receipt, run no duplicate player call, retain valid unresolved candidates without continuing, reject malformed candidates, and continue from an acknowledged candidate after interrupted delivery [[recovery-10](#recovery-10)].
 
 ### recovery-13
 
 When a real read-only invocation creates an unexpected file after an earlier committed step, the integration suite shall verify that live and restored sessions reject retry before exact restoration, then append restoration evidence and rerun only the interrupted invocation, preserve the earlier commit and original receipt, and never accept the old failed result [[recovery-12](#recovery-12)].
+Otherwise-valid commit-moving, writable changed and unchanged, incomplete, ambiguous, two-member cohort and logical-operation ledgers shall fail only after restoration evidence is added; a successful restoration shall refresh the checkpoint [[recovery-12](#recovery-12)].
 
 ### recovery-15
 
-When the real Captain host encounters an interrupted step or pending question, the integration suite shall verify bounded automatic repair, exact task-input reuse, no recovery on chat or cancellation, and a specific blocked explanation for missing Boss input or an unavailable transition [[recovery-14](#recovery-14)]; preparation timeout shall leave the step paused without timing out later specialist work [[recovery-7](#recovery-7)].
+When the real Captain host encounters an interrupted step or pending question, the integration suite shall verify bounded automatic repair, exact task-input reuse from the current root after restore or adoption, truthful automatic-answer reporting, rejected malformed, out-of-range and failed question checks, the two-attempt bound, no recovery on chat or cancellation, and a specific blocked explanation for missing Boss input or an unavailable transition [[recovery-14](#recovery-14)]; preparation timeout shall leave the step paused without timing out later specialist work [[recovery-7](#recovery-7)].
 
 ### recovery-17
 

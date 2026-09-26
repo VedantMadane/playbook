@@ -150,6 +150,7 @@ export interface PlaybookCaptainFrameSnapshot {
     readonly depth: number;
     readonly parentSessionId?: string;
     readonly parentCallId?: string;
+    readonly request?: string;
     readonly options: JsonValue;
     readonly roleBindings: Readonly<Record<string, string>>;
     readonly runtime: DeepReadonly<PlaybookRuntimeSnapshot>;

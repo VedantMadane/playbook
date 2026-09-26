@@ -5,7 +5,7 @@
 
 ## Status
 
-Recovery amended by [DR-066](066-captain-prepares-step-recovery.md): bounded preparation, saved-step continuation and automatic recovery apply to host-selected actions.
+Amended by [DR-066](066-captain-prepares-step-recovery.md): host-selected actions receive the same continuation points and bounded automatic recovery as model-selected actions.
 
 Accepted.
 Amends [DR-029](029-session-scoped-conversational-captain.md) in one scope: a `runtime` turn may be decided by the embedding host instead of the hidden decision call, preserving every validation and effect rule that decision carries.

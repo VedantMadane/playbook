@@ -424,7 +424,7 @@ try {
 } finally { await controller.dispose(); }
 ```
 
-For uncertainty it uses the saved instruction and exact attempted settings. It resumes the saved preparation point when available; otherwise it checks whether the original turn can safely repeat. It never chooses discard. For an already settled pause, `recover(bossInstruction)` requires Boss's instruction or answer; it never invents one. New input cannot replace an uncertain instruction before recovery.
+For uncertainty it uses the saved instruction and exact attempted settings. It checks later effects against a saved point before resuming it; without one, it checks whether the original turn can safely repeat. Later commits or pending-operation changes refuse replay, and saved assessment/restoration permits only its own verified evidence changes. It never chooses discard. For an already settled pause, `recover(bossInstruction)` requires Boss's instruction or answer and passes it through the same Captain turn as CLI input; an ordinary answer does not force preparation. New input cannot replace an uncertain instruction before recovery.
 
 Explicit `mode:'retry'` and `retry()` remain supported. Module-free
 `discardSessionUncertain(shared, sessionId)` restores the prior recovery only

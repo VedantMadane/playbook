@@ -195,8 +195,7 @@ Exit `0` means the Captain turn and its durable hand-off were presented,
 even when the selected action reported rejection or failure through the
 Captain reply. Argument, config, catalog, readiness, or pre-turn setup errors
 exit `1`; a started-turn, persistence, lease-release, or presentation failure
-exits `2` with stdout empty. SIGINT, SIGTERM, and SIGHUP preserve the
-uncertain boundary, withhold stdout, and are re-raised after lease retirement
+exits `2` with stdout empty. SIGINT, SIGTERM, and SIGHUP withhold stdout, preserve uncertainty unless stopped recovery can save its current work, and are re-raised after lease retirement
 ([[playbook-cli-18](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-cli.md#playbook-cli-18)]).
 
 The former positional `<from>`, `resume`, `--player`, `--captain`,
@@ -382,7 +381,7 @@ The runtime checks the continuation. It retries the interrupted step, keeps earl
 
 Captain asks Boss for a real missing decision, uncertain permission, or a missing or contradictory playbook transition. Repository checks alone cannot prove that publishing or another outside action is safe to repeat; Captain must check that separately.
 
-Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline. When cancellation drains safely before continuation, the step stays paused and accepts a new instruction. A process loss instead keeps a saved point for Retry. Immediately before continuation, that point is replaced so Retry cannot rerun preparation or bypass checks on later work. Custom hosts must provide cancellation before preparation is available.
+Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline. When cancellation drains safely, the latest stopped step is saved and accepts a new instruction; the interactive pane stays open. A process loss instead keeps a saved point for Retry. Immediately before continuation, that point is replaced so Retry cannot rerun preparation or bypass checks on later work. Custom hosts must provide cancellation before preparation is available.
 
 Custom runtimes can provide the same recovery offer: step prompt, optional preparation conditions and evidence, and a continuation they will validate. Captain needs no list of repair tools or error strings. Older checkpoints without this offer keep their existing controls.
 
@@ -391,7 +390,7 @@ Custom runtimes can provide the same recovery offer: step prompt, optional prepa
 Before model work, the runner takes one exclusive session lease and writes an
 uncertain marker. If the process is interrupted after effects may
 have begun but before settlement is durable, ordinary continuation refuses
-to guess. Retry resumes the saved preparation point when one exists; otherwise it requires proof that replaying the recorded turn is safe. Discard is a separate explicit request:
+to guess. Retry checks work after the saved point before resuming it; without a point, it checks whether the recorded turn can safely repeat. Discard is a separate explicit request:
 
 ```sh
 playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --retry-uncertain
@@ -400,11 +399,10 @@ playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --discard-uncertain
 
 Retry reads no input and reuses the byte-exact recorded turn and its exact
 attempted Captain, player, and per-role model, effort, and fast-mode settings;
-current config cannot retune that attempt. A saved preparation point retains completed steps. Without one, recorded repository changes or an unresolved operation prevent whole-turn replay; repository evidence does not prove the absence of outside effects. Discard
+current config cannot retune that attempt. A saved point retains completed steps, but later commits, changed earlier evidence, incomplete work, or changed pending operations prevent replay, except verified saved-result assessment or read-only restoration. Without a point, recorded repository changes or an unresolved operation prevent whole-turn replay; repository evidence does not prove the absence of outside effects. Discard
 reads no input and runs no model: it restores the exact prior settled boundary,
 or deletes a never-settled fresh session, while abandoning the attempted work.
-An interrupted interactive turn uses the same uncertain record and these
-headless recovery commands. Discard preserves the attempt's replay history and
+An interrupted interactive turn that could not save a normal pause uses the same uncertain record and these headless recovery commands. Discard preserves the attempt's replay history and
 refuses if the effect ledger has advanced beyond the prior checkpoint or preparation has a saved recovery point. It does not undo files or commits. Captain never selects discard automatically.
 
 Stop old writers before upgrading. When using the ordinary `~/.spex/sessions`

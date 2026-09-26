@@ -2073,7 +2073,7 @@ describe('createPlaybookCaptainShell explicit CODE routing (CAPTAIN-12/15)', () 
     expect(registry.runtimes[0]?.inputs).toEqual([
       {
         text: 'fix the failing test',
-        signal: context.controller.signal,
+        signal: expect.any(AbortSignal),
       },
     ]);
     expect(session.statuses[0]).toEqual({
@@ -6913,6 +6913,14 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     const docs = fakePlaybookEntry('docs', 'docs', async () =>
       quiescentResult('drafting'),
     );
+    const createChild = docs.entry.createRuntime;
+    docs.entry.createRuntime = (...args: any[]) => {
+      const child = createChild(...args);
+      child.describe = () => ({ state: quiescentResult('drafting').state, pendingQuestions: [], actions: [] });
+      // A describable child still must not be retained before input delivery.
+      child.exportSnapshot = () => ({}) as PlaybookRuntimeSnapshot;
+      return child;
+    };
     // Give the child one role its caller does not map so the visibility
     // request is observably the explicitly bound child leaf.
     docs.entry.requiredRoleIds = ['docs'];

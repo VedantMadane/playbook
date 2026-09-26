@@ -3049,11 +3049,37 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await harness.init();
     await harness.turn('/code ask the worker', 1);
     expect(harness.surfaced.at(-1)).toContain(CODE_PENDING_QUESTION);
-    expect(harness.surfaced.at(-1)).toContain('I could not simplify');
+    expect(harness.surfaced.at(-1)).toContain('the reported action completed');
+    expect(harness.surfaced.at(-1)).not.toContain('runFirstPhase');
     expect(harness.statuses.some((status) => status.includes(' asks: '))).toBe(false);
     expect(harness.shell.exportSnapshot()!.mode).toBe('engaged.parked');
     await harness.shell.dispose?.();
   });
+
+  it.each(['decision outage', 'rejected', 'failed'])(
+    'keeps a pending question beside a truthful %s reply', async (mode) => {
+      const entry = realEntry(codeRegistryEntry);
+      const harness = realArtifactHarness([entry], {
+        players: () => ({ status: 'ok', finalText: CODE_PENDING_QUESTION }),
+        adjudicate: () => ({ guard: 'needsBossReply' }),
+        decide: () => {
+          if (mode === 'decision outage') throw new Error('decision network outage');
+          return mode === 'rejected' ? { action: 'runtime', actionId: 'unavailable' } : { action: 'deliver' };
+        },
+        closing: () => { throw new Error('closing network outage'); },
+      });
+      await harness.init();
+      await harness.turn('/code ask the worker', 1);
+      if (mode === 'failed') entry.runtimes[0]!.handleBossInput = async () => { throw new Error('delivery failed'); };
+      await harness.turn('continue with this answer', 2).catch(() => undefined);
+      const reply = harness.surfaced.at(-1)!;
+      expect(reply).toContain(CODE_PENDING_QUESTION);
+      expect(reply).not.toContain('could not simplify');
+      expect(reply).not.toContain('runFirstPhase');
+      expect(reply).toContain(mode === 'rejected' ? 'rejected and nothing ran' : mode === 'failed' ? 'ended with a failure' : 'No action was selected or run');
+      await harness.shell.dispose?.();
+    },
+  );
 
   it.each(['an unexpected player error', 'Boss dismisses the child'])(
     'retains real CODE and REVIEW work after %s', async (interruption) => {

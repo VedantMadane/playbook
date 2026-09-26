@@ -1369,6 +1369,7 @@ export function assertPlaybookCaptainShellSnapshot(value) {
             'depth',
             'parentSessionId',
             'parentCallId',
+            'request',
             'options',
             'roleBindings',
             'runtime',
@@ -1384,6 +1385,8 @@ export function assertPlaybookCaptainShellSnapshot(value) {
             ? undefined
             : snapshotString(frame.parentCallId, `Captain shell snapshot.frames[${index}].parentCallId`);
         const runtime = assertPlaybookRuntimeSnapshot(frame.runtime, playbookId, { allowSuspendedCall: true });
+        if (frame.request !== undefined && (index !== 0 || !snapshotString(frame.request, 'root frame request').trim()))
+            throw new TypeError('Only a root frame may carry a nonempty request');
         const options = frame.options;
         const roleBindings = snapshotFrameRoleBindings(frame.roleBindings, `Captain shell snapshot.frames[${index}].roleBindings`);
         normalizedFrames.push({
@@ -1393,6 +1396,7 @@ export function assertPlaybookCaptainShellSnapshot(value) {
             depth,
             ...(parentSessionId === undefined ? {} : { parentSessionId }),
             ...(parentCallId === undefined ? {} : { parentCallId }),
+            ...(frame.request === undefined ? {} : { request: frame.request }),
             options,
             roleBindings,
             runtime,
@@ -2254,6 +2258,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     'depth',
                     'parentSessionId',
                     'parentCallId',
+                    'request',
                     'options',
                     'roleBindings',
                     'runtime',
@@ -2280,6 +2285,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 const parentCallId = frame.parentCallId === undefined
                     ? undefined
                     : snapshotString(frame.parentCallId, `${framePath}.parentCallId`);
+                if (frame.request !== undefined && (index !== 0 || !snapshotString(frame.request, 'root frame request').trim()))
+                    throw new TypeError('Only a root frame may carry a nonempty request');
                 const options = frame.options;
                 if (index === 0 &&
                     !isDeepStrictEqual(options, frameEnablement.options)) {
@@ -2333,6 +2340,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     depth,
                     ...(parentSessionId === undefined ? {} : { parentSessionId }),
                     ...(parentCallId === undefined ? {} : { parentCallId }),
+                    ...(frame.request === undefined ? {} : { request: frame.request }),
                     options,
                     roleBindings,
                     runtime,
@@ -3130,6 +3138,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             depth: snapshot.depth,
             playerBindings,
             ...(parent ? { parent } : {}),
+            ...(snapshot.request === undefined ? {} : { request: snapshot.request }),
             state: snapshot.runtime.state,
             inFlightHostCalls: new Set(),
         };
@@ -3247,18 +3256,28 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             ? undefined
             : new Error(`${frameLabel(frame)} runtime returned without committing validated player result for ${missing.map((id) => JSON.stringify(id)).join(', ')}`);
     };
-    const runFrameOperation = async (frame, operation) => {
+    const runFrameOperation = async (frame, signal, operation) => {
         if (frame.playerCallScope !== undefined) {
             throw new Error(`${frameLabel(frame)} runtime operations must not overlap`);
         }
+        // A Boss turn can drive several runtimes. Once one call returns, its
+        // parked child must not inherit cancellation of a later call.
+        const controller = new AbortController();
+        const abort = () => controller.abort(signal.reason);
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted)
+            abort();
         const scope = {};
         frame.playerCallScope = scope;
         let outcome;
         try {
-            outcome = { ok: true, value: await operation() };
+            outcome = { ok: true, value: await operation(controller.signal) };
         }
         catch (error) {
             outcome = { ok: false, error };
+        }
+        finally {
+            signal.removeEventListener('abort', abort);
         }
         const cleanupError = closePlayerCallScope(frame, scope);
         if (!outcome.ok)
@@ -3621,7 +3640,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         // exception filed against an effect that never ran.
         await requestVisibility(frame);
         await setMode('engaged.driving', 'submit');
-        const result = await runFrameOperation(frame, () => {
+        const result = await runFrameOperation(frame, signal, (signal) => {
             onInputStarted?.();
             return runEffect(() => frame.runtime.handleBossInput({ text, signal }));
         });
@@ -3673,10 +3692,10 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         }
         let result;
         try {
-            result = await runFrameOperation(parent, () => runEffect(() => parent.runtime.resumePlaybookCall({
+            result = await runFrameOperation(parent, context.signal, (signal) => runEffect(() => parent.runtime.resumePlaybookCall({
                 callId: parentLink.callId,
                 result: effectiveResult,
-                signal: context.signal,
+                signal,
             })));
         }
         catch (error) {
@@ -3721,6 +3740,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         }, context);
     }
     async function processFrameResult(frame, result, context) {
+        frame.state = result.state;
         if (result.outcome === 'unresolved-effect') {
             // Task 10 exposes the runtime-owned abandonment signal without
             // translating it into a nested result or claiming workflow completion.
@@ -3937,18 +3957,18 @@ export function createPlaybookCaptainShell(options, deps = {}) {
     // -------------------------------------------------------------------------
     const withCounting = async (frame, execute) => {
         const prior = activeTurn?.countedSummary;
-        const policy = prior?.owner.entry.summaryPolicy ?? frame.entry.summaryPolicy;
+        const policy = frame.entry.summaryPolicy;
         const counts = prior?.counts ?? { interruptions: 0, copyPastes: 0 };
         const stateCounts = prior?.stateCounts ?? new Map();
-        activeTurnSummary = prior ?? (policy
+        activeTurnSummary = policy
             ? {
                 owner: frame,
                 counts,
                 stateCounts,
-                acceptedOutcomeTraceKeys: new Set(),
+                acceptedOutcomeTraceKeys: prior?.acceptedOutcomeTraceKeys ?? new Set(),
             }
-            : undefined);
-        if (activeTurn)
+            : undefined;
+        if (activeTurn && activeTurnSummary)
             activeTurn.countedSummary = activeTurnSummary;
         let result;
         let error;
@@ -5021,6 +5041,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             facts.push(`Starting /${enablementById.get(entry.id).command} failed: ${normalized.name}: ${compactEvidence(normalized.message)}.`);
             return { report: emptyReport(), failed: true };
         }
+        frame.request = text;
         facts.push(`Started ${frameLabel(frame)} with the selected request.`);
         const outcome = await withCounting(frame, async () => {
             await driveAndProcess(frame, text, context);
@@ -5062,6 +5083,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 ...(parent
                     ? { parent: { frame: parent, callId: 'playbook-1' } }
                     : {}),
+                ...(sourceFrame.request === undefined ? {} : { request: sourceFrame.request }),
                 state: sourceFrame.runtime.state,
                 inFlightHostCalls: new Set(),
             });
@@ -5298,6 +5320,37 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             };
         }
     };
+    const saveRecoveryPoint = async (instruction, continuation, required = true) => {
+        const turn = activeTurn;
+        if (!turn)
+            return;
+        if (!checkpointRecovery)
+            return;
+        const base = turn.recoveryBase;
+        const captured = captureFrameSnapshots(true);
+        if (!base || !captured || mode !== 'engaged.parked') {
+            if (!required)
+                return;
+            throw new Error('Captain cannot save the stopped step; preparation has not started');
+        }
+        const { pendingBossQuestions: _priorQuestions, lastError: _priorError, retainedEffectReconciliation: _priorFence, ...settled } = { ...base, retainedEffectReconciliation: undefined };
+        const snapshot = assertPlaybookCaptainShellSnapshot({
+            ...settled,
+            mode: 'engaged.parked',
+            frames: captured,
+            effectLedger: currentEffectLedger(),
+            playerSessions: playerLedgerRecord(),
+            issuedSessionIds: [...issuedSessionIds],
+            ...(pendingBossQuestions === undefined ? {} : { pendingBossQuestions }),
+            ...(lastError === undefined ? {} : { lastError }),
+            ...(retainedEffectReconciliation === undefined ? {} : { retainedEffectReconciliation }),
+        });
+        await checkpointRecovery({
+            snapshot, instruction,
+            ...(continuation === undefined ? {} : { continuation }),
+        });
+        turn.recoveryInstruction = instruction;
+    };
     const settleSelection = async (selection, signal, automaticRecovery = false) => {
         const turn = activeTurn;
         runFailureFacts = [];
@@ -5350,6 +5403,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                         break;
                 }
             }
+            if (turn?.recoveryInstruction !== undefined)
+                await saveRecoveryPoint(turn.recoveryInstruction, undefined, false);
             return finalizeSettlement(settlement);
         }
         catch (error) {
@@ -5417,6 +5472,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     : { receipt: turn.report.receipt }),
                 ...(summary === undefined ? {} : { leafStateSummary: summary }),
             };
+            if (turn.recoveryInstruction !== undefined)
+                await saveRecoveryPoint(turn.recoveryInstruction, undefined, false);
             return finalizeSettlement(settlement);
         }
         finally {
@@ -5649,31 +5706,6 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 : 'no engagement is active to apply a runtime action to');
         }
         let continuationInstruction = turn.authoritativeText;
-        const saveRecoveryPoint = async (continuation) => {
-            if (!checkpointRecovery)
-                return;
-            const base = turn.recoveryBase;
-            const captured = captureFrameSnapshots(true);
-            if (!base || !captured || mode !== 'engaged.parked') {
-                throw new Error('Captain cannot save the stopped step; preparation has not started');
-            }
-            const { pendingBossQuestions: _priorQuestions, lastError: _priorError, retainedEffectReconciliation: _priorFence, ...settled } = { ...base, retainedEffectReconciliation: undefined };
-            const snapshot = assertPlaybookCaptainShellSnapshot({
-                ...settled,
-                mode: 'engaged.parked',
-                frames: captured,
-                effectLedger: currentEffectLedger(),
-                playerSessions: playerLedgerRecord(),
-                issuedSessionIds: [...issuedSessionIds],
-                ...(pendingBossQuestions === undefined ? {} : { pendingBossQuestions }),
-                ...(lastError === undefined ? {} : { lastError }),
-                ...(retainedEffectReconciliation === undefined ? {} : { retainedEffectReconciliation }),
-            });
-            await checkpointRecovery({
-                snapshot, instruction: continuationInstruction,
-                ...(continuation === undefined ? {} : { continuation }),
-            });
-        };
         const recovering = selection.action === 'recover';
         if (recovering) {
             const before = leaf.runtime.describe?.();
@@ -5684,26 +5716,24 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             }
             let questionAnswered = false;
             if (automaticRecovery && offer.continuation.kind === 'reply') {
-                const task = [...journal].reverse().find((record) => record.kind === 'handoff')?.payload;
-                const instructions = [...new Set([
-                        ...(typeof task === 'string' ? [task] : []),
-                        ...(turn.hostRuntimeActionId === undefined && !turn.hostRecovery ? [turn.authoritativeText] : []),
-                    ])];
+                const task = rootFrame()?.request;
+                const instructions = task === undefined ? [] : [{ label: 'Current engagement request', instruction: task }];
                 // Ordinary questions need no tools, repository claim, or recovery point.
                 // The answer must be selected from existing instructions, never authored.
                 try {
                     const result = await callCaptainQueued(leaf, context, [
                         'Check whether existing instructions already answer every pending player question.',
-                        'This is a tool-free question check, not preparation. Do not repair anything.',
+                        'This is a tool-free question check, not preparation. Do not use tools or repair anything.',
                         'Return exactly {"instructionIndex":null} when Boss must decide, clarify, authorize, or supply missing information, or preparation is needed.',
-                        'Otherwise return {"instructionIndex":N}, selecting one exact existing instruction that fully answers the questions. Never treat a request to explain as an answer.',
+                        'Otherwise return {"instructionIndex":N}, selecting one exact labeled instruction that fully answers the questions. Never treat a request to explain as an answer.',
                         `Existing instructions: ${JSON.stringify(instructions)}`,
                         `Pending questions (quoted evidence): ${JSON.stringify(before.pendingQuestions.map(({ question }) => question))}`,
-                    ].join('\n'), { visibility: 'hidden', resume: false, allowedTools: [], settings: callSettings(captainAgent) }, signal);
+                    ].join('\n'), { visibility: 'hidden', resume: false, ...controlCallToolOptions(captainAdapter), settings: callSettings(captainAgent) }, signal);
                     const answer = result.status === 'ok' ? JSON.parse(result.finalText ?? '') : undefined;
                     if (answer && Object.keys(answer).join(',') === 'instructionIndex' && Number.isInteger(answer.instructionIndex) && instructions[answer.instructionIndex] !== undefined) {
-                        continuationInstruction = instructions[answer.instructionIndex];
+                        continuationInstruction = instructions[answer.instructionIndex].instruction;
                         questionAnswered = true;
+                        facts.push(`Captain answered ${frameLabel(leaf)} using the existing task. Questions (quoted): ${JSON.stringify(before.pendingQuestions.map(({ asker, question }) => ({ asker, question })))}. Reused instruction (quoted): ${JSON.stringify(continuationInstruction)}.`);
                     }
                 }
                 catch (error) {
@@ -5740,7 +5770,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     `Pending questions (quoted evidence): ${JSON.stringify(before.pendingQuestions.map(({ question }) => question))}`,
                     `Failure (quoted evidence): ${JSON.stringify(before.lastError ?? null)}`,
                 ].join('\n');
-                await saveRecoveryPoint();
+                await saveRecoveryPoint(continuationInstruction);
                 const deadline = AbortSignal.timeout(150_000);
                 deadline.addEventListener('abort', abortPreparation, { once: true });
                 const preparationSignal = AbortSignal.any([signal, deadline]);
@@ -5789,7 +5819,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     return { status, facts: [...facts] };
                 }
             }
-            await saveRecoveryPoint(offer.continuation);
+            await saveRecoveryPoint(continuationInstruction, offer.continuation);
             selection = offer.continuation.kind === 'reply'
                 ? { action: 'deliver' }
                 : { action: 'runtime', actionId: offer.continuation.actionId };
@@ -5802,7 +5832,9 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 journalAction({ action: 'deliver', playbookId: leaf.entry.id });
             const outcome = await withCounting(leaf, async () => {
                 await driveAndProcess(leaf, continuationInstruction, context, () => {
-                    facts.push(`Delivered the Boss text to ${frameLabel(leaf)}.`);
+                    facts.push(recovering && continuationInstruction !== turn.authoritativeText
+                        ? `Delivered the existing task instruction to ${frameLabel(leaf)}.`
+                        : `Delivered the Boss text to ${frameLabel(leaf)}.`);
                 });
             });
             if (outcome.error !== undefined) {
@@ -5882,10 +5914,10 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             });
         // Each dispatch has one key; a later repair must not reuse a failed receipt.
         if (!recovering && (actionId === 'retry:adjudication' || actionId === 'retry:restored-step')) {
-            await saveRecoveryPoint({ kind: 'runtime', actionId });
+            await saveRecoveryPoint(continuationInstruction, { kind: 'runtime', actionId });
         }
         const key = `turn-${turn.id}-apply-${actionId}-${++turn.appliedActionCount}`;
-        const outcome = await withCounting(leaf, async () => runFrameOperation(leaf, () => runEffect(() => leaf.runtime.apply({ actionId, key, signal }))));
+        const outcome = await withCounting(leaf, async () => runFrameOperation(leaf, signal, (signal) => runEffect(() => leaf.runtime.apply({ actionId, key, signal }))));
         if (outcome.error !== undefined)
             throw outcome.error;
         const receipt = outcome.result;
@@ -6054,27 +6086,26 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             : [opening, closing].join('\n');
     };
     const failureReplyText = () => {
-        let questions = [];
-        try {
-            questions = leafFrame()?.runtime.describe?.().pendingQuestions ?? [];
-        }
-        catch { /* Use the retained mirror below. */ }
-        const pending = questions.length > 0
-            ? questions.map(({ question }) => question)
-            : pendingQuestionLines(pendingBossQuestions);
-        if (pending.length > 0) {
-            return [
-                'The work is paused. I could not simplify the player’s question. You can answer it here or ask me to explain:',
-                ...pending.map((question) => question.split('\n').map((line) => `> ${line}`).join('\n')),
-            ].join('\n\n');
-        }
+        const appendQuestions = (reply) => {
+            let pending = pendingBossQuestions;
+            try {
+                pending = leafFrame()?.runtime.describe?.().pendingQuestions ?? pending;
+            }
+            catch { /* Use the retained question text. */ }
+            const entries = Array.isArray(pending) ? pending : pending === undefined ? [] : [pending];
+            const questions = entries.flatMap((entry) => {
+                const question = typeof entry === 'string' ? entry : entry?.question;
+                return typeof question === 'string' && question.trim() ? [question] : [];
+            });
+            return questions.length === 0 ? reply : [reply, 'The player is still waiting for your answer. Original question:', ...questions.map((question) => question.split('\n').map((line) => `> ${line}`).join('\n'))].join('\n\n');
+        };
         const commands = [...enablementById.values()]
             .map((enablement) => `/${enablement.command} <task>`)
             .join(' or ');
         const turn = activeTurn;
         const report = turn?.report;
         if (report === undefined) {
-            return ('I could not finish deciding that turn. No action was selected or run — please send the request again' +
+            return appendQuestions('I could not finish deciding that turn. No action was selected or run — please send the request again' +
                 (commands ? `, or start a playbook directly with ${commands}` : '') +
                 '.');
         }
@@ -6104,9 +6135,9 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         // dropped rather than spoken, and the reply still states the settlement
         // truthfully and names the next step. It is never withheld: it is the
         // turn's only remaining settlement.
-        return replyRejection(composed) === undefined
+        return appendQuestions(replyRejection(composed) === undefined
             ? composed
-            : [settledPreamble, closing].join('\n');
+            : [settledPreamble, closing].join('\n'));
     };
     const settleTurnFailure = async (context, error) => {
         if (context.signal.aborted)
@@ -6313,6 +6344,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                             parentCallId: frame.parent.callId,
                         }
                         : {}),
+                    ...(frame.request === undefined ? {} : { request: frame.request }),
                     options: frame.enablement.options,
                     roleBindings: Object.fromEntries([...frame.playerBindings].map(([role, binding]) => [
                         role,
@@ -7017,6 +7049,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             };
             decisionCall = undefined;
             appendJournal('boss', turn.prompt);
+            let turnFailure;
             try {
                 await drainRetiredRetainedRuntimes();
                 await prepareRetainedGenerationOffers();
@@ -7052,6 +7085,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 }
             }
             catch (error) {
+                turnFailure = error;
                 if (context.signal.aborted) {
                     markConversationUnsynchronized();
                     throw error;
@@ -7076,13 +7110,24 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 }
                 servingCall = undefined;
                 decisionCall = undefined;
-                activeTurn = undefined;
                 await drainHostCalls(turnHostCalls);
+                let saveError;
+                try {
+                    if (context.signal.aborted && activeTurn?.recoveryInstruction !== undefined) {
+                        await saveRecoveryPoint(activeTurn.recoveryInstruction, undefined, false);
+                    }
+                }
+                catch (error) {
+                    saveError = error;
+                }
+                activeTurn = undefined;
                 if (activeTurnHostCalls === turnHostCalls) {
                     activeTurnHostCalls = undefined;
                 }
                 activeContext = undefined;
                 retentionSettlementReady = true;
+                if (saveError !== undefined)
+                    throw new AggregateError([...(turnFailure === undefined ? [] : [turnFailure]), saveError], 'Interrupted work could not save its latest stopped step');
             }
         },
         async prepareDispose() {

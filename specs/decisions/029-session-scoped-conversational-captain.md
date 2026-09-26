@@ -5,7 +5,7 @@
 
 ## Status
 
-Recovery amended by [DR-066](066-captain-prepares-step-recovery.md): bounded preparation, saved-step continuation and automatic recovery apply to host-selected actions.
+Amended by [DR-066](066-captain-prepares-step-recovery.md): ordinary Captain calls remain tool-free; task authorization permits separate bounded prerequisite preparation and automatic continuation.
 
 Accepted.
 [DR-040](040-outcome-authority-effect-reconciliation.md) grounds CODE, REVIEW, and DECIDE action results in accepted outcomes and canonical structured terminal or bounded unresolved-effect settlements rather than aggregate player or judge prose, with deterministic Boss reporting of exact available receipt identity.
