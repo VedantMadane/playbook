@@ -198,9 +198,6 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
     type: "setPendingBossQuestion";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberEmptyBossReplyError";
-    params: import("xstate").NonReducibleUnknown;
-} | {
     type: "startPr";
     params: import("xstate").NonReducibleUnknown;
 } | {
@@ -208,6 +205,9 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "completeNotPublished";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "rememberEmptyBossReplyError";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "completeWithCodeFailure";
