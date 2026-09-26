@@ -9,7 +9,7 @@ Accepted (2026-09-25).
 
 ## Context
 
-- A nested playbook's caller composes the child's input as labelled quoted lines: CODE and DECIDE give REVIEW `> Original intent: …`, `> Review scope: …`, and `> Coder output: …`, each line carrying the literal `>` of its quoted relay.
+- A nested playbook's caller composes the child's input as labelled quoted lines: CODE and DECIDE give REVIEW `> Original intent: …`, `> Review scope: …`, and `> Coder output: …`, DECIDE also gives it `> Coder's independent proposal: …`, and each line carries the literal `>` of its quoted relay.
 - REVIEW relays that whole request to Reviewer and Coder in every round, so each later prompt repeats the review scope and first-round context that Reviewer already holds.
   The REVIEW Source is to define the original intent as the `Original intent:` section of the caller's request, running to the `Review scope:` line or to the end of the request, or as the whole request where that label is absent, and relay only that section after the first round.
 - The definitions give such a placeholder no path: [text2gears](../../slc/text2gears.md) requires a producer for every consumed placeholder, and [gears2fsm](../../slc/gears2fsm.md) binds each placeholder to a value the machine receives — from its caller, its host, a player's result, or the invocation's identity — and to none it computes.
