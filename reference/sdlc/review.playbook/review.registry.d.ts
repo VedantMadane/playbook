@@ -28,8 +28,8 @@ export interface ReviewPlaybookRegistryEntry {
     createRuntime(options: ReviewOptions, hostCapabilities: PlaybookHostConstructionCapabilities & PlaybookHostCapabilities): PlaybookRuntime;
 }
 export declare const reviewStateCountLabels: {
-    readonly reviewFirstRound: "review round";
-    readonly reviewAfterCommit: "review round";
+    readonly firstReview: "review round";
+    readonly reviewFixCommit: "review round";
     readonly reviewAfterRejection: "rebuttal";
 };
 export declare const reviewCopyPasteGuardNames: readonly ["findings", "committed", "rejectedAll"];
