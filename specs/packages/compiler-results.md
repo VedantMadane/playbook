@@ -40,7 +40,7 @@ When Source qualifies an outcome's evidence — what affirmatively supports it, 
 
 ### compiler-results-15
 
-When gears2fsm compiles an accepted `onDone` arm of an artifact-schema-3 governed delegated-player state, it shall place first among the arm's actions the root-machine `playbook.acceptedOutcome` action with exact plain params `{ source, target, acceptedOutcome }` naming that state, the arm's target, and the accepted guard, and shall declare the action in the machine setup as a no-op typing those params, so the linked runtime confirms and publishes the accepted outcome [[playbook-runtime-81](playbook-runtime.md#playbook-runtime-81)]; the malformed-output fallback carries none.
+When gears2fsm compiles an accepted `onDone` arm of an artifact-schema-3 governed delegated-player state, it shall place first among the arm's actions the root-machine `playbook.acceptedOutcome` action with exact plain params `{ source, target, acceptedOutcome }` naming that state, the state the next public snapshot shows for the arm — the arm's own target, or the parallel parent's `onDone` target where the arm's target is a region's final leaf that completes that parent, an arm that completes the join only when every sibling region is already final being split into two arms guarded on that condition — and the accepted guard, and shall declare the action in the machine setup as a no-op typing those params, so the linked runtime confirms and publishes the accepted outcome [[playbook-runtime-81](playbook-runtime.md#playbook-runtime-81)]; the malformed-output fallback carries none.
 
 ### compiler-results-7
 
@@ -88,4 +88,4 @@ When the integration suite reads the shipped text2gears definition, it shall ver
 
 ### compiler-results-16
 
-When the integration suite reads the shipped gears2fsm definition and each maintained workflow FSM, it shall verify that the definition requires the accepted-outcome marker on every accepted governed arm and that each maintained FSM with a governed delegated-player state declares the `playbook.acceptedOutcome` action and carries it on its accepted arms [[compiler-results-15](#compiler-results-15)].
+When the integration suite reads the shipped gears2fsm definition and each maintained workflow FSM, it shall verify that the definition requires the accepted-outcome marker on every accepted governed arm and that each maintained FSM with a governed delegated-player state declares the `playbook.acceptedOutcome` action and carries it on its accepted arms, an arm that completes a parallel parent naming the join's target [[compiler-results-15](#compiler-results-15)].

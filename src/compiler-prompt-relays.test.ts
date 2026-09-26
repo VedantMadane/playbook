@@ -5,16 +5,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { createActor, fromPromise, waitFor } from "xstate";
 import { parseGearsContract } from "../scripts/check-slc-source-gears.mjs";
 import { defaultComposePlayerPrompt } from "./xstate-runtime.js";
-import { _internal as reviewModule } from "../reference/sdlc/review.playbook/review.playbook.js";
-import {
-  originalIntentOf,
-  reviewMachine,
-  type PlayerInput as ReviewPlayerInput,
-  type PlayerOutput as ReviewPlayerOutput,
-} from "../reference/sdlc/review.playbook/review.fsm.js";
 
 const compiler = process.env.PLAYBOOK_EXPERIMENT_COMPILER;
 const exactEvidence =
@@ -195,44 +187,9 @@ it("derives a Source-defined labelled section wherever the relayed text is store
     expect(fsm).toContain(clause);
   }
 
-  // The maintained REVIEW machine drives the rounds, and its module's
-  // labelled-relay composer, which quotes every continuation line of a value
-  // it inserts into a quoted prompt line, renders their prompts.
-  const compose = (input: ReviewPlayerInput) =>
-    reviewModule.composePlayerPrompt(input, (role: string) => `${role} identity`);
-  const quoted = (value: string) => value.replace(/\n/g, "\n> ");
-  const fill = (template: string, values: Record<string, string>) =>
-    Object.entries(values).reduce((text, [token, value]) => text.split(token).join(value), template);
-  // Each round's authored blockquote, local-role identities resolved as the
-  // composer resolves them; the relayed values are still placeholders.
-  const blockquotes = new Map(
-    parseGearsContract(
-      readFileSync(
-        new URL("../reference/sdlc/review.playbook/review.gears.md", import.meta.url),
-        "utf8",
-      ),
-    ).map(({ id, prompt }: { id: string; prompt: string[] }) => [
-      id,
-      fill(prompt.join("\n"), {
-        "<coder-llm>": "coder identity",
-        "<reviewer-llm>": "reviewer identity",
-      }),
-    ]),
-  );
-  const authored = [blockquotes.get("REVIEW-1")!, blockquotes.get("REVIEW-2")!];
-  const instructionLines = (text: string) => text.split("\n").filter((line) => !line.startsWith(">"));
-  const inputs: ReviewPlayerInput[] = [];
-  // Reviewer's first round raises a finding; Coder's call then fails, parking
-  // the review in `failed`, where the next case's request starts afresh.
-  const machine = reviewMachine.provide({
-    actors: {
-      player: fromPromise<ReviewPlayerOutput, ReviewPlayerInput>(async ({ input }) => {
-        inputs.push(input);
-        if (input.sourceItem !== "REVIEW-1") throw new Error("stop after Coder's input");
-        return { guard: "findings", reviewerOutput: "1. Finding." };
-      }),
-    },
-  });
+  // No maintained Source relays a derived section in this release (DR-068
+  // records why), so the stated derivation is checked against its cases
+  // through the reference implementation above.
   const cases = [
     {
       name: "a caller's quoted labelled request",
@@ -273,35 +230,7 @@ it("derives a Source-defined labelled section wherever the relayed text is store
       section: "Review the branch.\nMind the docs.",
     },
   ];
-  const actor = createActor(machine, { input: {} }).start();
-  try {
-    for (const [index, { name, text, section }] of cases.entries()) {
-      // The stated rule and the compiled machine's own derivation agree.
-      expect(labelledSection(text, "Original intent:", ["Review scope:"]), name).toBe(section);
-      expect(originalIntentOf(text), name).toBe(section);
-      // Each fresh entry replaces the text, so the section is derived again.
-      actor.send({ type: "START_REVIEW", callerInput: text });
-      await waitFor(
-        actor,
-        (snapshot) => snapshot.matches("failed") && inputs.length === 2 * (index + 1),
-      );
-      expect(actor.getSnapshot().context.originalIntent, name).toBe(section);
-      const [first, later] = inputs.slice(2 * index);
-      expect(first!.sourceItem === "REVIEW-1" && first!.callerInput, name).toBe(text);
-      expect(later!.sourceItem === "REVIEW-2" && later!.originalIntent, name).toBe(section);
-      const prompts = [compose(first!), compose(later!)];
-      expect(prompts, name).toEqual([
-        fill(authored[0]!, { "<caller-input>": quoted(text) }),
-        fill(authored[1]!, {
-          "<original-intent>": quoted(section),
-          "<reviewer-output>": "1. Finding.",
-        }),
-      ]);
-      // No relayed line escapes its quote: across each whole prompt, the only
-      // unquoted lines are the round's authored instruction lines.
-      expect(prompts.map(instructionLines), name).toEqual(authored.map(instructionLines));
-    }
-  } finally {
-    actor.stop();
+  for (const { name, text, section } of cases) {
+    expect(labelledSection(text, "Original intent:", ["Review scope:"]), name).toBe(section);
   }
 });

@@ -327,9 +327,9 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"findings"}',
+        '{"guard":"hasFindings"}',
         '{"guard":"committed"}',
-        '{"guard":"clean"}',
+        '{"guard":"noFindings"}',
       ],
     });
     const runtime = linkedRuntime(host);
@@ -344,7 +344,7 @@ describe('linked REVIEW runtime', () => {
     assertWorkflowTerminal('review', result);
     if (result.outcome === 'terminal') {
       expect(result.stateDescription).toBe(
-        'REVIEW completed: Reviewer affirmatively reported no unsettled findings within the review scope at the returned evaluated repository revision.',
+        'REVIEW completed: the review scope was evaluated at the returned revision and no unsettled findings remain.',
       );
       // The evaluated revision is the receipt-derived review-fix commit OID:
       // the judge reply named no commit, so only the receipt can supply it.
@@ -379,9 +379,9 @@ describe('linked REVIEW runtime', () => {
     expect(playerCalls[0].prompt).toContain(
       'For any rebuttal, accept or challenge it.',
     );
-    // An unlabelled request is its original intent as a whole (DR-068).
+    // Every later prompt relays the request whole as well.
     expect(playerCalls[1].prompt).toContain(
-      '> Original intent: Review the feature.\n> Run result: focused suite passed.',
+      '> Original request: Review the feature.\n> Run result: focused suite passed.',
     );
     expect(playerCalls[1].prompt).toContain(
       '> Reviewer findings: 1. First finding\n>    Evidence.',
@@ -405,7 +405,7 @@ describe('linked REVIEW runtime', () => {
       "Read the latest review-fix commit's message and see Coder's feedback below.",
     );
     expect(playerCalls[2].prompt).toContain(
-      '> Original intent: Review the feature.\n> Run result: focused suite passed.',
+      '> Original request: Review the feature.\n> Run result: focused suite passed.',
     );
     // The relayed evaluated revision is the exact receipt-derived commit OID.
     expect(playerCalls[2].prompt).toContain(`> Latest commit: ${host.commitOids[0]}`);
@@ -418,25 +418,25 @@ describe('linked REVIEW runtime', () => {
     expect(acceptedOutcomes(host)).toEqual([
       {
         source: 'firstReview',
-        target: 'answerFindings',
-        acceptedOutcome: 'findings',
+        target: 'fixFindings',
+        acceptedOutcome: 'hasFindings',
       },
       {
-        source: 'answerFindings',
-        target: 'reviewFixCommit',
+        source: 'fixFindings',
+        target: 'reviewAfterFix',
         acceptedOutcome: 'committed',
       },
       {
-        source: 'reviewFixCommit',
+        source: 'reviewAfterFix',
         target: 'done',
-        acceptedOutcome: 'clean',
+        acceptedOutcome: 'noFindings',
       },
     ]);
     expect(host.statuses).toEqual(
       expect.arrayContaining([
-        '→ findings',
+        '→ hasFindings',
         '→ committed',
-        '→ clean',
+        '→ noFindings',
       ]),
     );
     // compiler-results-13 / playbook-21: each Reviewer adjudication prompt
@@ -479,9 +479,9 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"findings"}',
+        '{"guard":"hasFindings"}',
         '{"guard":"rejectedAll"}',
-        '{"guard":"clean"}',
+        '{"guard":"noFindings"}',
       ],
     });
     const runtime = linkedRuntime(host);
@@ -521,7 +521,7 @@ describe('linked REVIEW runtime', () => {
     );
     expect(playerCalls[2].prompt).toContain("See Coder's feedback below.");
     expect(playerCalls[2].prompt).toContain(
-      '> Original intent: Review the latest contract commit.',
+      '> Original request: Review the latest contract commit.',
     );
     expect(
       playerCalls[2].prompt.match(/For any rebuttal, accept or challenge it\./g),
@@ -540,28 +540,28 @@ describe('linked REVIEW runtime', () => {
     expect(acceptedOutcomes(host)).toEqual([
       {
         source: 'firstReview',
-        target: 'answerFindings',
-        acceptedOutcome: 'findings',
+        target: 'fixFindings',
+        acceptedOutcome: 'hasFindings',
       },
       {
-        source: 'answerFindings',
+        source: 'fixFindings',
         target: 'reviewAfterRejection',
         acceptedOutcome: 'rejectedAll',
       },
       {
         source: 'reviewAfterRejection',
         target: 'done',
-        acceptedOutcome: 'clean',
+        acceptedOutcome: 'noFindings',
       },
     ]);
 
     await runtime.dispose();
   });
 
-  // DR-068: a caller's labelled request reaches Reviewer whole in the first
-  // round; every later prompt, Coder's included, relays only its
-  // `Original intent:` section, a look-alike `Note:` line kept inside it.
-  it('relays a labelled request whole once and then only its original intent', async () => {
+  // A caller's labelled request reaches Reviewer and Coder whole in every
+  // round: a later round's conversation may start fresh, so no prompt assumes
+  // what an earlier one said, and every label the caller wrote stays.
+  it('relays a labelled request whole in every round', async () => {
     const playerCalls: PlayerCall[] = [];
     const host = await harness({
       playerCalls,
@@ -578,11 +578,11 @@ describe('linked REVIEW runtime', () => {
         { status: 'ok', finalText: 'No unsettled findings.', resumeToken: 'reviewer-3' },
       ],
       judgeReplies: [
-        '{"guard":"findings"}',
+        '{"guard":"hasFindings"}',
         '{"guard":"rejectedAll"}',
-        '{"guard":"findings"}',
+        '{"guard":"hasFindings"}',
         '{"guard":"committed"}',
-        '{"guard":"clean"}',
+        '{"guard":"noFindings"}',
       ],
     });
     const runtime = linkedRuntime(host);
@@ -609,32 +609,30 @@ describe('linked REVIEW runtime', () => {
       'coder',
       'reviewer',
     ]);
-    const intent = '> Original intent: Ship the parser.\n> Note: docs follow.';
-    expect(playerCalls[0].prompt.endsWith(
-      '\n\n> Original request: ' + request.replaceAll('\n', '\n> '),
-    )).toBe(true);
+    const relayed = '> Original request: ' + request.replaceAll('\n', '\n> ');
+    expect(playerCalls[0].prompt.endsWith(`\n\n${relayed}`)).toBe(true);
     expect(playerCalls[1].prompt.endsWith(
-      `\n\n${intent}\n> Reviewer findings: 1. The grammar drifted.`,
+      `\n\n${relayed}\n> Reviewer findings: 1. The grammar drifted.`,
     )).toBe(true);
     expect(playerCalls[2].prompt.endsWith(
-      `\n\n${intent}\n> Coder output: Rejected item 1 with evidence.`,
+      `\n\n${relayed}\n> Coder output: Rejected item 1 with evidence.`,
     )).toBe(true);
     expect(playerCalls[3].prompt.endsWith(
-      `\n\n${intent}\n> Reviewer findings: 1. The grammar still drifts.`,
+      `\n\n${relayed}\n> Reviewer findings: 1. The grammar still drifts.`,
     )).toBe(true);
     expect(playerCalls[4].prompt.endsWith(
-      `\n\n${intent}\n> Latest commit: ${host.commitOids[0]}\n> Coder output: Accepted and fixed.`,
+      `\n\n${relayed}\n> Latest commit: ${host.commitOids[0]}\n> Coder output: Accepted and fixed.`,
     )).toBe(true);
-    for (const { prompt } of playerCalls.slice(1)) {
-      expect(prompt).not.toContain('Review scope:');
-      expect(prompt).not.toContain('Original request:');
+    for (const { prompt } of playerCalls) {
+      expect(prompt).toContain('> Review scope:');
+      expect(prompt).not.toContain('<original-intent>');
     }
     expect(acceptedOutcomes(host)).toEqual([
-      { source: 'firstReview', target: 'answerFindings', acceptedOutcome: 'findings' },
-      { source: 'answerFindings', target: 'reviewAfterRejection', acceptedOutcome: 'rejectedAll' },
-      { source: 'reviewAfterRejection', target: 'answerFindings', acceptedOutcome: 'findings' },
-      { source: 'answerFindings', target: 'reviewFixCommit', acceptedOutcome: 'committed' },
-      { source: 'reviewFixCommit', target: 'done', acceptedOutcome: 'clean' },
+      { source: 'firstReview', target: 'fixFindings', acceptedOutcome: 'hasFindings' },
+      { source: 'fixFindings', target: 'reviewAfterRejection', acceptedOutcome: 'rejectedAll' },
+      { source: 'reviewAfterRejection', target: 'fixFindings', acceptedOutcome: 'hasFindings' },
+      { source: 'fixFindings', target: 'reviewAfterFix', acceptedOutcome: 'committed' },
+      { source: 'reviewAfterFix', target: 'done', acceptedOutcome: 'noFindings' },
     ]);
     await runtime.dispose();
   });
@@ -651,7 +649,7 @@ describe('linked REVIEW runtime', () => {
           repositoryEffect: 'commit',
         },
       ],
-      judgeReplies: ['{"guard":"clean"}'],
+      judgeReplies: ['{"guard":"noFindings"}'],
     });
     const runtime = linkedRuntime(host);
     await runtime.init(session(host.ports));
@@ -697,7 +695,7 @@ describe('linked REVIEW runtime', () => {
           repositoryEffect: 'unchanged',
         },
       ],
-      judgeReplies: ['{"guard":"findings"}', '{"guard":"committed"}'],
+      judgeReplies: ['{"guard":"hasFindings"}', '{"guard":"committed"}'],
     });
     const runtime = linkedRuntime(host);
     await runtime.init(session(host.ports));
@@ -726,8 +724,8 @@ describe('linked REVIEW runtime', () => {
     // typed context exists; no reconciliation action is offered.
     expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
       'retry:START_REVIEW',
-      'jump:answerFindings',
       'jump:firstReview',
+      'jump:fixFindings',
     ]);
     await runtime.dispose();
   });
@@ -758,7 +756,7 @@ describe('linked REVIEW runtime', () => {
           },
         ],
         judgeReplies: [
-          '{"guard":"findings"}',
+          '{"guard":"hasFindings"}',
           JSON.stringify({ guard }),
         ],
       });
@@ -783,8 +781,8 @@ describe('linked REVIEW runtime', () => {
       expect(acceptedOutcomes(host)).toEqual([
         {
           source: 'firstReview',
-          target: 'answerFindings',
-          acceptedOutcome: 'findings',
+          target: 'fixFindings',
+          acceptedOutcome: 'hasFindings',
         },
       ]);
       expect(host.statuses).not.toContain(`→ ${guard}`);
@@ -814,7 +812,7 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"findings"}',
+        '{"guard":"hasFindings"}',
         // The candidate may carry only the guard plus semantic-owned fields;
         // a judge-supplied latestCommit is a structural error, and the one
         // corrective adjudication repeats it, so the boundary stays parked.
@@ -841,8 +839,8 @@ describe('linked REVIEW runtime', () => {
     expect(acceptedOutcomes(host)).toEqual([
       {
         source: 'firstReview',
-        target: 'answerFindings',
-        acceptedOutcome: 'findings',
+        target: 'fixFindings',
+        acceptedOutcome: 'hasFindings',
       },
     ]);
     expect(host.statuses).not.toContain('→ committed');
@@ -871,7 +869,7 @@ describe('linked REVIEW runtime', () => {
       judgeReplies: [
         '{"guard":"needsBossReply"}',
         '{"type":"BOSS_REPLY"}',
-        '{"guard":"clean"}',
+        '{"guard":"noFindings"}',
       ],
       resumedCall: 1,
       resumedPlayer: 'reviewer',
@@ -880,7 +878,7 @@ describe('linked REVIEW runtime', () => {
       expectsFixRevision: false,
     },
     {
-      origin: 'answerFindings',
+      origin: 'fixFindings',
       playerResults: [
         {
           status: 'ok' as const,
@@ -906,11 +904,11 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"findings"}',
+        '{"guard":"hasFindings"}',
         '{"guard":"needsBossReply"}',
         '{"type":"BOSS_REPLY"}',
         '{"guard":"committed"}',
-        '{"guard":"clean"}',
+        '{"guard":"noFindings"}',
       ],
       resumedCall: 2,
       resumedPlayer: 'coder',
@@ -919,7 +917,7 @@ describe('linked REVIEW runtime', () => {
       expectsFixRevision: true,
     },
     {
-      origin: 'reviewFixCommit',
+      origin: 'reviewAfterFix',
       playerResults: [
         {
           status: 'ok' as const,
@@ -944,11 +942,11 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"findings"}',
+        '{"guard":"hasFindings"}',
         '{"guard":"committed"}',
         '{"guard":"needsBossReply"}',
         '{"type":"BOSS_REPLY"}',
-        '{"guard":"clean"}',
+        '{"guard":"noFindings"}',
       ],
       resumedCall: 3,
       resumedPlayer: 'reviewer',
@@ -981,11 +979,11 @@ describe('linked REVIEW runtime', () => {
         },
       ],
       judgeReplies: [
-        '{"guard":"findings"}',
+        '{"guard":"hasFindings"}',
         '{"guard":"rejectedAll"}',
         '{"guard":"needsBossReply"}',
         '{"type":"BOSS_REPLY"}',
-        '{"guard":"clean"}',
+        '{"guard":"noFindings"}',
       ],
       resumedCall: 3,
       resumedPlayer: 'reviewer',
@@ -1051,18 +1049,13 @@ describe('linked REVIEW runtime', () => {
       'Boss reply:\nTarget version 6.0.0.',
     );
     for (const prompt of [resumed?.prompt, resumed?.options.freshPrompt]) {
-      // Only the first round relays the request whole; a later round relays
-      // its original intent, here the whole unlabelled request.
-      expect(prompt).toContain(
-        scenario.origin === 'firstReview'
-          ? '> Original request: Review the release commit.'
-          : '> Original intent: Review the release commit.',
-      );
-      if (scenario.origin === 'answerFindings') {
+      // Every round relays the request whole.
+      expect(prompt).toContain('> Original request: Review the release commit.');
+      if (scenario.origin === 'fixFindings') {
         expect(prompt).toContain(
           '> Reviewer findings: 1. The target is ambiguous.',
         );
-      } else if (scenario.origin === 'reviewFixCommit') {
+      } else if (scenario.origin === 'reviewAfterFix') {
         expect(prompt).toContain(`> Latest commit: ${host.commitOids[0]}`);
         expect(prompt).toContain('> Coder output: Fixed and committed.');
       } else if (scenario.origin === 'reviewAfterRejection') {
@@ -1105,7 +1098,7 @@ describe('linked REVIEW runtime', () => {
       judgeReplies: [
         '{"guard":"needsBossReply"}',
         '{"type":"START_REVIEW"}',
-        '{"guard":"clean"}',
+        '{"guard":"noFindings"}',
       ],
     });
     const runtime = linkedRuntime(host);
@@ -1146,7 +1139,7 @@ describe('linked REVIEW runtime', () => {
       // makes no classifier call — the only judge reply the turn consumes
       // is the restarted reviewer's adjudication. A classifier call here
       // would shift this queue and fail loudly on the missing guard.
-      judgeReplies: ['{"guard":"clean"}'],
+      judgeReplies: ['{"guard":"noFindings"}'],
     });
     const runtime = linkedRuntime(host);
     await runtime.init(session(host.ports));
@@ -1205,7 +1198,7 @@ describe('linked REVIEW runtime', () => {
         { status: 'error' as const, error: 'coder transport failed' },
       ],
       judgeReplies: [
-        '{"guard":"findings"}',
+        '{"guard":"hasFindings"}',
         '{"guard":"needsBossReply"}',
         '{"type":"BOSS_REPLY"}',
       ],
@@ -1243,8 +1236,8 @@ describe('linked REVIEW runtime', () => {
     const machine = runtime.exportSnapshot!()!.machine as {
       context: Record<string, unknown>;
     };
-    expect(machine.context.pendingBossQuestion).toBeNull();
-    expect(machine.context.bossReply).toBeNull();
+    expect(machine.context.pendingBossQuestion).toBeUndefined();
+    expect(machine.context.bossReply).toBeUndefined();
     expect(machine.context.lastError).toMatchObject({ message: scenario.error });
     await runtime.dispose();
   });
@@ -1329,7 +1322,7 @@ describe('linked REVIEW runtime', () => {
   it('counts only Reviewer review and rebuttal states as rounds', () => {
     expect(reviewStateCountLabels).toEqual({
       firstReview: 'review round',
-      reviewFixCommit: 'review round',
+      reviewAfterFix: 'review round',
       reviewAfterRejection: 'rebuttal',
     });
     // Each label keys a Reviewer round the linked runtime actually enters.
@@ -1377,11 +1370,11 @@ describe('linked REVIEW runtime', () => {
 
   it('quotes every line of relayed text without recursive substitution', () => {
     const prompt = _internal.composePlayerPrompt({
-      stateId: 'reviewFixCommit',
+      stateId: 'reviewAfterFix',
       sourceItem: 'REVIEW-3',
       role: 'reviewer',
       prompt: '> <coder-output>\nUse <coder-llm>.',
-      result: { clean: 'No findings.' },
+      result: { noFindings: 'No findings.' },
       coderOutput: 'Line one\nLine two with <coder-llm> and $&.',
     }, (roleId) => roleId === 'coder' ? 'GPT-5.6 Sol' : roleId);
     expect(prompt).toBe(

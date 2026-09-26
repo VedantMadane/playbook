@@ -8,8 +8,8 @@ const OPTION_SCHEMA = {};
 const INPUT_MAPPING = {};
 const RESUMABLE_STATE_IDS = new Set([
     "firstReview",
-    "answerFindings",
-    "reviewFixCommit",
+    "fixFindings",
+    "reviewAfterFix",
     "reviewAfterRejection"
 ]);
 const UNFINISHED_FINAL_STATE_IDS = new Set([]);
@@ -80,31 +80,31 @@ const runtimeSpec = {
         "roleStates": {
             "firstReview": {
                 "role": "reviewer",
-                "label": "Reviewer runs the first review round over the caller's review scope."
+                "label": "Reviewer runs the first review round over the review scope."
             },
-            "answerFindings": {
+            "fixFindings": {
                 "role": "coder",
-                "label": "Coder accepts or rejects each of Reviewer's findings, fixing accepted ones in one new review-fix commit."
+                "label": "Coder accepts or rejects each of Reviewer's findings and commits any accepted fixes."
             },
-            "reviewFixCommit": {
+            "reviewAfterFix": {
                 "role": "reviewer",
-                "label": "Reviewer runs the next review round over the cumulative committed state after the latest review-fix commit."
+                "label": "Reviewer runs the next review round over the cumulative committed state after a review-fix commit."
             },
             "reviewAfterRejection": {
                 "role": "reviewer",
-                "label": "Reviewer runs the next review round after Coder rejected every finding without a new commit."
+                "label": "Reviewer runs the next review round after Coder rejected every finding without a commit."
             }
         },
         "outcomeAuthority": {
             "governedPlayerStates": {
                 "firstReview": {
-                    "findings": {
+                    "hasFindings": {
                         "fields": {
                             "reviewerOutput": "presentation"
                         },
                         "repositoryDisposition": "unchanged"
                     },
-                    "clean": {
+                    "noFindings": {
                         "fields": {
                             "evaluatedRevision": "effect"
                         },
@@ -117,11 +117,11 @@ const runtimeSpec = {
                         "repositoryDisposition": "unchanged"
                     }
                 },
-                "answerFindings": {
+                "fixFindings": {
                     "committed": {
                         "fields": {
-                            "latestCommit": "effect",
-                            "coderOutput": "presentation"
+                            "coderOutput": "presentation",
+                            "latestCommit": "effect"
                         },
                         "repositoryDisposition": "one-descendant-commit"
                     },
@@ -138,14 +138,14 @@ const runtimeSpec = {
                         "repositoryDisposition": "deferred"
                     }
                 },
-                "reviewFixCommit": {
-                    "findings": {
+                "reviewAfterFix": {
+                    "hasFindings": {
                         "fields": {
                             "reviewerOutput": "presentation"
                         },
                         "repositoryDisposition": "unchanged"
                     },
-                    "clean": {
+                    "noFindings": {
                         "fields": {
                             "evaluatedRevision": "effect"
                         },
@@ -159,13 +159,13 @@ const runtimeSpec = {
                     }
                 },
                 "reviewAfterRejection": {
-                    "findings": {
+                    "hasFindings": {
                         "fields": {
                             "reviewerOutput": "presentation"
                         },
                         "repositoryDisposition": "unchanged"
                     },
-                    "clean": {
+                    "noFindings": {
                         "fields": {
                             "evaluatedRevision": "effect"
                         },

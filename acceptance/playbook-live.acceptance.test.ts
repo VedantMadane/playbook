@@ -201,7 +201,7 @@ function expectRecordedReviewApproval(
   // `evaluatedRevision` is effect-owned (DR-045), so the retained candidate
   // is the guard alone; the receipt beside it proves the revision.
   expect(reviewerRounds.at(-1)?.semanticCandidate).toEqual({
-    guard: 'clean',
+    guard: 'noFindings',
   });
   expect(reviewerRounds.at(-1)?.physicalReceipt?.classification).toBe(
     'unchanged',
@@ -1525,14 +1525,14 @@ function expectDecideContinuity(record: DurableSessionRecord): string {
   );
   expect(nestedFindingBoundaries).toHaveLength(1);
   expect(nestedFindingBoundaries[0]?.semanticCandidate).toEqual({
-    guard: 'findings',
+    guard: 'hasFindings',
   });
   expect(nestedFindingBoundaries[0]?.finalText).toContain(marker);
 
   const correctionBoundaries = boundaries.filter(
     (boundary) =>
       boundary.playbookId === 'review' &&
-      boundary.sourceStateId === 'answerFindings' &&
+      boundary.sourceStateId === 'fixFindings' &&
       boundary.physicalReceipt?.classification === 'one-descendant-commit',
   );
   expect(correctionBoundaries.length).toBeGreaterThanOrEqual(1);
@@ -1543,14 +1543,14 @@ function expectDecideContinuity(record: DurableSessionRecord): string {
   const approvalBoundaries = boundaries.filter(
     (boundary) =>
       boundary.playbookId === 'review' &&
-      ['reviewFixCommit', 'reviewAfterRejection'].includes(
+      ['reviewAfterFix', 'reviewAfterRejection'].includes(
         boundary.sourceStateId,
       ) &&
       boundary.roleId === 'reviewer',
   );
   expect(approvalBoundaries.length).toBeGreaterThanOrEqual(1);
   expect(approvalBoundaries.map((boundary) => boundary.semanticCandidate))
-    .toContainEqual({ guard: 'clean' });
+    .toContainEqual({ guard: 'noFindings' });
   return marker;
 }
 

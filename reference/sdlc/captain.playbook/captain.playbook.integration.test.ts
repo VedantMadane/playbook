@@ -2615,7 +2615,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     if (prompt.includes('`directCommit`')) {
       return { guard: 'directCommit' };
     }
-    if (prompt.includes('`clean`')) return { guard: 'clean' };
+    if (prompt.includes('`noFindings`')) return { guard: 'noFindings' };
     throw new Error(`unexpected completion adjudication prompt: ${prompt}`);
   };
 
@@ -2960,13 +2960,13 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
         ],
         adjudicate: (prompt) => {
           if (prompt.includes('stale in the advanced world')) {
-            return { guard: 'findings' };
+            return { guard: 'hasFindings' };
           }
           if (prompt.includes('Accepted and fixed')) {
             return { guard: 'committed' };
           }
           if (prompt.includes('No unsettled findings')) {
-            return { guard: 'clean' };
+            return { guard: 'noFindings' };
           }
           throw new Error(`unexpected stale-world adjudication: ${prompt}`);
         },
@@ -3151,7 +3151,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
             resumeToken: 'target-review-token',
           };
         },
-        adjudicate: () => ({ guard: 'clean' }),
+        adjudicate: () => ({ guard: 'noFindings' }),
         decide: retainedDecision,
         closing: () => 'The retained pre-terminal review completed.',
       },

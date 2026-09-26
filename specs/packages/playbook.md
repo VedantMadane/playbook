@@ -72,7 +72,7 @@ When the nested REVIEW call fails outside that authored result contract, CODE sh
 
 #### playbook-21
 
-When REVIEW receives its caller's intent, scope, and context, REVIEW shall have Reviewer evaluate the review scope in its cumulative committed state against the relayed original intent, relay the caller's complete request in the first round and, in every later round and to Coder, only its original intent — the request's `Original intent:` section up to the `Review scope:` line, or the whole request where that label is absent or the section is empty [[compiler-prompt-relays-9](compiler-prompt-relays.md#compiler-prompt-relays-9)] — plus the receipt-derived review-fix commit and Coder feedback after each disposition, ask Coder to accept or reject every finding with one new review-fix commit or a no-commit all-rejected rebuttal, and begin a new receipt-validated Reviewer round after each disposition under [[playbook-34](#playbook-34)] until Reviewer affirmatively reports the requested review complete with no unsettled findings; a progress report, status update, or promise of a later result supports no review outcome.
+When REVIEW receives its caller's intent, scope, and context, REVIEW shall have Reviewer evaluate the review scope in its cumulative committed state against the relayed original intent, relay the complete caller input every round and to Coder plus the receipt-derived review-fix commit and Coder feedback after each disposition, ask Coder to accept or reject every finding with one new review-fix commit or a no-commit all-rejected rebuttal, and begin a new receipt-validated Reviewer round after each disposition under [[playbook-34](#playbook-34)] until Reviewer affirmatively reports the requested review complete with no unsettled findings; a progress report, status update, or promise of a later result supports no review outcome.
 
 #### playbook-26
 
@@ -224,17 +224,17 @@ Where REVIEW runs under artifact schema `3`, each delegated outcome shall declar
 
 | Source state | Accepted outcome | Payload authority | Repository disposition | Target state |
 | --- | --- | --- | --- | --- |
-| `firstReview` | `findings` | presentation `reviewerOutput` | `unchanged` | `answerFindings` |
-| `firstReview` | `clean` | effect `evaluatedRevision` | `unchanged` | `done` |
+| `firstReview` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `fixFindings` |
+| `firstReview` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
 | `firstReview` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
-| `answerFindings` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewFixCommit` |
-| `answerFindings` | `rejectedAll` | presentation `coderOutput` | `unchanged` | `reviewAfterRejection` |
-| `answerFindings` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
-| `reviewFixCommit` | `findings` | presentation `reviewerOutput` | `unchanged` | `answerFindings` |
-| `reviewFixCommit` | `clean` | effect `evaluatedRevision` | `unchanged` | `done` |
-| `reviewFixCommit` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
-| `reviewAfterRejection` | `findings` | presentation `reviewerOutput` | `unchanged` | `answerFindings` |
-| `reviewAfterRejection` | `clean` | effect `evaluatedRevision` | `unchanged` | `done` |
+| `fixFindings` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewAfterFix` |
+| `fixFindings` | `rejectedAll` | presentation `coderOutput` | `unchanged` | `reviewAfterRejection` |
+| `fixFindings` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
+| `reviewAfterFix` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `fixFindings` |
+| `reviewAfterFix` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
+| `reviewAfterFix` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
+| `reviewAfterRejection` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `fixFindings` |
+| `reviewAfterRejection` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
 | `reviewAfterRejection` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
 
 The reconciler shall treat `reviewerOutput`, `coderOutput`, and `question` as opaque presentation and shall require a matching `unchanged` receipt for every Reviewer arm, including each question and its separately governed authored continuation under [[playbook-12](#playbook-12)].
@@ -380,7 +380,7 @@ When the CODE conformance suites drive its real artifact-schema-3 runtime, they 
 
 #### playbook-35
 
-When the REVIEW conformance suites drive its real artifact-schema-3 runtime, they shall fail unless every outcome from all three Reviewer states accepts only a matching `unchanged` receipt, including each question and separately governed answer continuation; Coder `committed` accepts only `one-descendant-commit`; Coder `rejectedAll` accepts only `unchanged`; `latestCommit` and `evaluatedRevision` come only from their matching receipts, with a judge-authored value for either rejected as a structural error; the first round relays the caller's complete labelled request while every later Reviewer and Coder prompt relays only its derived original intent; the post-commit round relays the exact receipt OID; mismatched or ambiguous evidence remains unresolved without replaying Coder; and Coder `needsBossReply` uses one exact-checkpoint cumulative deferred operation (verifying [[playbook-12](#playbook-12)], [[playbook-21](#playbook-21)], [[playbook-30](#playbook-30)], and [[playbook-34](#playbook-34)]).
+When the REVIEW conformance suites drive its real artifact-schema-3 runtime, they shall fail unless every outcome from all three Reviewer states accepts only a matching `unchanged` receipt, including each question and separately governed answer continuation; Coder `committed` accepts only `one-descendant-commit`; Coder `rejectedAll` accepts only `unchanged`; `latestCommit` and `evaluatedRevision` come only from their matching receipts, with a judge-authored value for either rejected as a structural error; every Reviewer and Coder prompt relays the caller's complete request; the post-commit round relays the exact receipt OID; mismatched or ambiguous evidence remains unresolved without replaying Coder; and Coder `needsBossReply` uses one exact-checkpoint cumulative deferred operation (verifying [[playbook-12](#playbook-12)], [[playbook-21](#playbook-21)], [[playbook-30](#playbook-30)], and [[playbook-34](#playbook-34)]).
 The suites shall further fail unless every accepted matrix row publishes its exact confirmed marker and status while an unaccepted fallback publishes neither, and the source, GEARS, FSM, linked runtime, declarations, and registry agree on schema `3`, runtime ABI `1`, and the matrix of [[playbook-34](#playbook-34)] (verifying [[playbook-1](#playbook-1)]).
 
 #### playbook-37

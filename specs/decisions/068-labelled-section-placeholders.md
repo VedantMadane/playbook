@@ -10,8 +10,8 @@ Accepted (2026-09-25).
 ## Context
 
 - A nested playbook's caller composes the child's input as labelled quoted lines: CODE and DECIDE give REVIEW `> Original intent: …`, `> Review scope: …`, and `> Coder output: …`, DECIDE also gives it `> Coder's independent proposal: …`, and each line carries the literal `>` of its quoted relay.
-- REVIEW relays that whole request to Reviewer and Coder in every round, so each later prompt repeats the review scope and first-round context that Reviewer already holds.
-  The REVIEW Source is to define the original intent as the `Original intent:` section of the caller's request, running to the `Review scope:` line or to the end of the request, or as the whole request where that label is absent, and relay only that section after the first round.
+- REVIEW relays that whole request to Reviewer and Coder in every round, so each later prompt repeats the review scope and first-round context that its conversation already holds.
+  A REVIEW Source that defines the original intent as the `Original intent:` section of the caller's request, running to the `Review scope:` line or to the end of the request, or as the whole request where that label is absent, could relay only that section to a conversation that already holds the request.
 - The definitions give such a placeholder no path: [text2gears](../../slc/text2gears.md) requires a producer for every consumed placeholder, and [gears2fsm](../../slc/gears2fsm.md) binds each placeholder to a value the machine receives — from its caller, its host, a player's result, or the invocation's identity — and to none it computes.
   A compile would stop with a question, invent a judge-authored field, or improvise a parse.
 
@@ -28,6 +28,8 @@ Accepted (2026-09-25).
 
 ## Consequences
 
-- A child reads the labelled lines its caller writes, so a later-round prompt can relay one section instead of the whole request; the unlabelled request of a Boss or a dynamic call remains the original intent as a whole.
+- A child reads the labelled lines its caller writes, so a prompt to a conversation that already holds the request can relay one section instead of the whole request; the unlabelled request of a Boss or a dynamic call remains the original intent as a whole.
+- A relayed section is safe only where the conversation holds the whole text: a later call may start a fresh conversation after a missing or rejected provider hint [[session-storage-8](../packages/session-storage.md#session-storage-8)], and a portable checkpoint carries no provider tokens at all, so trimming by round would leave such a conversation without the scope and context it never saw.
+  A compact relay therefore needs a paired full form for fresh conversations, as a Boss-reply continuation carries its full prompt as `freshPrompt` [[playbook-runtime-92](../packages/playbook-runtime.md#playbook-runtime-92)]; no definition compiles that pairing yet, so the maintained REVIEW relays the complete request in every prompt and no maintained Source uses this derivation.
 - The field is exact and repeatable: a fresh directive derives it again from the new text, restoration brings back the stored field rather than deriving it again, and no model call can drift it.
 - Only the labels the Source names bound a section, so a multi-line original intent keeps its own `Note:` or `Constraints:` lines, and an empty section falls back to the whole request rather than relaying an empty intent.

@@ -9,7 +9,6 @@ import { parseGearsContract } from '../../../scripts/check-slc-source-gears.mjs'
 import { ACCEPTED_OUTCOME_ACTION_TYPE } from '../../../src/accepted-outcome.js';
 import {
   concurrentRoleSets,
-  originalIntentOf,
   reviewMachine,
   type PlayerInput,
   type PlayerOutput,
@@ -61,28 +60,18 @@ const states = machineConfig.states ?? {};
 
 const expected = [
   ['firstReview', 'REVIEW-1'],
-  ['answerFindings', 'REVIEW-2'],
-  ['reviewFixCommit', 'REVIEW-3'],
+  ['fixFindings', 'REVIEW-2'],
+  ['reviewAfterFix', 'REVIEW-3'],
   ['reviewAfterRejection', 'REVIEW-4'],
 ] as const;
 
-// The machine's typed context before any request: every text empty.
-const blank: ReviewContext = {
-  callerInput: '',
-  originalIntent: '',
-  reviewerOutput: '',
-  coderOutput: '',
-  latestCommit: '',
-  coderOutcome: null,
-  evaluatedRevision: '',
-  lastError: null,
-};
+// The machine's typed context before any request: no field set.
+const blank: ReviewContext = {};
 
-// A stored request carries its derived original intent.
+// A stored request.
 const request: ReviewContext = {
   ...blank,
   callerInput: 'Initial request',
-  originalIntent: 'Initial request',
 };
 
 const context: ReviewContext = {
@@ -101,8 +90,8 @@ const done = (output: unknown) => ({
 const pendingContext = (
   stateId:
     | 'firstReview'
-    | 'answerFindings'
-    | 'reviewFixCommit'
+    | 'fixFindings'
+    | 'reviewAfterFix'
     | 'reviewAfterRejection',
   sourceItem: 'REVIEW-1' | 'REVIEW-2' | 'REVIEW-3' | 'REVIEW-4',
   roleId: 'coder' | 'reviewer',
@@ -137,15 +126,15 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
     },
     {
       guard: '<inline>',
-      target: '#answerFindings',
+      target: '#fixFindings',
       context,
-      event: interrupt('answerFindings'),
+      event: interrupt('fixFindings'),
     },
     {
       guard: '<inline>',
-      target: '#reviewFixCommit',
+      target: '#reviewAfterFix',
       context: { ...context, coderOutcome: 'committed' },
-      event: interrupt('reviewFixCommit'),
+      event: interrupt('reviewAfterFix'),
     },
     {
       guard: '<inline>',
@@ -156,22 +145,22 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   ],
   'firstReview.invoke.onDone': [
     {
-      guard: 'reviewerFindings',
-      target: '#answerFindings',
+      guard: 'acceptHasFindings',
+      target: '#fixFindings',
       context,
-      event: done({ guard: 'findings', reviewerOutput: 'Finding 1' }),
+      event: done({ guard: 'hasFindings', reviewerOutput: 'Finding 1' }),
     },
     {
-      guard: 'reviewerClean',
+      guard: 'acceptNoFindings',
       target: '#done',
       context,
       event: done({
-        guard: 'clean',
+        guard: 'noFindings',
         evaluatedRevision: '3333333333333333333333333333333333333333',
       }),
     },
     {
-      guard: 'needsBossReply',
+      guard: 'acceptNeedsBossReply',
       target: '#awaitBossReply',
       context,
       event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
@@ -180,13 +169,13 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       guard: undefined,
       target: '#failed',
       context,
-      event: done({ guard: 'findings' }),
+      event: done({ guard: 'hasFindings' }),
     },
   ],
-  'answerFindings.invoke.onDone': [
+  'fixFindings.invoke.onDone': [
     {
-      guard: 'coderCommitted',
-      target: '#reviewFixCommit',
+      guard: 'acceptCommitted',
+      target: '#reviewAfterFix',
       context,
       event: done({
         guard: 'committed',
@@ -195,7 +184,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       }),
     },
     {
-      guard: 'coderRejectedAll',
+      guard: 'acceptRejectedAll',
       target: '#reviewAfterRejection',
       context,
       event: done({
@@ -204,7 +193,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       }),
     },
     {
-      guard: 'needsBossReply',
+      guard: 'acceptNeedsBossReply',
       target: '#awaitBossReply',
       context,
       event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
@@ -218,24 +207,24 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       event: done({ guard: 'committed', coderOutput: 'Committed.' }),
     },
   ],
-  'reviewFixCommit.invoke.onDone': [
+  'reviewAfterFix.invoke.onDone': [
     {
-      guard: 'reviewerFindings',
-      target: '#answerFindings',
+      guard: 'acceptHasFindings',
+      target: '#fixFindings',
       context,
-      event: done({ guard: 'findings', reviewerOutput: 'Finding 2' }),
+      event: done({ guard: 'hasFindings', reviewerOutput: 'Finding 2' }),
     },
     {
-      guard: 'reviewerClean',
+      guard: 'acceptNoFindings',
       target: '#done',
       context,
       event: done({
-        guard: 'clean',
+        guard: 'noFindings',
         evaluatedRevision: '3333333333333333333333333333333333333333',
       }),
     },
     {
-      guard: 'needsBossReply',
+      guard: 'acceptNeedsBossReply',
       target: '#awaitBossReply',
       context,
       event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
@@ -244,27 +233,27 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       guard: undefined,
       target: '#failed',
       context,
-      event: done({ guard: 'clean' }),
+      event: done({ guard: 'noFindings' }),
     },
   ],
   'reviewAfterRejection.invoke.onDone': [
     {
-      guard: 'reviewerFindings',
-      target: '#answerFindings',
+      guard: 'acceptHasFindings',
+      target: '#fixFindings',
       context,
-      event: done({ guard: 'findings', reviewerOutput: 'Finding remains' }),
+      event: done({ guard: 'hasFindings', reviewerOutput: 'Finding remains' }),
     },
     {
-      guard: 'reviewerClean',
+      guard: 'acceptNoFindings',
       target: '#done',
       context,
       event: done({
-        guard: 'clean',
+        guard: 'noFindings',
         evaluatedRevision: '3333333333333333333333333333333333333333',
       }),
     },
     {
-      guard: 'needsBossReply',
+      guard: 'acceptNeedsBossReply',
       target: '#awaitBossReply',
       context,
       event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
@@ -281,7 +270,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   'awaitBossReply.on.BOSS_REPLY': [
     {
       guard: 'emptyBossReply',
-      target: '#failed',
+      target: 'failed',
       context: pendingContext('firstReview', 'REVIEW-1', 'reviewer'),
       event: {
         type: 'BOSS_REPLY',
@@ -301,23 +290,23 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
     },
     {
       guard: '<inline>',
-      target: '#answerFindings',
-      context: pendingContext('answerFindings', 'REVIEW-2', 'coder'),
+      target: '#fixFindings',
+      context: pendingContext('fixFindings', 'REVIEW-2', 'coder'),
       event: {
         type: 'BOSS_REPLY',
-        questionId: 'answerFindings',
+        questionId: 'fixFindings',
         answer: 'Answer',
       },
     },
     {
       guard: '<inline>',
-      target: '#reviewFixCommit',
-      context: pendingContext('reviewFixCommit', 'REVIEW-3', 'reviewer', {
+      target: '#reviewAfterFix',
+      context: pendingContext('reviewAfterFix', 'REVIEW-3', 'reviewer', {
         coderOutcome: 'committed',
       }),
       event: {
         type: 'BOSS_REPLY',
-        questionId: 'reviewFixCommit',
+        questionId: 'reviewAfterFix',
         answer: 'Answer',
       },
     },
@@ -454,11 +443,11 @@ describe('REVIEW GEARS to FSM compilation', () => {
       const input = states[stateId]?.invoke?.input?.({ context });
       if (input?.role !== 'reviewer') continue;
       expect(Object.keys(input.result), stateId).toEqual([
-        'findings',
-        'clean',
+        'hasFindings',
+        'noFindings',
         'needsBossReply',
       ]);
-      for (const guard of ['findings', 'clean']) {
+      for (const guard of ['hasFindings', 'noFindings']) {
         expect(input.result[guard], `${stateId}.${guard}`).toContain(
           qualification,
         );
@@ -513,13 +502,13 @@ describe('REVIEW GEARS to FSM compilation', () => {
         expected: [
           {
             source: 'firstReview',
-            target: 'answerFindings',
-            acceptedOutcome: 'findings',
+            target: 'fixFindings',
+            acceptedOutcome: 'hasFindings',
           },
           {
             source: 'firstReview',
             target: 'done',
-            acceptedOutcome: 'clean',
+            acceptedOutcome: 'noFindings',
           },
           {
             source: 'firstReview',
@@ -529,40 +518,40 @@ describe('REVIEW GEARS to FSM compilation', () => {
         ],
       },
       {
-        stateId: 'answerFindings',
+        stateId: 'fixFindings',
         expected: [
           {
-            source: 'answerFindings',
-            target: 'reviewFixCommit',
+            source: 'fixFindings',
+            target: 'reviewAfterFix',
             acceptedOutcome: 'committed',
           },
           {
-            source: 'answerFindings',
+            source: 'fixFindings',
             target: 'reviewAfterRejection',
             acceptedOutcome: 'rejectedAll',
           },
           {
-            source: 'answerFindings',
+            source: 'fixFindings',
             target: 'awaitBossReply',
             acceptedOutcome: 'needsBossReply',
           },
         ],
       },
       {
-        stateId: 'reviewFixCommit',
+        stateId: 'reviewAfterFix',
         expected: [
           {
-            source: 'reviewFixCommit',
-            target: 'answerFindings',
-            acceptedOutcome: 'findings',
+            source: 'reviewAfterFix',
+            target: 'fixFindings',
+            acceptedOutcome: 'hasFindings',
           },
           {
-            source: 'reviewFixCommit',
+            source: 'reviewAfterFix',
             target: 'done',
-            acceptedOutcome: 'clean',
+            acceptedOutcome: 'noFindings',
           },
           {
-            source: 'reviewFixCommit',
+            source: 'reviewAfterFix',
             target: 'awaitBossReply',
             acceptedOutcome: 'needsBossReply',
           },
@@ -573,13 +562,13 @@ describe('REVIEW GEARS to FSM compilation', () => {
         expected: [
           {
             source: 'reviewAfterRejection',
-            target: 'answerFindings',
-            acceptedOutcome: 'findings',
+            target: 'fixFindings',
+            acceptedOutcome: 'hasFindings',
           },
           {
             source: 'reviewAfterRejection',
             target: 'done',
-            acceptedOutcome: 'clean',
+            acceptedOutcome: 'noFindings',
           },
           {
             source: 'reviewAfterRejection',
@@ -606,27 +595,20 @@ describe('REVIEW GEARS to FSM compilation', () => {
   });
 
   it('keeps every round relay quoted, ordered, and receipt- or player-owned', () => {
-    // The first round relays the caller's complete request; every later
-    // prompt relays only its original intent ahead of the round's evidence.
-    expect(gears.get('REVIEW-1')?.prompt).toContain('> Original request: <caller-input>');
-    expect(gears.get('REVIEW-2')?.prompt).toEqual(
-      expect.arrayContaining(['> Original intent: <original-intent>', '> Reviewer findings: <reviewer-output>']),
-    );
+    // Every prompt relays the caller's complete request ahead of the round's
+    // evidence: no prompt assumes what an earlier one told its conversation.
+    for (const [id, item] of gears) {
+      expect(item.prompt, id).toContain('> Original request: <caller-input>');
+      expect(item.prompt.join('\n'), id).not.toContain('<original-intent>');
+    }
+    expect(gears.get('REVIEW-2')?.prompt).toContain('> Reviewer findings: <reviewer-output>');
     expect(gears.get('REVIEW-3')?.prompt).toEqual(
       expect.arrayContaining([
-        '> Original intent: <original-intent>',
         '> Latest commit: <latest-commit>',
         '> Coder output: <coder-output>',
       ]),
     );
-    expect(gears.get('REVIEW-4')?.prompt).toEqual(
-      expect.arrayContaining(['> Original intent: <original-intent>', '> Coder output: <coder-output>']),
-    );
-    for (const [id, item] of gears) {
-      const relays = item.prompt.join('\n');
-      expect(relays.includes('<caller-input>'), id).toBe(id === 'REVIEW-1');
-      expect(relays.includes('<original-intent>'), id).toBe(id !== 'REVIEW-1');
-    }
+    expect(gears.get('REVIEW-4')?.prompt).toContain('> Coder output: <coder-output>');
     // The evaluated revision relays only where a receipt-derived review-fix
     // commit exists; no other round leaves a placeholder without a producer.
     for (const [id, item] of gears) {
@@ -634,7 +616,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
       expect(item.prompt, id).not.toContain('> Latest commit: <latest-commit>');
     }
     const review3 = gears.get('REVIEW-3')?.prompt ?? [];
-    expect(review3.indexOf('> Original intent: <original-intent>')).toBeLessThan(
+    expect(review3.indexOf('> Original request: <caller-input>')).toBeLessThan(
       review3.indexOf('> Latest commit: <latest-commit>'),
     );
     expect(review3.indexOf('> Latest commit: <latest-commit>')).toBeLessThan(
@@ -656,12 +638,6 @@ describe('REVIEW GEARS to FSM compilation', () => {
       new URL('./review.gears.md', import.meta.url),
       'utf8',
     );
-    // compiler-prompt-relays-7: the Source's definition of the derived
-    // original intent stays verbatim, and no result produces it.
-    expect(text).toContain(
-      "The caller's request is labelled text: it opens with the `Original intent:` section, which runs to the `Review scope:` line or to the end of the request, and a request without the `Original intent:` label is the original intent as a whole.",
-    );
-    expect(text).not.toContain('`originalIntent:');
     expect(text).toContain(
       '`reviewerOutput: <verbatim final text>`',
     );
@@ -680,11 +656,11 @@ describe('REVIEW GEARS to FSM compilation', () => {
     (
       [
         ['firstReview', []],
-        ['answerFindings', [{ guard: 'findings', reviewerOutput: '1. Finding' }]],
+        ['fixFindings', [{ guard: 'hasFindings', reviewerOutput: '1. Finding' }]],
         [
-          'reviewFixCommit',
+          'reviewAfterFix',
           [
-            { guard: 'findings', reviewerOutput: '1. Finding' },
+            { guard: 'hasFindings', reviewerOutput: '1. Finding' },
             {
               guard: 'committed',
               latestCommit: '2222222222222222222222222222222222222222',
@@ -695,7 +671,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
         [
           'reviewAfterRejection',
           [
-            { guard: 'findings', reviewerOutput: '1. Finding' },
+            { guard: 'hasFindings', reviewerOutput: '1. Finding' },
             { guard: 'rejectedAll', coderOutput: 'Rejected with evidence.' },
           ],
         ],
@@ -714,9 +690,9 @@ describe('REVIEW GEARS to FSM compilation', () => {
         { guard: 'needsBossReply', question: 'Which release applies?' },
         failure === 'actor error'
           ? new Error('player is down')
-          : stateId === 'answerFindings'
+          : stateId === 'fixFindings'
             ? { guard: 'committed', coderOutput: 'Committed.' }
-            : { guard: 'findings' },
+            : { guard: 'hasFindings' },
       ];
       const actor = createActor(
         reviewMachine.provide({
@@ -747,97 +723,73 @@ describe('REVIEW GEARS to FSM compilation', () => {
         pendingBossQuestion: { question: 'Which release applies?' },
         bossReply: 'Use 6.0.',
       });
-      // ... and its failure keeps neither: both are cleared to `null`.
-      expect(failed.context.lastError).not.toBeNull();
-      expect(failed.context.pendingBossQuestion).toBeNull();
-      expect(failed.context.bossReply).toBeNull();
+      // ... and its failure keeps neither: both are cleared.
+      expect(failed.context.lastError).toBeDefined();
+      expect(failed.context.pendingBossQuestion).toBeUndefined();
+      expect(failed.context.bossReply).toBeUndefined();
       expect(script).toEqual([]);
       actor.stop();
     },
   );
 
-  // DR-068 / compiler-prompt-relays-9: the machine derives `<original-intent>`
-  // from the request it stores; the first round relays the request whole and
-  // every later prompt, Coder's included, relays only the derived intent.
+  // Every prompt, Coder's included, relays the caller's request whole: a
+  // later round's conversation may start fresh, so no prompt assumes what an
+  // earlier one said, and a caller's labelled request keeps every label.
   it.each([
-    [
-      'Boss free text',
-      'Review the feature.\nRun result: focused suite passed.',
-      'Review the feature.\nRun result: focused suite passed.',
-    ],
+    ['Boss free text', 'Review the feature.\nRun result: focused suite passed.'],
     [
       "a caller's quoted labelled request",
-      '> Original intent: Fix the bug.\n> Review scope: the commit abc123.\n> Coder output: Committed the change.',
-      'Fix the bug.',
+      '> Original intent: Fix the bug.\n> Note: docs follow.\n> Review scope: the commit abc123.\n> Coder output: Committed the change.',
     ],
-    [
-      'an empty section',
-      '> Original intent:\n> Review scope: the commit abc123.',
-      'Original intent:\nReview scope: the commit abc123.',
-    ],
-    [
-      'a multi-line intent that keeps its Note: line',
-      '> Original intent: Ship the parser.\n> Keep the grammar stable.\n> Note: docs follow.\n> Review scope: the commit def456.',
-      'Ship the parser.\nKeep the grammar stable.\nNote: docs follow.',
-    ],
-  ] as const)(
-    'relays %s whole first and its original intent in every later round',
-    async (_name, callerInput, originalIntent) => {
-      expect(originalIntentOf(callerInput)).toBe(originalIntent);
-      const inputs: PlayerInput[] = [];
-      const script: PlayerOutput[] = [
-        { guard: 'findings', reviewerOutput: '1. Finding' },
-        { guard: 'rejectedAll', coderOutput: 'Rejected with evidence.' },
-        { guard: 'findings', reviewerOutput: '1. Finding kept' },
-        {
-          guard: 'committed',
-          latestCommit: '2222222222222222222222222222222222222222',
-          coderOutput: 'Fixed.',
+  ] as const)('relays %s whole in every round', async (_name, callerInput) => {
+    const inputs: PlayerInput[] = [];
+    const script: PlayerOutput[] = [
+      { guard: 'hasFindings', reviewerOutput: '1. Finding' },
+      { guard: 'rejectedAll', coderOutput: 'Rejected with evidence.' },
+      { guard: 'hasFindings', reviewerOutput: '1. Finding kept' },
+      {
+        guard: 'committed',
+        latestCommit: '2222222222222222222222222222222222222222',
+        coderOutput: 'Fixed.',
+      },
+      {
+        guard: 'noFindings',
+        evaluatedRevision: '2222222222222222222222222222222222222222',
+      },
+    ];
+    const actor = createActor(
+      reviewMachine.provide({
+        actors: {
+          player: fromPromise<PlayerOutput, PlayerInput>(async ({ input }) => {
+            inputs.push(input);
+            const next = script.shift();
+            if (next === undefined) throw new Error('unexpected player call');
+            return next;
+          }),
         },
-        {
-          guard: 'clean',
-          evaluatedRevision: '2222222222222222222222222222222222222222',
-        },
-      ];
-      const actor = createActor(
-        reviewMachine.provide({
-          actors: {
-            player: fromPromise<PlayerOutput, PlayerInput>(async ({ input }) => {
-              inputs.push(input);
-              const next = script.shift();
-              if (next === undefined) throw new Error('unexpected player call');
-              return next;
-            }),
-          },
-        }),
-        { input: {} },
-      ).start();
-      actor.send({ type: 'START_REVIEW', callerInput });
-      const completed = await waitFor(
-        actor,
-        (snapshot) => snapshot.status === 'done',
-      );
-      expect(completed.context.callerInput).toBe(callerInput);
-      expect(completed.context.originalIntent).toBe(originalIntent);
-      expect(inputs.map(({ sourceItem }) => sourceItem)).toEqual([
-        'REVIEW-1',
-        'REVIEW-2',
-        'REVIEW-4',
-        'REVIEW-2',
-        'REVIEW-3',
-      ]);
-      for (const input of inputs) {
-        if (input.sourceItem === 'REVIEW-1') {
-          expect(input.callerInput).toBe(callerInput);
-          expect(input).not.toHaveProperty('originalIntent');
-        } else {
-          expect(input.originalIntent, input.sourceItem).toBe(originalIntent);
-          expect(input, input.sourceItem).not.toHaveProperty('callerInput');
-        }
-      }
-      actor.stop();
-    },
-  );
+      }),
+      { input: {} },
+    ).start();
+    actor.send({ type: 'START_REVIEW', callerInput });
+    const completed = await waitFor(
+      actor,
+      (snapshot) => snapshot.status === 'done',
+    );
+    expect(completed.context.callerInput).toBe(callerInput);
+    expect(completed.context).not.toHaveProperty('originalIntent');
+    expect(inputs.map(({ sourceItem }) => sourceItem)).toEqual([
+      'REVIEW-1',
+      'REVIEW-2',
+      'REVIEW-4',
+      'REVIEW-2',
+      'REVIEW-3',
+    ]);
+    for (const input of inputs) {
+      expect(input.callerInput, input.sourceItem).toBe(callerInput);
+      expect(input, input.sourceItem).not.toHaveProperty('originalIntent');
+    }
+    actor.stop();
+  });
 
   it('refuses a Boss jump into a round whose typed context is missing', () => {
     const jumps = (machineConfig.on?.BOSS_INTERRUPT ?? []) as readonly {
@@ -858,7 +810,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
     expect(enterable(request)).toEqual(['firstReview']);
     // Findings and a Coder disposition exist, but no disposition is recorded,
     // so neither follow-up round can be entered.
-    expect(enterable(context)).toEqual(['firstReview', 'answerFindings']);
+    expect(enterable(context)).toEqual(['firstReview', 'fixFindings']);
   });
 
   it('requires receipt-derived identities before accepting commit or completion', () => {
@@ -870,7 +822,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
       ) => boolean
     >;
     expect(
-      guards.coderCommitted(
+      guards.acceptCommitted(
         {
           context,
           event: done({ guard: 'committed', coderOutput: 'Committed.' }),
@@ -879,7 +831,7 @@ describe('REVIEW GEARS to FSM compilation', () => {
       ),
     ).toBe(false);
     expect(
-      guards.coderCommitted(
+      guards.acceptCommitted(
         {
           context,
           event: done({
@@ -893,16 +845,16 @@ describe('REVIEW GEARS to FSM compilation', () => {
     ).toBe(false);
     // DR-045: completion equally requires the receipt-observed revision.
     expect(
-      guards.reviewerClean(
-        { context, event: done({ guard: 'clean' }) },
+      guards.acceptNoFindings(
+        { context, event: done({ guard: 'noFindings' }) },
         undefined,
       ),
     ).toBe(false);
     expect(
-      guards.reviewerClean(
+      guards.acceptNoFindings(
         {
           context,
-          event: done({ guard: 'clean', evaluatedRevision: ' ' }),
+          event: done({ guard: 'noFindings', evaluatedRevision: ' ' }),
         },
         undefined,
       ),

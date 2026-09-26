@@ -29,10 +29,10 @@ export interface ReviewPlaybookRegistryEntry {
 }
 export declare const reviewStateCountLabels: {
     readonly firstReview: "review round";
-    readonly reviewFixCommit: "review round";
+    readonly reviewAfterFix: "review round";
     readonly reviewAfterRejection: "rebuttal";
 };
-export declare const reviewCopyPasteGuardNames: readonly ["findings", "committed", "rejectedAll"];
+export declare const reviewCopyPasteGuardNames: readonly ["hasFindings", "committed", "rejectedAll"];
 export declare function reviewSavedCountsLine(counts: {
     interruptions: number;
     copyPastes: number;

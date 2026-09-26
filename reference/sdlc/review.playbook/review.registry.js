@@ -3,11 +3,11 @@
 import createPlaybookRuntime from './review.playbook.js';
 export const reviewStateCountLabels = {
     firstReview: 'review round',
-    reviewFixCommit: 'review round',
+    reviewAfterFix: 'review round',
     reviewAfterRejection: 'rebuttal',
 };
 export const reviewCopyPasteGuardNames = [
-    'findings',
+    'hasFindings',
     'committed',
     'rejectedAll',
 ];

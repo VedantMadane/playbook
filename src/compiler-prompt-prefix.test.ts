@@ -341,15 +341,15 @@ describe('prefix-first prompts share their instructions as a cache prefix (compi
       const review = workflows.find(({ id }) => id === 'review')!;
       const gears = relayFirst(reference('review').gears, review.prefixed);
       const { text } = prefix(dir, gears);
-      const compose = (prompt: readonly string[], originalIntent: string) =>
+      const compose = (prompt: readonly string[], callerInput: string) =>
         defaultComposePlayerPrompt({
-          stateId: 'answerFindings',
+          stateId: 'fixFindings',
           role: 'coder',
           sourceItem: 'REVIEW-2',
           prompt: prompt.join('\n'),
           result: {},
-          originalIntent,
-          reviewerOutput: `Findings for ${originalIntent}`,
+          callerInput,
+          reviewerOutput: `Findings for ${callerInput}`,
         } as never);
       const commonPrefix = (left: string, right: string) => {
         let index = 0;
@@ -364,7 +364,7 @@ describe('prefix-first prompts share their instructions as a cache prefix (compi
       const shared = commonPrefix(compose(after, 'Add a flag.'), compose(after, 'Remove a flag.'));
       expect(shared.startsWith(instructions)).toBe(true);
       const original = commonPrefix(compose(before, 'Add a flag.'), compose(before, 'Remove a flag.'));
-      expect(original).toBe('> Original intent: ');
+      expect(original).toBe('> Original request: ');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

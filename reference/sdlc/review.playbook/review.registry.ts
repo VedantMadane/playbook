@@ -45,12 +45,12 @@ export interface ReviewPlaybookRegistryEntry {
 
 export const reviewStateCountLabels = {
   firstReview: 'review round',
-  reviewFixCommit: 'review round',
+  reviewAfterFix: 'review round',
   reviewAfterRejection: 'rebuttal',
 } as const;
 
 export const reviewCopyPasteGuardNames = [
-  'findings',
+  'hasFindings',
   'committed',
   'rejectedAll',
 ] as const;

@@ -7,16 +7,9 @@
 import { assign, fromPromise, setup } from 'xstate';
 /** One role-id array per parallel group; REVIEW declares no parallel group. */
 export const concurrentRoleSets = [];
-const RESUME_METADATA = {
-    firstReview: { sourceItem: 'REVIEW-1', roleId: 'reviewer' },
-    answerFindings: { sourceItem: 'REVIEW-2', roleId: 'coder' },
-    reviewFixCommit: { sourceItem: 'REVIEW-3', roleId: 'reviewer' },
-    reviewAfterRejection: { sourceItem: 'REVIEW-4', roleId: 'reviewer' },
-};
 // ---------------------------------------------------------------------------
-// Prompts (each item's blockquote, verbatim) and local result contracts
+// Prompts and result contracts (verbatim from review.gears.md)
 // ---------------------------------------------------------------------------
-/** REVIEW-1 blockquote; `<caller-input>` is carried as `callerInput`. */
 const FIRST_REVIEW_PROMPT = [
     'A new review begins for the review scope.',
     'Keep to the original intent and follow what it asks.',
@@ -41,14 +34,7 @@ const FIRST_REVIEW_PROMPT = [
     '',
     '> Original request: <caller-input>',
 ].join('\n');
-/**
- * REVIEW-2 blockquote. `<original-intent>` is carried as `originalIntent` and
- * `<reviewer-output>` as `reviewerOutput`. `<coder-llm>` and `<reviewer-llm>`
- * are local-role prompt identities of Coder and Reviewer: the linker resolves
- * them through the invocation-scoped `promptIdentity(roleId)` lookup, so they
- * stay literal here and have no machine, context, or actor-input field.
- */
-const ANSWER_FINDINGS_PROMPT = [
+const FIX_FINDINGS_PROMPT = [
     'For each review item, accept or reject it.',
     'Before deciding, understand the full picture and think systematically about the underlying design.',
     'Keep to the original intent and follow what it asks.',
@@ -66,14 +52,10 @@ const ANSWER_FINDINGS_PROMPT = [
     'If you reject every item, change nothing and make no commit.',
     'Report every disposition, all relevant run results, and every rebuttal.',
     '',
-    '> Original intent: <original-intent>',
+    '> Original request: <caller-input>',
     '> Reviewer findings: <reviewer-output>',
 ].join('\n');
-/**
- * REVIEW-3 blockquote. `<original-intent>` is carried as `originalIntent`,
- * `<latest-commit>` as `latestCommit`, and `<coder-output>` as `coderOutput`.
- */
-const REVIEW_FIX_COMMIT_PROMPT = [
+const REVIEW_AFTER_FIX_PROMPT = [
     'A new review round begins for the review scope in the cumulative committed state, with particular attention to the latest review-fix commit.',
     'Keep to the original intent and follow what it asks.',
     "Read the latest review-fix commit's message and see Coder's feedback below.",
@@ -95,14 +77,10 @@ const REVIEW_FIX_COMMIT_PROMPT = [
     'Consult @specs/map.md for context if needed; verify it remains accurate.',
     'Consult @specs/meta.md for spec requirements if needed; verify affected specs follow it.',
     '',
-    '> Original intent: <original-intent>',
+    '> Original request: <caller-input>',
     '> Latest commit: <latest-commit>',
     '> Coder output: <coder-output>',
 ].join('\n');
-/**
- * REVIEW-4 blockquote. `<original-intent>` is carried as `originalIntent` and
- * `<coder-output>` as `coderOutput`.
- */
 const REVIEW_AFTER_REJECTION_PROMPT = [
     'No new commit was made because Coder rejected every finding.',
     "See Coder's feedback below.",
@@ -124,99 +102,73 @@ const REVIEW_AFTER_REJECTION_PROMPT = [
     'Consult @specs/map.md for context if needed; verify it remains accurate.',
     'Consult @specs/meta.md for spec requirements if needed; verify affected specs follow it.',
     '',
-    '> Original intent: <original-intent>',
+    '> Original request: <caller-input>',
     '> Coder output: <coder-output>',
 ].join('\n');
-const NEEDS_BOSS_REPLY_RESULT = "The acting agent's prose surfaces a clarifying question for Boss that the agent cannot answer alone. Output shall include `question: <verbatim question text from the acting agent's prose>`.";
+const NEEDS_BOSS_REPLY_DESCRIPTION = "The acting agent's prose surfaces a clarifying question for Boss that the agent cannot answer alone. Output shall include `question: <verbatim question text from the acting agent's prose>`.";
 const FIRST_REVIEW_RESULT = {
-    findings: "Reviewer raised one or more findings that remain unsettled. The outcome depends on the substance of Reviewer's reply, not on finding numbers or any fixed presentation format; a progress report, status update, or promise of a later result supports no review outcome. Output shall include `reviewerOutput: <verbatim final text>`.",
-    clean: "Reviewer affirmatively reported that the requested review is complete and no unsettled findings remain. The outcome depends on the substance of Reviewer's reply, not on finding numbers or any fixed presentation format; a progress report, status update, or promise of a later result supports no review outcome. The review workflow then returns the exact repository revision at which the review scope was evaluated, taken from repository authority rather than from either player's prose, and the fact that no unsettled findings remain within that scope. Output shall include `evaluatedRevision: <repository revision>`.",
-    needsBossReply: NEEDS_BOSS_REPLY_RESULT,
+    hasFindings: "Reviewer raised one or more unsettled findings; a progress report, status update, or promise of a later result supports no review outcome, and the outcome does not depend on finding numbering or any fixed presentation format of Reviewer's reply. Output shall include `reviewerOutput: <verbatim final text>`.",
+    noFindings: "Reviewer affirmatively reported that the requested review is complete and no unsettled findings remain; a progress report, status update, or promise of a later result supports no review outcome, and the outcome does not depend on finding numbering or any fixed presentation format of Reviewer's reply. On this outcome the workflow returns the exact repository revision at which the review scope was evaluated, taken from repository authority and not from either player's prose, as evaluatedRevision, and the fact that no unsettled findings remain within that scope, as noUnsettledFindings true. Output shall include `evaluatedRevision: <repository revision>`.",
+    needsBossReply: NEEDS_BOSS_REPLY_DESCRIPTION,
 };
-const ANSWER_FINDINGS_RESULT = {
-    committed: "Coder accepted one or more findings and made one new review-fix commit, whose identity is taken from the repository-effect receipt rather than from Coder's prose; the outcome does not depend on finding numbers or any fixed presentation format of Coder's reply. Output shall include `latestCommit: <commit identity>` and `coderOutput: <verbatim final text>`.",
-    rejectedAll: "Coder rejected every finding and made no commit; the outcome does not depend on finding numbers or any fixed presentation format of Coder's reply. Output shall include `coderOutput: <verbatim final text>`.",
-    needsBossReply: NEEDS_BOSS_REPLY_RESULT,
+const FIX_FINDINGS_RESULT = {
+    committed: "Coder made one new review-fix commit; the outcome does not depend on finding numbering or any fixed presentation format of Coder's reply. Output shall include `coderOutput: <verbatim final text>` and `latestCommit: <commit identity>`.",
+    rejectedAll: "Coder rejected every finding, changed nothing, and made no commit; the outcome does not depend on finding numbering or any fixed presentation format of Coder's reply. Output shall include `coderOutput: <verbatim final text>`.",
+    needsBossReply: NEEDS_BOSS_REPLY_DESCRIPTION,
 };
-const REVIEW_FIX_COMMIT_RESULT = {
-    findings: "Reviewer raised or kept one or more findings that remain unsettled. The outcome depends on the substance of Reviewer's reply, not on finding numbers or any fixed presentation format; a progress report, status update, or promise of a later result supports no review outcome. Output shall include `reviewerOutput: <verbatim final text>`.",
-    clean: "Reviewer affirmatively reported that the requested review is complete and no unsettled findings remain. The outcome depends on the substance of Reviewer's reply, not on finding numbers or any fixed presentation format; a progress report, status update, or promise of a later result supports no review outcome. The review workflow then returns the exact repository revision at which the review scope was evaluated, taken from repository authority rather than from either player's prose, and the fact that no unsettled findings remain within that scope. Output shall include `evaluatedRevision: <repository revision>`.",
-    needsBossReply: NEEDS_BOSS_REPLY_RESULT,
+const LATER_REVIEW_RESULT = {
+    hasFindings: "Reviewer raised or kept one or more unsettled findings; a progress report, status update, or promise of a later result supports no review outcome, and the outcome does not depend on finding numbering or any fixed presentation format of Reviewer's reply. Output shall include `reviewerOutput: <verbatim final text>`.",
+    noFindings: "Reviewer affirmatively reported that the requested review is complete and no unsettled findings remain; a progress report, status update, or promise of a later result supports no review outcome, and the outcome does not depend on finding numbering or any fixed presentation format of Reviewer's reply. On this outcome the workflow returns the exact repository revision at which the review scope was evaluated, taken from repository authority and not from either player's prose, as evaluatedRevision, and the fact that no unsettled findings remain within that scope, as noUnsettledFindings true. Output shall include `evaluatedRevision: <repository revision>`.",
+    needsBossReply: NEEDS_BOSS_REPLY_DESCRIPTION,
 };
-const REVIEW_AFTER_REJECTION_RESULT = {
-    findings: "Reviewer kept or raised one or more findings that remain unsettled. The outcome depends on the substance of Reviewer's reply, not on finding numbers or any fixed presentation format; a progress report, status update, or promise of a later result supports no review outcome. Output shall include `reviewerOutput: <verbatim final text>`.",
-    clean: "Reviewer affirmatively reported that the requested review is complete and no unsettled findings remain. The outcome depends on the substance of Reviewer's reply, not on finding numbers or any fixed presentation format; a progress report, status update, or promise of a later result supports no review outcome. The review workflow then returns the exact repository revision at which the review scope was evaluated, taken from repository authority rather than from either player's prose, and the fact that no unsettled findings remain within that scope. Output shall include `evaluatedRevision: <repository revision>`.",
-    needsBossReply: NEEDS_BOSS_REPLY_RESULT,
-};
-// ---------------------------------------------------------------------------
-// State descriptions and public metadata
-// ---------------------------------------------------------------------------
+/** REVIEW-3's authored result contract (identical to REVIEW-4's). */
+const REVIEW_AFTER_FIX_RESULT = LATER_REVIEW_RESULT;
+/** REVIEW-4's authored result contract (identical to REVIEW-3's). */
+const REVIEW_AFTER_REJECTION_RESULT = LATER_REVIEW_RESULT;
 const STATE_DESCRIPTIONS = {
-    ready: "Waiting for the caller's review request.",
-    firstReview: "Reviewer runs the first review round over the caller's review scope.",
-    answerFindings: "Coder accepts or rejects each of Reviewer's findings, fixing accepted ones in one new review-fix commit.",
-    reviewFixCommit: 'Reviewer runs the next review round over the cumulative committed state after the latest review-fix commit.',
-    reviewAfterRejection: 'Reviewer runs the next review round after Coder rejected every finding without a new commit.',
+    ready: 'Waiting for a caller to start a review.',
+    firstReview: 'Reviewer runs the first review round over the review scope.',
+    fixFindings: "Coder accepts or rejects each of Reviewer's findings and commits any accepted fixes.",
+    reviewAfterFix: 'Reviewer runs the next review round over the cumulative committed state after a review-fix commit.',
+    reviewAfterRejection: 'Reviewer runs the next review round after Coder rejected every finding without a commit.',
     awaitBossReply: "Waiting for Boss to answer the acting agent's question.",
     failed: 'REVIEW parked after a failure and waits for Boss to restart or resume it.',
-    done: 'REVIEW completed: Reviewer affirmatively reported no unsettled findings within the review scope at the returned evaluated repository revision.',
+    done: 'REVIEW completed: the review scope was evaluated at the returned revision and no unsettled findings remain.',
 };
-function playbookMeta(stateId, role) {
-    return {
-        playbook: {
-            stateId,
-            description: STATE_DESCRIPTIONS[stateId],
-            ...(role === undefined ? {} : { role }),
-        },
-    };
-}
-function terminalMeta(stateId, terminal) {
-    return {
-        playbook: {
-            stateId,
-            description: STATE_DESCRIPTIONS[stateId],
-            terminal,
-        },
-    };
-}
+const RESUME_METADATA = {
+    firstReview: { sourceItem: 'REVIEW-1', role: 'reviewer' },
+    fixFindings: { sourceItem: 'REVIEW-2', role: 'coder' },
+    reviewAfterFix: { sourceItem: 'REVIEW-3', role: 'reviewer' },
+    reviewAfterRejection: { sourceItem: 'REVIEW-4', role: 'reviewer' },
+};
 // ---------------------------------------------------------------------------
-// Structural narrowing helpers
+// Structural helpers
 // ---------------------------------------------------------------------------
-function isRecord(value) {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-function isNonEmptyString(value) {
-    return typeof value === 'string' && value.trim().length > 0;
-}
-/** The actor's `output`, read structurally from an unknown done event. */
-function doneOutputOf(event) {
-    return isRecord(event) ? event.output : undefined;
-}
-/** The actor's `error`, read structurally from an unknown error event. */
-function actorErrorOf(event) {
-    return isRecord(event) ? event.error : undefined;
-}
+const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+const isNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;
+const doneOutputOf = (event) => isRecord(event) ? event.output : undefined;
+const actorErrorOf = (event) => isRecord(event) ? event.error : undefined;
 /** Narrows a player done event to the declared player output contract. */
 function playerOutputOf(event) {
     const output = doneOutputOf(event);
     if (!isRecord(output))
         return undefined;
     switch (output.guard) {
-        case 'findings':
+        case 'hasFindings':
             return isNonEmptyString(output.reviewerOutput)
-                ? { guard: 'findings', reviewerOutput: output.reviewerOutput }
+                ? { guard: 'hasFindings', reviewerOutput: output.reviewerOutput }
                 : undefined;
-        case 'clean':
+        case 'noFindings':
             return isNonEmptyString(output.evaluatedRevision)
-                ? { guard: 'clean', evaluatedRevision: output.evaluatedRevision }
+                ? { guard: 'noFindings', evaluatedRevision: output.evaluatedRevision }
                 : undefined;
         case 'committed':
-            return isNonEmptyString(output.latestCommit) &&
-                isNonEmptyString(output.coderOutput)
+            return isNonEmptyString(output.coderOutput) &&
+                isNonEmptyString(output.latestCommit)
                 ? {
                     guard: 'committed',
-                    latestCommit: output.latestCommit,
                     coderOutput: output.coderOutput,
+                    latestCommit: output.latestCommit,
                 }
                 : undefined;
         case 'rejectedAll':
@@ -235,10 +187,8 @@ function playerOutputOf(event) {
 function errorRecord(value) {
     if (value instanceof Error) {
         return {
-            name: typeof value.name === 'string' && value.name.length > 0
-                ? value.name
-                : 'Error',
-            message: typeof value.message === 'string' ? value.message : '',
+            name: value.name || 'Error',
+            message: value.message,
             ...(typeof value.stack === 'string' ? { stack: value.stack } : {}),
         };
     }
@@ -248,133 +198,32 @@ function errorRecord(value) {
             message: value.message,
         };
     }
-    return {
-        name: 'Error',
-        message: typeof value === 'string'
-            ? value
-            : 'The actor failed with a non-Error value.',
-    };
+    return { name: 'Error', message: String(value) };
 }
-// ---------------------------------------------------------------------------
-// `<original-intent>`: the `Original intent:` section of the caller's request
-// ---------------------------------------------------------------------------
-const ORIGINAL_INTENT_LABEL = 'Original intent:';
-const ORIGINAL_INTENT_END_LABELS = ['Review scope:'];
-/**
- * The request as read: where every non-blank line begins with `>`, each line
- * is read without that marker and one optional space after it.
- */
-function requestAsRead(text) {
-    const lines = text.split('\n');
-    const quoted = lines.some((line) => line.trim().length > 0) &&
-        lines.every((line) => line.trim().length === 0 || line.startsWith('>'));
-    if (!quoted)
-        return text;
-    return lines
-        .map((line) => {
-        if (!line.startsWith('>'))
-            return line;
-        return line.startsWith('> ') ? line.slice(2) : line.slice(1);
-    })
-        .join('\n');
-}
-/**
- * Derives `<original-intent>`: the lines from the first line that begins with
- * `Original intent:` (label removed) through the line before the first later
- * line that begins with `Review scope:`, or through the last line, trimmed.
- * Without that label, or when the section is empty, the whole request as read,
- * trimmed, so the request is never lost.
- */
-export function originalIntentOf(callerInput) {
-    const asRead = requestAsRead(callerInput);
-    const lines = asRead.split('\n');
-    const start = lines.findIndex((line) => line.startsWith(ORIGINAL_INTENT_LABEL));
-    if (start < 0)
-        return asRead.trim();
-    let end = lines.length;
-    for (let index = start + 1; index < lines.length; index += 1) {
-        const line = lines[index];
-        if (line !== undefined &&
-            ORIGINAL_INTENT_END_LABELS.some((label) => line.startsWith(label))) {
-            end = index;
-            break;
-        }
-    }
-    const firstLine = lines[start] ?? '';
-    const section = [
-        firstLine.slice(ORIGINAL_INTENT_LABEL.length),
-        ...lines.slice(start + 1, end),
-    ]
-        .join('\n')
-        .trim();
-    return section.length > 0 ? section : asRead.trim();
-}
-// ---------------------------------------------------------------------------
-// Context resets
-// ---------------------------------------------------------------------------
-const INITIAL_CONTEXT = {
-    callerInput: '',
-    originalIntent: '',
-    reviewerOutput: '',
-    coderOutput: '',
-    latestCommit: '',
-    coderOutcome: null,
-    evaluatedRevision: '',
-    lastError: null,
-};
-/** Clears the scalar pending question and reply. */
-const BOSS_REPLY_RESET = {
-    pendingBossQuestion: null,
-    bossReply: null,
-};
-/** A fresh review for a request: clears every prior round, error, and question. */
-function freshRun(callerInput) {
-    return {
-        ...INITIAL_CONTEXT,
-        ...BOSS_REPLY_RESET,
-        callerInput,
-        originalIntent: originalIntentOf(callerInput),
-    };
-}
-/** A restart of the first round keeps the request and clears every round. */
-const FIRST_ROUND_RESTART = {
-    reviewerOutput: '',
-    coderOutput: '',
-    latestCommit: '',
-    coderOutcome: null,
-    evaluatedRevision: '',
-    lastError: null,
-    ...BOSS_REPLY_RESET,
-};
-/** A restart of a later round keeps the round evidence it relays. */
-const LATER_ROUND_RESTART = {
-    evaluatedRevision: '',
-    lastError: null,
-    ...BOSS_REPLY_RESET,
-};
-const outcomeIs = (guard) => ({ event }) => playerOutputOf(event)?.guard === guard;
-/** Typed context each jumpable working leaf requires to be entered safely. */
-const INTERRUPT_PRECONDITIONS = {
-    firstReview: (context) => isNonEmptyString(context.callerInput) &&
-        isNonEmptyString(context.originalIntent),
-    answerFindings: (context) => isNonEmptyString(context.originalIntent) &&
-        isNonEmptyString(context.reviewerOutput),
-    reviewFixCommit: (context) => context.coderOutcome === 'committed' &&
-        isNonEmptyString(context.originalIntent) &&
-        isNonEmptyString(context.latestCommit) &&
-        isNonEmptyString(context.coderOutput),
-    reviewAfterRejection: (context) => context.coderOutcome === 'rejectedAll' &&
-        isNonEmptyString(context.originalIntent) &&
-        isNonEmptyString(context.coderOutput),
-};
+const acceptsOutcome = (outcome) => ({ event }) => playerOutputOf(event)?.guard === outcome;
+// The entry guard validates the text the current event supplies, before the
+// entry action copies it into context.
 const validStartReview = ({ event }) => event.type === 'START_REVIEW' && isNonEmptyString(event.callerInput);
 const repliesToPendingQuestion = ({ context, event }) => event.type === 'BOSS_REPLY' &&
-    isRecord(context.pendingBossQuestion) &&
+    context.pendingBossQuestion !== undefined &&
     (event.questionId === undefined ||
         event.questionId === context.pendingBossQuestion.questionId);
 const emptyBossReply = (args) => repliesToPendingQuestion(args) &&
     args.event.type === 'BOSS_REPLY' &&
     !isNonEmptyString(args.event.answer);
+/** Typed context each jumpable working leaf needs to be entered safely. */
+const INTERRUPT_PRECONDITIONS = {
+    firstReview: (context) => isNonEmptyString(context.callerInput),
+    fixFindings: (context) => isNonEmptyString(context.callerInput) &&
+        isNonEmptyString(context.reviewerOutput),
+    reviewAfterFix: (context) => isNonEmptyString(context.callerInput) &&
+        context.coderOutcome === 'committed' &&
+        isNonEmptyString(context.latestCommit) &&
+        isNonEmptyString(context.coderOutput),
+    reviewAfterRejection: (context) => isNonEmptyString(context.callerInput) &&
+        context.coderOutcome === 'rejectedAll' &&
+        isNonEmptyString(context.coderOutput),
+};
 // ---------------------------------------------------------------------------
 // Transition helpers
 // ---------------------------------------------------------------------------
@@ -386,7 +235,7 @@ function bossInterrupts(ids) {
             INTERRUPT_PRECONDITIONS[id](context),
         target: `#${id}`,
         reenter: true,
-        actions: 'restartFromInterrupt',
+        actions: 'resetForInterrupt',
     }));
 }
 /** One guarded `BOSS_REPLY` resume transition per suspended working leaf. */
@@ -395,186 +244,197 @@ function resumableStates(ids) {
         guard: (args) => repliesToPendingQuestion(args) &&
             args.event.type === 'BOSS_REPLY' &&
             isNonEmptyString(args.event.answer) &&
-            isRecord(args.context.pendingBossQuestion) &&
-            args.context.pendingBossQuestion.resumeStateId === id,
+            args.context.pendingBossQuestion?.resumeStateId === id,
         target: `#${id}`,
         reenter: true,
         actions: 'rememberBossReply',
     }));
 }
-/** The pending question and reply selected for the invoking working leaf. */
-function bossReplyFields(context) {
-    const pendingBossQuestion = context.pendingBossQuestion;
-    const bossReply = context.bossReply;
-    return {
-        ...(pendingBossQuestion === undefined || pendingBossQuestion === null
-            ? {}
-            : { pendingBossQuestion }),
-        ...(bossReply === undefined || bossReply === null ? {} : { bossReply }),
-    };
-}
-/**
- * Accepted-outcome marker (artifact schema 3). `target` names the state the
- * public snapshot shows after the transition.
- */
+const bossReplyFields = (context) => ({
+    ...(context.pendingBossQuestion !== undefined
+        ? { pendingBossQuestion: context.pendingBossQuestion }
+        : {}),
+    ...(context.bossReply !== undefined ? { bossReply: context.bossReply } : {}),
+});
 const acceptedOutcome = (source, target, outcome) => ({
     type: 'playbook.acceptedOutcome',
     params: { source, target, acceptedOutcome: outcome },
 });
-/** Reviewer round `onDone` arms (REVIEW-1, REVIEW-3, REVIEW-4). */
-const reviewerRoundOnDone = (source) => [
-    {
-        guard: 'reviewerFindings',
-        target: '#answerFindings',
-        actions: [
-            acceptedOutcome(source, 'answerFindings', 'findings'),
-            'rememberFindings',
-            'clearBossReplyContext',
-        ],
-    },
-    {
-        guard: 'reviewerClean',
-        target: '#done',
-        actions: [
-            acceptedOutcome(source, 'done', 'clean'),
-            'rememberClean',
-            'clearBossReplyContext',
-        ],
-    },
-    suspendArm(source),
-    malformedPlayerOutputArm(source),
-];
-function suspendArm(source) {
-    return {
-        guard: 'needsBossReply',
-        target: '#awaitBossReply',
-        actions: [
-            acceptedOutcome(source, 'awaitBossReply', 'needsBossReply'),
-            { type: 'setPendingBossQuestion', params: { resumeStateId: source } },
-        ],
-    };
-}
-function malformedPlayerOutputArm(source) {
-    return {
-        target: '#failed',
-        actions: [
-            {
-                type: 'rememberMalformedPlayerOutput',
-                params: { sourceItem: RESUME_METADATA[source].sourceItem },
-            },
-            'clearBossReplyContext',
-        ],
-    };
-}
+/** Reviewer found unsettled findings: Coder answers them next (REVIEW-2). */
+const hasFindingsArm = (source) => ({
+    guard: 'acceptHasFindings',
+    target: '#fixFindings',
+    actions: [
+        acceptedOutcome(source, 'fixFindings', 'hasFindings'),
+        'rememberFindings',
+        'clearBossReplyContext',
+    ],
+});
+/** Reviewer affirmed a complete review with no unsettled findings. */
+const noFindingsArm = (source) => ({
+    guard: 'acceptNoFindings',
+    target: '#done',
+    actions: [
+        acceptedOutcome(source, 'done', 'noFindings'),
+        'rememberEvaluatedRevision',
+        'clearBossReplyContext',
+    ],
+});
+const suspendArm = (source) => ({
+    guard: 'acceptNeedsBossReply',
+    target: '#awaitBossReply',
+    actions: [
+        acceptedOutcome(source, 'awaitBossReply', 'needsBossReply'),
+        { type: 'setPendingBossQuestion', params: { resumeStateId: source } },
+    ],
+});
+const malformedPlayerOutputArm = {
+    target: '#failed',
+    actions: ['rememberMalformedPlayerOutput', 'clearBossReplyContext'],
+};
 const playerOnError = {
     target: '#failed',
     actions: ['rememberActorError', 'clearBossReplyContext'],
 };
-const startReviewTransition = {
+const startReviewArm = {
     guard: 'validStartReview',
     target: '#firstReview',
     actions: 'startReview',
 };
+const meta = (stateId, role) => ({
+    playbook: {
+        stateId,
+        description: STATE_DESCRIPTIONS[stateId],
+        ...(role === undefined ? {} : { role }),
+    },
+});
+const finalMeta = (stateId, terminal) => ({
+    playbook: {
+        stateId,
+        description: STATE_DESCRIPTIONS[stateId],
+        terminal,
+    },
+});
 // ---------------------------------------------------------------------------
 // Machine
 // ---------------------------------------------------------------------------
 export const reviewMachine = setup({
-    types: {},
+    types: {
+        context: {},
+        events: {},
+        input: {},
+        output: {},
+    },
     actors: {
         player: fromPromise(async () => {
             throw new Error('player actor must be provided by the runner');
         }),
     },
-    guards: {
-        validStartReview,
-        emptyBossReply,
-        reviewerFindings: outcomeIs('findings'),
-        reviewerClean: outcomeIs('clean'),
-        coderCommitted: outcomeIs('committed'),
-        coderRejectedAll: outcomeIs('rejectedAll'),
-        needsBossReply: outcomeIs('needsBossReply'),
-    },
     actions: {
         'playbook.acceptedOutcome': (_args, _params) => undefined,
-        startReview: assign(({ event }) => event.type === 'START_REVIEW' ? freshRun(event.callerInput) : {}),
-        restartFromInterrupt: assign(({ event }) => {
-            if (event.type !== 'BOSS_INTERRUPT')
-                return {};
-            return event.targetId === 'firstReview'
-                ? FIRST_ROUND_RESTART
-                : LATER_ROUND_RESTART;
+        startReview: assign(({ event }) => event.type === 'START_REVIEW'
+            ? {
+                callerInput: event.callerInput,
+                reviewerOutput: undefined,
+                coderOutput: undefined,
+                latestCommit: undefined,
+                coderOutcome: undefined,
+                evaluatedRevision: undefined,
+                lastError: undefined,
+                pendingBossQuestion: undefined,
+                bossReply: undefined,
+            }
+            : {}),
+        resetForInterrupt: assign({
+            evaluatedRevision: undefined,
+            lastError: undefined,
+            pendingBossQuestion: undefined,
+            bossReply: undefined,
         }),
         rememberFindings: assign(({ event }) => {
             const output = playerOutputOf(event);
-            return output?.guard === 'findings'
-                ? { reviewerOutput: output.reviewerOutput, lastError: null }
+            return output?.guard === 'hasFindings'
+                ? { reviewerOutput: output.reviewerOutput, lastError: undefined }
                 : {};
         }),
-        rememberClean: assign(({ event }) => {
+        rememberCoderDisposition: assign(({ event }) => {
             const output = playerOutputOf(event);
-            return output?.guard === 'clean'
-                ? { evaluatedRevision: output.evaluatedRevision, lastError: null }
-                : {};
-        }),
-        rememberCommitted: assign(({ event }) => {
-            const output = playerOutputOf(event);
-            return output?.guard === 'committed'
-                ? {
-                    latestCommit: output.latestCommit,
+            if (output?.guard === 'committed') {
+                return {
                     coderOutput: output.coderOutput,
+                    latestCommit: output.latestCommit,
                     coderOutcome: 'committed',
-                    lastError: null,
-                }
-                : {};
-        }),
-        rememberRejectedAll: assign(({ event }) => {
-            const output = playerOutputOf(event);
-            return output?.guard === 'rejectedAll'
-                ? {
+                    lastError: undefined,
+                };
+            }
+            if (output?.guard === 'rejectedAll') {
+                return {
                     coderOutput: output.coderOutput,
                     coderOutcome: 'rejectedAll',
-                    lastError: null,
-                }
+                    lastError: undefined,
+                };
+            }
+            return {};
+        }),
+        rememberEvaluatedRevision: assign(({ event }) => {
+            const output = playerOutputOf(event);
+            return output?.guard === 'noFindings'
+                ? { evaluatedRevision: output.evaluatedRevision, lastError: undefined }
                 : {};
         }),
         setPendingBossQuestion: assign(({ event }, params) => {
             const output = playerOutputOf(event);
             if (output?.guard !== 'needsBossReply')
                 return {};
-            const { sourceItem, roleId } = RESUME_METADATA[params.resumeStateId];
+            const metadata = RESUME_METADATA[params.resumeStateId];
             const pendingBossQuestion = {
                 questionId: params.resumeStateId,
                 resumeStateId: params.resumeStateId,
-                sourceItem,
-                asker: { kind: 'role', roleId },
+                sourceItem: metadata.sourceItem,
+                asker: { kind: 'role', roleId: metadata.role },
                 question: output.question,
             };
-            return { pendingBossQuestion, bossReply: null, lastError: null };
+            return { pendingBossQuestion, bossReply: undefined, lastError: undefined };
         }),
         rememberBossReply: assign(({ event }) => event.type === 'BOSS_REPLY' ? { bossReply: event.answer } : {}),
-        clearBossReplyContext: assign(BOSS_REPLY_RESET),
-        rememberEmptyBossReply: assign({
-            lastError: {
-                name: 'BossReplyError',
-                message: 'BOSS_REPLY carried an empty answer.',
-            },
-            ...BOSS_REPLY_RESET,
+        clearBossReplyContext: assign({
+            pendingBossQuestion: undefined,
+            bossReply: undefined,
         }),
-        rememberMalformedPlayerOutput: assign((_args, params) => ({
-            lastError: {
-                name: 'PlayerOutputError',
-                message: `Player result for ${params.sourceItem} did not match a declared outcome with its required fields.`,
-            },
-        })),
         rememberActorError: assign(({ event }) => ({
             lastError: errorRecord(actorErrorOf(event)),
         })),
+        rememberMalformedPlayerOutput: assign(({ event }) => {
+            const output = doneOutputOf(event);
+            return {
+                lastError: {
+                    name: 'MalformedPlayerOutput',
+                    message: isRecord(output) && output.guard === 'needsBossReply'
+                        ? 'Player output declared needsBossReply without a question.'
+                        : 'Player output did not match an outcome declared for the working state.',
+                },
+            };
+        }),
+        rememberMalformedBossReply: assign({
+            lastError: {
+                name: 'MalformedBossReply',
+                message: 'BOSS_REPLY carried an empty answer.',
+            },
+        }),
+    },
+    guards: {
+        acceptHasFindings: acceptsOutcome('hasFindings'),
+        acceptNoFindings: acceptsOutcome('noFindings'),
+        acceptCommitted: acceptsOutcome('committed'),
+        acceptRejectedAll: acceptsOutcome('rejectedAll'),
+        acceptNeedsBossReply: acceptsOutcome('needsBossReply'),
+        validStartReview,
+        emptyBossReply,
     },
 }).createMachine({
     id: 'review',
-    description: 'REVIEW: Reviewer and Coder alternate review rounds and review-fix commits until Reviewer reports no unsettled findings.',
     initial: 'ready',
-    context: () => INITIAL_CONTEXT,
+    context: {},
     output: ({ context }) => {
         if (!isNonEmptyString(context.evaluatedRevision)) {
             throw new Error('REVIEW completed without the evaluated repository revision');
@@ -587,26 +447,26 @@ export const reviewMachine = setup({
     on: {
         BOSS_INTERRUPT: bossInterrupts([
             'firstReview',
-            'answerFindings',
-            'reviewFixCommit',
+            'fixFindings',
+            'reviewAfterFix',
             'reviewAfterRejection',
         ]),
     },
     states: {
         ready: {
             id: 'ready',
+            tags: 'playbook.parked',
             description: STATE_DESCRIPTIONS.ready,
-            meta: playbookMeta('ready'),
-            tags: ['playbook.parked'],
+            meta: meta('ready'),
             on: {
-                START_REVIEW: startReviewTransition,
+                START_REVIEW: startReviewArm,
             },
         },
         firstReview: {
             id: 'firstReview',
+            tags: 'playbook.busy',
             description: STATE_DESCRIPTIONS.firstReview,
-            meta: playbookMeta('firstReview', 'reviewer'),
-            tags: ['playbook.busy'],
+            meta: meta('firstReview', 'reviewer'),
             invoke: {
                 src: 'player',
                 input: ({ context }) => ({
@@ -615,82 +475,104 @@ export const reviewMachine = setup({
                     sourceItem: 'REVIEW-1',
                     prompt: FIRST_REVIEW_PROMPT,
                     result: FIRST_REVIEW_RESULT,
-                    callerInput: context.callerInput,
-                    ...bossReplyFields(context),
-                }),
-                onDone: reviewerRoundOnDone('firstReview'),
-                onError: playerOnError,
-            },
-        },
-        answerFindings: {
-            id: 'answerFindings',
-            description: STATE_DESCRIPTIONS.answerFindings,
-            meta: playbookMeta('answerFindings', 'coder'),
-            tags: ['playbook.busy'],
-            invoke: {
-                src: 'player',
-                input: ({ context }) => ({
-                    stateId: 'answerFindings',
-                    role: 'coder',
-                    sourceItem: 'REVIEW-2',
-                    prompt: ANSWER_FINDINGS_PROMPT,
-                    result: ANSWER_FINDINGS_RESULT,
-                    originalIntent: context.originalIntent,
-                    reviewerOutput: context.reviewerOutput,
+                    ...(context.callerInput !== undefined
+                        ? { callerInput: context.callerInput }
+                        : {}),
                     ...bossReplyFields(context),
                 }),
                 onDone: [
-                    {
-                        guard: 'coderCommitted',
-                        target: '#reviewFixCommit',
-                        actions: [
-                            acceptedOutcome('answerFindings', 'reviewFixCommit', 'committed'),
-                            'rememberCommitted',
-                            'clearBossReplyContext',
-                        ],
-                    },
-                    {
-                        guard: 'coderRejectedAll',
-                        target: '#reviewAfterRejection',
-                        actions: [
-                            acceptedOutcome('answerFindings', 'reviewAfterRejection', 'rejectedAll'),
-                            'rememberRejectedAll',
-                            'clearBossReplyContext',
-                        ],
-                    },
-                    suspendArm('answerFindings'),
-                    malformedPlayerOutputArm('answerFindings'),
+                    hasFindingsArm('firstReview'),
+                    noFindingsArm('firstReview'),
+                    suspendArm('firstReview'),
+                    malformedPlayerOutputArm,
                 ],
                 onError: playerOnError,
             },
         },
-        reviewFixCommit: {
-            id: 'reviewFixCommit',
-            description: STATE_DESCRIPTIONS.reviewFixCommit,
-            meta: playbookMeta('reviewFixCommit', 'reviewer'),
-            tags: ['playbook.busy'],
+        fixFindings: {
+            id: 'fixFindings',
+            tags: 'playbook.busy',
+            description: STATE_DESCRIPTIONS.fixFindings,
+            meta: meta('fixFindings', 'coder'),
             invoke: {
                 src: 'player',
                 input: ({ context }) => ({
-                    stateId: 'reviewFixCommit',
-                    role: 'reviewer',
-                    sourceItem: 'REVIEW-3',
-                    prompt: REVIEW_FIX_COMMIT_PROMPT,
-                    result: REVIEW_FIX_COMMIT_RESULT,
-                    originalIntent: context.originalIntent,
-                    latestCommit: context.latestCommit,
-                    coderOutput: context.coderOutput,
+                    stateId: 'fixFindings',
+                    role: 'coder',
+                    sourceItem: 'REVIEW-2',
+                    prompt: FIX_FINDINGS_PROMPT,
+                    result: FIX_FINDINGS_RESULT,
+                    ...(context.callerInput !== undefined
+                        ? { callerInput: context.callerInput }
+                        : {}),
+                    ...(context.reviewerOutput !== undefined
+                        ? { reviewerOutput: context.reviewerOutput }
+                        : {}),
                     ...bossReplyFields(context),
                 }),
-                onDone: reviewerRoundOnDone('reviewFixCommit'),
+                onDone: [
+                    {
+                        guard: 'acceptCommitted',
+                        target: '#reviewAfterFix',
+                        actions: [
+                            acceptedOutcome('fixFindings', 'reviewAfterFix', 'committed'),
+                            'rememberCoderDisposition',
+                            'clearBossReplyContext',
+                        ],
+                    },
+                    {
+                        guard: 'acceptRejectedAll',
+                        target: '#reviewAfterRejection',
+                        actions: [
+                            acceptedOutcome('fixFindings', 'reviewAfterRejection', 'rejectedAll'),
+                            'rememberCoderDisposition',
+                            'clearBossReplyContext',
+                        ],
+                    },
+                    suspendArm('fixFindings'),
+                    malformedPlayerOutputArm,
+                ],
+                onError: playerOnError,
+            },
+        },
+        reviewAfterFix: {
+            id: 'reviewAfterFix',
+            tags: 'playbook.busy',
+            description: STATE_DESCRIPTIONS.reviewAfterFix,
+            meta: meta('reviewAfterFix', 'reviewer'),
+            invoke: {
+                src: 'player',
+                input: ({ context }) => ({
+                    stateId: 'reviewAfterFix',
+                    role: 'reviewer',
+                    sourceItem: 'REVIEW-3',
+                    prompt: REVIEW_AFTER_FIX_PROMPT,
+                    result: REVIEW_AFTER_FIX_RESULT,
+                    ...(context.callerInput !== undefined
+                        ? { callerInput: context.callerInput }
+                        : {}),
+                    ...(context.latestCommit !== undefined
+                        ? { latestCommit: context.latestCommit }
+                        : {}),
+                    ...(context.coderOutput !== undefined
+                        ? { coderOutput: context.coderOutput }
+                        : {}),
+                    ...bossReplyFields(context),
+                }),
+                onDone: [
+                    hasFindingsArm('reviewAfterFix'),
+                    noFindingsArm('reviewAfterFix'),
+                    suspendArm('reviewAfterFix'),
+                    malformedPlayerOutputArm,
+                ],
                 onError: playerOnError,
             },
         },
         reviewAfterRejection: {
             id: 'reviewAfterRejection',
+            tags: 'playbook.busy',
             description: STATE_DESCRIPTIONS.reviewAfterRejection,
-            meta: playbookMeta('reviewAfterRejection', 'reviewer'),
-            tags: ['playbook.busy'],
+            meta: meta('reviewAfterRejection', 'reviewer'),
             invoke: {
                 src: 'player',
                 input: ({ context }) => ({
@@ -699,50 +581,59 @@ export const reviewMachine = setup({
                     sourceItem: 'REVIEW-4',
                     prompt: REVIEW_AFTER_REJECTION_PROMPT,
                     result: REVIEW_AFTER_REJECTION_RESULT,
-                    originalIntent: context.originalIntent,
-                    coderOutput: context.coderOutput,
+                    ...(context.callerInput !== undefined
+                        ? { callerInput: context.callerInput }
+                        : {}),
+                    ...(context.coderOutput !== undefined
+                        ? { coderOutput: context.coderOutput }
+                        : {}),
                     ...bossReplyFields(context),
                 }),
-                onDone: reviewerRoundOnDone('reviewAfterRejection'),
+                onDone: [
+                    hasFindingsArm('reviewAfterRejection'),
+                    noFindingsArm('reviewAfterRejection'),
+                    suspendArm('reviewAfterRejection'),
+                    malformedPlayerOutputArm,
+                ],
                 onError: playerOnError,
             },
         },
         awaitBossReply: {
             id: 'awaitBossReply',
+            tags: 'playbook.parked',
             description: STATE_DESCRIPTIONS.awaitBossReply,
-            meta: playbookMeta('awaitBossReply'),
-            tags: ['playbook.parked'],
+            meta: meta('awaitBossReply'),
             on: {
                 BOSS_REPLY: [
                     {
                         guard: 'emptyBossReply',
-                        target: '#failed',
-                        actions: 'rememberEmptyBossReply',
+                        target: 'failed',
+                        actions: ['rememberMalformedBossReply', 'clearBossReplyContext'],
                     },
                     ...resumableStates([
                         'firstReview',
-                        'answerFindings',
-                        'reviewFixCommit',
+                        'fixFindings',
+                        'reviewAfterFix',
                         'reviewAfterRejection',
                     ]),
                 ],
-                START_REVIEW: startReviewTransition,
+                START_REVIEW: startReviewArm,
             },
         },
         failed: {
             id: 'failed',
+            tags: 'playbook.parked',
             description: STATE_DESCRIPTIONS.failed,
-            meta: playbookMeta('failed'),
-            tags: ['playbook.parked'],
+            meta: meta('failed'),
             on: {
-                START_REVIEW: startReviewTransition,
+                START_REVIEW: startReviewArm,
             },
         },
         done: {
             id: 'done',
-            description: STATE_DESCRIPTIONS.done,
-            meta: terminalMeta('done', 'success'),
             type: 'final',
+            description: STATE_DESCRIPTIONS.done,
+            meta: finalMeta('done', 'success'),
         },
     },
 });
