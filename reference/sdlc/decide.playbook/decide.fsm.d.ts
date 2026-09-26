@@ -2,31 +2,34 @@ import type { PlaybookCallResult } from '@sublang/playbook/runtime';
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
 };
-export type CompactError = {
+export interface CompactError {
     readonly name: string;
     readonly message: string;
-};
-export type ErrorRecord = {
+}
+export interface ErrorRecord {
     readonly name: string;
     readonly message: string;
     readonly stack?: string;
-};
+}
+/** Canonical lowercase local ids of the source roles Coder and Reviewer. */
 export type DecideRoleId = 'coder' | 'reviewer';
 export type DecideSourceItem = 'DECIDE-1' | 'DECIDE-2' | 'DECIDE-3' | 'DECIDE-4';
 /** Delegated-player working leaves; each is its own Boss-reply resume target. */
 export type ResumableStateId = 'askCoderProposal' | 'askReviewerProposal' | 'synthesizeCommit';
 /**
- * Root BOSS_INTERRUPT targets: the parallel proposal pair as one unit, and the
- * synthesis leaf once both proposals have been promoted.
+ * Root `BOSS_INTERRUPT` targets: the parallel proposal pair as one jumpable
+ * unit (DECIDE-1, DECIDE-2), and the synthesis leaf (DECIDE-3). Branch working
+ * leaves and waits are never interrupt targets.
  */
 export type JumpableStateId = 'independentProposals' | 'synthesizeCommit';
 /**
- * One role-id array per parallel group, in first-item source order; each
- * inner array follows that group's item order (DECIDE-1, DECIDE-2).
+ * One role-id array per parallel group, in first-item source order; the inner
+ * array follows the `independent-proposals` item order (DECIDE-1, DECIDE-2).
  */
 export declare const concurrentRoleSets: readonly (readonly DecideRoleId[])[];
+/** The literal nested-call target of DECIDE-4. */
 declare const REVIEW_PLAYBOOK_ID: "review";
-export type PendingBossQuestion = {
+export interface PendingBossQuestion {
     readonly questionId: ResumableStateId;
     readonly resumeStateId: ResumableStateId;
     readonly sourceItem: 'DECIDE-1' | 'DECIDE-2' | 'DECIDE-3';
@@ -35,63 +38,68 @@ export type PendingBossQuestion = {
         readonly roleId: DecideRoleId;
     };
     readonly question: string;
-};
+}
 export type PendingBossQuestions = Partial<Record<ResumableStateId, PendingBossQuestion>>;
 export type BossReplies = Partial<Record<ResumableStateId, string>>;
-declare const CODER_PROPOSAL_RESULTS: {
-    readonly proposed: "Coder affirmatively provided a complete design proposal; a progress report, status update, or promise of a later proposal supports no proposal outcome.";
+declare const CODER_PROPOSAL_RESULT: {
+    readonly proposed: "Coder affirmatively provided a complete design proposal; a progress report, status update, or promise of a later proposal supports no proposal outcome. Output shall include `coderProposal: <verbatim final text>`.";
     readonly needsBossReply: "The acting agent's prose surfaces a clarifying question for Boss that the agent cannot answer alone. Output shall include `question: <verbatim question text from the acting agent's prose>`.";
 };
-declare const REVIEWER_PROPOSAL_RESULTS: {
+declare const REVIEWER_PROPOSAL_RESULT: {
     readonly proposed: "Reviewer affirmatively provided a complete design proposal; a progress report, status update, or promise of a later proposal supports no proposal outcome. Output shall include `reviewerProposal: <verbatim final text>`.";
     readonly needsBossReply: "The acting agent's prose surfaces a clarifying question for Boss that the agent cannot answer alone. Output shall include `question: <verbatim question text from the acting agent's prose>`.";
 };
-declare const SYNTHESIZE_COMMIT_RESULTS: {
-    readonly committed: "Coder committed the synthesized design as one new commit. Output shall include `coderOutput: <verbatim final text>` and `latestCommit: <commit identity>`.";
+declare const SYNTHESIZE_COMMIT_RESULT: {
+    readonly committed: "Coder synthesized the proposals into the necessary DRs and/or spec items and committed the result as one new commit. Output shall include `coderOutput: <verbatim final text>` and `latestCommit: <commit identity>`.";
     readonly needsBossReply: "The acting agent's prose surfaces a clarifying question for Boss that the agent cannot answer alone. Output shall include `question: <verbatim question text from the acting agent's prose>`.";
 };
-type PlayerInputBase = {
+interface PlayerInputBase {
     readonly pendingBossQuestion?: PendingBossQuestion;
     readonly bossReply?: string;
-};
+}
 /** DECIDE-1: relays `<caller-topic>` as `callerTopic`. */
-export type CoderProposalInput = PlayerInputBase & {
+export interface CoderProposalInput extends PlayerInputBase {
     readonly stateId: 'askCoderProposal';
     readonly role: 'coder';
     readonly sourceItem: 'DECIDE-1';
     readonly prompt: string;
-    readonly result: typeof CODER_PROPOSAL_RESULTS;
+    readonly result: typeof CODER_PROPOSAL_RESULT;
+    /** `<caller-topic>`: the caller's complete topic. */
     readonly callerTopic: string;
-};
+}
 /** DECIDE-2: relays `<caller-topic>` as `callerTopic`. */
-export type ReviewerProposalInput = PlayerInputBase & {
+export interface ReviewerProposalInput extends PlayerInputBase {
     readonly stateId: 'askReviewerProposal';
     readonly role: 'reviewer';
     readonly sourceItem: 'DECIDE-2';
     readonly prompt: string;
-    readonly result: typeof REVIEWER_PROPOSAL_RESULTS;
+    readonly result: typeof REVIEWER_PROPOSAL_RESULT;
+    /** `<caller-topic>`: the caller's complete topic. */
     readonly callerTopic: string;
-};
+}
 /**
  * DECIDE-3: relays `<caller-topic>` as `callerTopic` and
  * `<reviewer-proposal>` as `reviewerProposal`.
  */
-export type SynthesizeCommitInput = PlayerInputBase & {
+export interface SynthesizeCommitInput extends PlayerInputBase {
     readonly stateId: 'synthesizeCommit';
     readonly role: 'coder';
     readonly sourceItem: 'DECIDE-3';
     readonly prompt: string;
-    readonly result: typeof SYNTHESIZE_COMMIT_RESULTS;
+    readonly result: typeof SYNTHESIZE_COMMIT_RESULT;
+    /** `<caller-topic>`: the caller's complete topic. */
     readonly callerTopic: string;
+    /** `<reviewer-proposal>`: Reviewer's complete independent proposal. */
     readonly reviewerProposal: string;
-};
+}
 export type PlayerInput = CoderProposalInput | ReviewerProposalInput | SynthesizeCommitInput;
-export type NeedsBossReplyOutput = {
+export interface NeedsBossReplyOutput {
     readonly guard: 'needsBossReply';
     readonly question: string;
-};
+}
 export type CoderProposalOutput = {
     readonly guard: 'proposed';
+    readonly coderProposal: string;
 } | NeedsBossReplyOutput;
 export type ReviewerProposalOutput = {
     readonly guard: 'proposed';
@@ -105,47 +113,62 @@ export type SynthesizeCommitOutput = {
 } | NeedsBossReplyOutput;
 export type PlayerOutput = CoderProposalOutput | ReviewerProposalOutput | SynthesizeCommitOutput;
 /** DECIDE-4: literal call of the builtin `review` playbook. */
-export type PlaybookInput = {
+export interface PlaybookInput {
     readonly stateId: 'reviewCommit';
     readonly sourceItem?: 'DECIDE-4';
     readonly playbookId: typeof REVIEW_PLAYBOOK_ID;
     readonly text: string;
-};
-/** The child machine output itself (or `undefined`), never a wrapper. */
+}
+/** A successful call yields the child's own JSON-safe machine output. */
 export type PlaybookOutput = JsonValue | undefined;
-/** Public output interface of the packaged builtin `review` workflow. */
-export type ReviewOutput = {
+/** Public output interface of the packaged builtin `review`. */
+export interface ReviewOutput {
     readonly noUnsettledFindings: true;
     readonly evaluatedRevision: string;
+}
+/** Sanitized completed-result evidence of the `review` call that ended DECIDE. */
+export type CompletedReviewResult = {
+    readonly playbookId: typeof REVIEW_PLAYBOOK_ID;
+    readonly status: 'ok';
+    readonly output?: JsonValue;
+} | {
+    readonly playbookId: typeof REVIEW_PLAYBOOK_ID;
+    readonly status: 'aborted' | 'error';
+    readonly error: CompactError;
 };
+/** The machine reads no input: the caller's topic arrives on `START_DECIDE`. */
 export type DecideInput = Readonly<Record<string, never>>;
 export type ReviewStatus = 'aborted' | 'error';
 /**
  * Typed run context. A text field holds `''` until its producer runs; every
- * transition that reads one guards it as non-empty first.
+ * transition that enters a consumer guards the fields it reads as non-empty.
  */
-export type DecideContext = {
-    /** `<caller-topic>`: set by START_DECIDE or a restarting BOSS_INTERRUPT. */
+export interface DecideContext {
+    /** `<caller-topic>`: set by `START_DECIDE` or a restarting interrupt. */
     readonly callerTopic: string;
-    /** Branch-staged results; the parallel join promotes them atomically. */
-    readonly stagedCoderProposed: boolean;
+    /** Branch-staged proposals; the parallel join promotes them atomically. */
+    readonly stagedCoderProposal: string;
     readonly stagedReviewerProposal: string;
-    /** Promoted proposal results. */
-    readonly coderProposed: boolean;
-    /** `<reviewer-proposal>`. */
+    /** `<coder-proposal>`: Coder's promoted independent proposal. */
+    readonly coderProposal: string;
+    /** `<reviewer-proposal>`: Reviewer's promoted independent proposal. */
     readonly reviewerProposal: string;
-    /** `<coder-output>`. */
+    /** `<coder-output>`: Coder's verbatim final synthesis text. */
     readonly coderOutput: string;
     /** `<decide-commit>`: DECIDE-3's accepted, receipt-owned `latestCommit`. */
     readonly decideCommit: string;
-    /** REVIEW's evaluated repository revision on approval. */
+    /** Revision evaluated by the passing `review`. */
     readonly evaluatedRevision: string;
+    /** Reported status when `review` did not pass the commit. */
     readonly reviewStatus: ReviewStatus | null;
+    /** Compact failure DECIDE reports when `review` did not pass the commit. */
     readonly reviewError: CompactError | null;
+    /** Sanitized evidence of the `review` result that ended DECIDE. */
+    readonly reviewEvidence: CompletedReviewResult | null;
     readonly lastError: ErrorRecord | null;
     readonly pendingBossQuestions: PendingBossQuestions;
     readonly bossReplies: BossReplies;
-};
+}
 export type DecideEvent = {
     readonly type: 'START_DECIDE';
     readonly callerTopic: string;
@@ -175,7 +198,7 @@ export type DecideOutput = {
 };
 /**
  * Recognizes an authored rejected child result: a validated public result
- * whose status is `aborted` or `error`, or `ok` at the child's authored
+ * whose status is `aborted` or `error`, or `ok` at the child's own authored
  * failure terminal. Anything else is a control-plane error.
  */
 export declare function authoredChildResult(error: unknown, expectedPlaybookId: string): PlaybookCallResult | undefined;

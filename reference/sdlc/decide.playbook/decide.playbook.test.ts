@@ -1294,12 +1294,14 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
           '> Original intent: Choose <coder-llm> behavior.',
           '> Keep mapped roles shared.',
           `> Review scope: the \`decide\`-owned commit ${DEFAULT_COMMIT_OID} and its resulting repository state.`,
+          "> Coder's independent proposal: Coder proposal with literal <caller-topic> token.",
           '> Coder output: Committed the synthesis with literal <decide-commit> token.',
         ].join('\n'),
       },
     ]);
+    // REVIEW receives Coder's own proposal verbatim, never Reviewer's.
     expect(nestedRequests[0].text).not.toContain(reviewerProposal);
-    expect(nestedRequests[0].text).not.toContain(coderProposal);
+    expect(nestedRequests[0].text).toContain(coderProposal);
     expect(Object.fromEntries(playerSessions.tokens)).toEqual({
       coder: 'coder-token-2',
       reviewer: 'reviewer-token-1',
@@ -1329,18 +1331,15 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
     expect(JSON.stringify(snapshot)).not.toContain('dev.reviewer');
     expect(JSON.stringify(snapshot)).not.toContain('GPT-5.6 Sol');
     expect(JSON.stringify(snapshot)).not.toContain('Claude Opus 5');
-    // DECIDE-1 declares no `coderProposal`: nothing relays Coder's own
-    // proposal (Coder synthesizes from its own conversation), so the machine
-    // context keeps Reviewer's relayed proposal and only that Coder proposed.
+    // DECIDE-1 declares `coderProposal`, which DECIDE-4 relays to REVIEW, so
+    // the machine context keeps both promoted proposals verbatim.
     const machineContext = (
       snapshot as unknown as { machine: { context: Record<string, unknown> } }
     ).machine.context;
     expect(machineContext).toMatchObject({
-      coderProposed: true,
+      coderProposal,
       reviewerProposal,
     });
-    expect(machineContext).not.toHaveProperty('coderProposal');
-    expect(JSON.stringify(machineContext)).not.toContain(coderProposal);
     expect(statuses).toContain('START_DECIDE');
     expect(statuses).toContain(
       '⤷ coder: Coder is independently proposing a design for the topic.',
@@ -1349,10 +1348,10 @@ describe('DECIDE parallel proposals and nested REVIEW handoff', () => {
       '⤷ reviewer: Reviewer is independently proposing a design for the topic.',
     );
     expect(statuses).toContain(
-      '⤷ coder: Coder is synthesizing both proposals into DRs and/or spec items and committing the result.',
+      '⤷ coder: Coder synthesizes both proposals into the necessary DRs and/or spec items and commits the result as one new commit.',
     );
     expect(statuses).not.toContain(
-      'The REVIEW playbook is reviewing the decide-owned commit.',
+      'The review playbook examines the decide-owned commit.',
     );
 
     const fsmPayloads = telemetry
@@ -1808,21 +1807,18 @@ describe('DECIDE governed adjudicator prompt', () => {
         'A field listed as runtime-supplied is owned by presentation, effect, or runtime evidence; the runtime fills it itself, and a reply that includes one is structurally invalid.',
       );
     }
-    // DECIDE-1's `proposed` declares no field: nothing relays Coder's own
-    // proposal, so the arm names no runtime-supplied field at all.
     expect(promptFor('DECIDE-1')).toContain(
       '- `proposed` — Coder affirmatively provided a complete design proposal; a progress report, status update, or promise of a later proposal supports no proposal outcome.\n' +
         '  Reply exactly: { "guard": "proposed" }\n' +
-        '- `needsBossReply` — ',
+        '  Runtime-supplied, do not include: `coderProposal` (presentation-owned)',
     );
-    expect(promptFor('DECIDE-1')).not.toContain('coderProposal');
     expect(promptFor('DECIDE-2')).toContain(
       '- `proposed` — Reviewer affirmatively provided a complete design proposal; a progress report, status update, or promise of a later proposal supports no proposal outcome.\n' +
         '  Reply exactly: { "guard": "proposed" }\n' +
         '  Runtime-supplied, do not include: `reviewerProposal` (presentation-owned)',
     );
     expect(promptFor('DECIDE-3')).toContain(
-      '- `committed` — Coder committed the synthesized design as one new commit.\n' +
+      '- `committed` — Coder synthesized the proposals into the necessary DRs and/or spec items and committed the result as one new commit.\n' +
         '  Reply exactly: { "guard": "committed" }\n' +
         '  Runtime-supplied, do not include: `coderOutput` (presentation-owned), `latestCommit` (effect-owned)',
     );
@@ -1867,6 +1863,9 @@ describe('DECIDE governed adjudicator prompt', () => {
     expect(nestedRequests).toHaveLength(1);
     expect(nestedRequests[0].text).toContain(
       `> Review scope: the \`decide\`-owned commit ${DEFAULT_COMMIT_OID} and its resulting repository state.`,
+    );
+    expect(nestedRequests[0].text).toContain(
+      "> Coder's independent proposal: Coder proposal",
     );
     expect(nestedRequests[0].text).toContain(
       '> Coder output: Committed proposal',
@@ -3109,7 +3108,7 @@ describe('DECIDE terminal settlement from REVIEW', () => {
     ).resolves.toMatchObject({
       outcome: 'terminal',
       stateDescription:
-        'DECIDE completed: REVIEW established no unsettled findings for the decide-owned commit at the reported evaluated revision.',
+        'DECIDE completed: review established no unsettled findings for the decide-owned commit at the reported evaluated revision.',
       output: {
         decideCommit: DEFAULT_COMMIT_OID,
         evaluatedRevision: EVALUATED_REVISION,
@@ -3152,7 +3151,7 @@ describe('DECIDE terminal settlement from REVIEW', () => {
       ).resolves.toMatchObject({
         outcome: 'terminal',
         stateDescription:
-          "DECIDE reported REVIEW's abort, failure, or unestablished result to its caller with the last decide-owned commit.",
+          "DECIDE reported review's abort, failure, or unestablished result to its caller with the last decide-owned commit.",
         output: {
           lastDecideCommit: DEFAULT_COMMIT_OID,
           noUnsettledFindings: false,
@@ -3193,12 +3192,12 @@ describe('DECIDE terminal settlement from REVIEW', () => {
       expect(result).toMatchObject({
         outcome: 'terminal',
         stateDescription:
-          "DECIDE reported REVIEW's abort, failure, or unestablished result to its caller with the last decide-owned commit.",
+          "DECIDE reported review's abort, failure, or unestablished result to its caller with the last decide-owned commit.",
         output: {
           lastDecideCommit: DEFAULT_COMMIT_OID,
           noUnsettledFindings: false,
           reviewStatus: 'error',
-          error: { name: 'ReviewContractError' },
+          error: { name: 'ReviewNotEstablished' },
         },
       } satisfies Partial<PlaybookRunResult>);
       await runtime.dispose();
@@ -3230,7 +3229,7 @@ describe('DECIDE terminal settlement from REVIEW', () => {
     expect(result).toMatchObject({
       outcome: 'terminal',
       stateDescription:
-        'DECIDE completed: REVIEW established no unsettled findings for the decide-owned commit at the reported evaluated revision.',
+        'DECIDE completed: review established no unsettled findings for the decide-owned commit at the reported evaluated revision.',
     });
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       decideCommit: DEFAULT_COMMIT_OID,
