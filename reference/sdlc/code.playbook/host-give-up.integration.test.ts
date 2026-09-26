@@ -52,7 +52,7 @@ class ScriptedAdapter implements AgentAdapter {
     prompt: string,
     _options?: AgentOptions,
   ): AsyncGenerator<AgentEvent, void, void> {
-    if (prompt.startsWith('Check whether existing instructions already answer')) {
+    if (prompt.includes('Check whether existing instructions already answer')) {
       yield createEvent('done', this.agent, { status: 'success', result: '{"instructionIndex":null}', usage: { toolUses: 0 }, durationMs: 1 }, 'question-check');
       return;
     }

@@ -34,11 +34,16 @@ interface PlaybookCaptainUnresolvedEffectSettlementInput {
 }
 type SnapshotAgentEnvelope = DeepReadonly<Omit<SessionAgent, 'model' | 'effort' | 'fastMode'>>;
 type PlayerLedgerSnapshotEntry = DeepReadonly<PlayerLedgerEntry>;
-type RecoveryContinuation = {
+type RecoveryContinuation = ({
     kind: 'reply';
 } | {
     kind: 'runtime';
     actionId: string;
+} | {
+    kind: 'settle';
+    status: 'ok' | 'failed' | 'rejected';
+}) & {
+    facts?: readonly string[];
 };
 export interface PlaybookCaptainDeps {
     /** Stop the host's active turn, including admitted tool calls, on preparation expiry. */
@@ -151,6 +156,7 @@ export interface PlaybookCaptainFrameSnapshot {
     readonly parentSessionId?: string;
     readonly parentCallId?: string;
     readonly request?: string;
+    readonly inputs?: readonly string[];
     readonly options: JsonValue;
     readonly roleBindings: Readonly<Record<string, string>>;
     readonly runtime: DeepReadonly<PlaybookRuntimeSnapshot>;
@@ -256,7 +262,7 @@ export interface PlaybookCaptainShell extends Captain {
      * `handleBossTurn` (CAPTAIN-7).
      */
     submitShellAction?(actionId: string): string;
-    /** Resume a host-validated saved preparation point using its exact input. */
+    /** Resume a host-validated saved recovery point using its exact input. */
     selectRecovery?(text: string, instruction: string, continuation?: RecoveryContinuation): void;
 }
 export declare function assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[];

@@ -116,7 +116,7 @@ The hint store shall encode `<id>.hints.json` as exactly `{v:1,sessionId,checkpo
 
 ### session-storage-7
 
-When saving recovery, the store shall remove provider tokens from the current checkpoint, preparation recovery point, retained recovery generations and every nested snapshot or ledger copy, using these schema-aware transformations:
+When saving recovery, the store shall remove provider tokens from the current checkpoint, recovery point, retained recovery generations and every nested snapshot or ledger copy, using these schema-aware transformations:
 
 | Location | Portable form |
 | --- | --- |

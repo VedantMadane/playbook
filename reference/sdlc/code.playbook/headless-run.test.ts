@@ -2249,6 +2249,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(failed.stdout).toBe('');
     expect(failed.inputs).toEqual([]);
     expect(failed.stderr).toContain('synthetic post-initialization failure');
+    expect(failed.stderr).not.toContain('The latest work is saved.');
     await expect(
       stat(join(sessionsDir, `${firstId}.json`)),
     ).rejects.toMatchObject({ code: 'ENOENT' });
@@ -2259,6 +2260,13 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     });
     expect(retried.result.code).toBe(0);
     expect(retried.inputs).toEqual(['now run']);
+    const refused = await headlessHarness(['run', '--session', firstId, 'never admitted'], {
+      sessionsDir,
+      createHostRuntime: async () => { throw new Error('setup refused for existing session'); },
+    });
+    expect(refused.result.code).toBe(1);
+    expect(refused.stderr).toContain('setup refused for existing session');
+    expect(refused.stderr).not.toContain('The latest work is saved.');
   });
 
   it('starts fresh while the newest settled predecessor lease is live', async () => {

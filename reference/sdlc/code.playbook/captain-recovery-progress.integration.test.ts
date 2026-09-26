@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { QUESTION, questionRegistry } from '../../../acceptance-fixtures/captain-question-flow.js';
 import { createEvent } from '@sublang/cligent';
 import { assign, createMachine } from 'xstate';
 import { expect, it } from 'vitest';
@@ -193,6 +194,9 @@ it.each([
   'adopted-assessment',
   'vanished',
   'counts',
+  'auto-child',
+  'child-cancel',
+  'save-failure',
 ])(
   'keeps the stopped step through %s recovery and process loss',
   async (kind) => {
@@ -210,14 +214,19 @@ it.each([
     let interrupted = false;
     const players: string[] = [];
     const closings: string[] = [];
-    let failedFinish = false;
+    let failedFinish = kind === 'auto-child';
+    let leafCalls = 0;
     const records: any[] = [];
     const committed = kind === 'adjudication' || kind === 'adopted-assessment';
     class Adapter {
       readonly agent = 'claude-code';
       async *run(prompt: string) {
         let result = '{"guard":"done"}';
-        if (
+        if (prompt.includes('Check whether existing instructions already answer')) {
+          result = kind === 'auto-child' ? '{"instructionIndex":0}' : '{"instructionIndex":null}';
+        } else if (prompt.includes('Classify the following Boss message')) {
+          result = '{"type":"BOSS_REPLY","questionId":"choice"}';
+        } else if (
           prompt.includes('You are Captain preparing an interrupted playbook')
         ) {
           if (allow) await rm(join(dir, 'stray'), { force: true });
@@ -243,6 +252,7 @@ it.each([
           closings.push(prompt);
           result = 'Work has stopped at the next step.';
         } else if (prompt.includes('This is hidden control work.')) {
+          if (kind === 'auto-child' && prompt.includes('needsBossReply') && leafCalls === 1) result = JSON.stringify({ guard: 'needsBossReply' });
           if (committed && !judgeFailed) {
             judgeFailed = true;
             throw new Error('assessment network interruption');
@@ -254,7 +264,7 @@ it.each([
               await writeFile(join(dir, 'commit.txt'), 'work');
               git('add', 'commit.txt');
               git('commit', '-qm', 'work');
-            } else if (!allow && kind !== 'counts') {
+            } else if (!allow && !['counts', 'auto-child'].includes(kind)) {
               if (kind === 'restored')
                 await writeFile(join(dir, 'stray'), 'generated');
               else throw new Error('missing local prerequisite');
@@ -264,8 +274,14 @@ it.each([
               failedFinish = true;
               throw new Error('parent needs recovery');
             }
+          } else if (kind === 'auto-child') {
+            leafCalls++;
+          } else if (kind === 'child-cancel' && !interrupted) {
+            interrupted = true;
+            controller!.host.abortActiveTurn('cancel active child');
+            throw new Error('child cancelled');
           } else if (failLeaf) throw new Error('downstream interruption');
-          result = 'Work complete.';
+          result = kind === 'auto-child' && leafCalls === 1 ? QUESTION : 'Work complete.';
         }
         yield createEvent(
           'done',
@@ -295,8 +311,8 @@ it.each([
       await writeFile(join(dir, '.gitignore'), 'sessions/\n');
       git('add', 'config.yaml', '.gitignore');
       git('commit', '-qm', 'config');
-      const flow = entry('flow', committed, true, kind === 'counts'),
-        leaf = entry('leaf', false);
+      const flow = entry('flow', committed, true, ['counts', 'auto-child'].includes(kind)),
+        leaf = kind === 'auto-child' ? { ...questionRegistry, id: 'leaf', command: 'leaf', summaryPolicy: { stateCountLabels: { consult: 'child step' }, copyPasteGuardNames: [], savedCountsLine: () => 'Wrong leaf owner' } } : entry('leaf', false);
       const loadModule = async (id: string) => ({
         default: id.endsWith('leaf')
           ? leaf
@@ -343,12 +359,13 @@ it.each([
           return {
             ...lease,
             async checkpointRecovery(point: any) {
+              if (kind === 'save-failure' && allow && point.continuation?.kind === 'settle') throw new Error('optional save failed');
               const prior = await lease.read();
               if (
                 allow &&
                 !interrupted &&
                 ['step', 'adjudication', 'restored'].includes(kind) &&
-                !point.continuation &&
+                point.continuation?.kind === 'settle' &&
                 point.snapshot.frames.length === 2
               ) {
                 interrupted = true;
@@ -486,6 +503,16 @@ it.each([
       const first = await controller.handleBossTurn(
         '/flow original flow request',
       );
+      if (kind === 'auto-child') {
+        expect(first.snapshot.mode, closings.at(-1)).toBe('chat');
+        const closing = closings.at(-1)!;
+        expect(closing).toContain('2 child steps');
+        expect(closing).toContain('1 parent finish');
+        expect(closing).toContain('flow saved 4 rounds.');
+        expect(closing).not.toContain('Wrong leaf owner');
+        expect(first.snapshot.journal.filter(({ kind }: any) => kind === 'action').map(({ payload }: any) => payload.action)).toEqual(['start', 'recover']);
+        return;
+      }
       expect(first.snapshot.frames.at(-1).runtime.state.stateId).toBe('failed');
       const sourceSession = first.snapshot.frames[0].sessionId;
       if (kind === 'counts') {
@@ -495,8 +522,8 @@ it.each([
         expect(completed.snapshot.mode).toBe('chat');
         const closing = closings.at(-1)!;
         expect(closing).toContain('1 child step');
-        expect(closing).toContain('1 parent finish');
-        expect(closing).toContain('flow saved 2 rounds.');
+        expect(closing).toContain('2 parent finishs');
+        expect(closing).toContain('flow saved 3 rounds.');
         expect(closing).not.toContain('leaf saved');
         const actions = completed.snapshot.journal.filter(
           ({ kind }: any) => kind === 'action',
@@ -523,16 +550,35 @@ it.each([
       }
       if (kind === 'vanished') refusePoint = true;
       allow = true;
+      if (kind === 'save-failure') {
+        failLeaf = false;
+        const completed = await controller.recover('Continue.');
+        expect(completed.snapshot.mode).toBe('chat');
+        expect(completed.snapshot.lastSettlementStatus).toBe('ok');
+        expect(closings.at(-1)).toContain('Settlement status: ok');
+        expect(JSON.stringify(completed.snapshot.journal.filter(({ kind }: any) => kind === 'outcome').at(-1).payload)).toContain('/flow completed');
+        return;
+      }
       await expect(
         kind === 'adopted-assessment'
           ? controller.submitRuntimeAction('retry:adjudication')
           : controller.recover('Prepare and continue.'),
       ).rejects.toThrow();
       const saved = await controller.read();
+      if (kind === 'child-cancel') {
+        expect(saved.state).toBe('settled');
+        expect(saved.snapshot.frames.map((f: any) => f.playbookId)).toEqual(['flow', 'leaf']);
+        expect(saved.snapshot.frames[0].runtime.suspendedCall.playbookId).toBe('leaf');
+        expect(controller.listRuntimeActions().some((a: any) => a.id.startsWith('retry:'))).toBe(true);
+        failLeaf = false;
+        expect((await controller.recover('Continue the child.')).snapshot.mode).toBe('chat');
+        expect(players.filter((prompt) => prompt.startsWith('flow work:'))).toHaveLength(2);
+        return;
+      }
       expect(saved.state).toBe('uncertain');
       expect(saved.uncertain.recovery).toBeDefined();
       if (kind !== 'adopted-assessment' && kind !== 'vanished') {
-        expect(saved.uncertain.recovery.continuation).toBeUndefined();
+        expect(saved.uncertain.recovery.continuation).toMatchObject({ kind: 'settle' });
         expect(
           saved.uncertain.recovery.snapshot.frames.map(
             (frame: any) => frame.playbookId,
@@ -558,9 +604,13 @@ it.each([
       const last = await controller.recover();
       expect(last.state).toBe('settled');
       expect(last.snapshot.lastSettlementStatus).toBe(
-        vanish ? 'rejected' : 'ok',
+        vanish ? 'rejected' : kind === 'adopted-assessment' ? 'ok' : 'failed',
       );
-      if (!vanish) expect(last.snapshot.mode).toBe('chat');
+      if (!vanish && kind !== 'adopted-assessment') {
+        expect(last.snapshot.mode).toBe('engaged.parked');
+        const completed = await controller.recover('Continue child.');
+        expect(completed.snapshot.mode).toBe('chat');
+      }
       if (committed) {
         expect(
           players.filter((prompt) => prompt.startsWith('flow work:')),

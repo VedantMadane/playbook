@@ -6,6 +6,8 @@ import { createCaptainSessionStore, projectCaptainSessionStructure } from './ses
 import { createCaptainSessionHost, executionConfigFromPlan, installRetainedGenerationsForLaunch, validateFrozenExecutionConfig } from './run.js';
 import { createReplayRecordObserver } from './replay-observer.js';
 
+const RECOVERY_REOPEN = "This controller stopped with an uncertain turn. Dispose it, reopen with mode: 'recover', then call recover() without new input.";
+
 /** Own one session lease and the same durable turn transaction as the CLIs. */
 export async function openSessionHost(options) {
   const store = options.store ?? createCaptainSessionStore({ sessionsDir: options.sessionsDir });
@@ -47,12 +49,13 @@ export async function openSessionHost(options) {
     const execute = async (input, retry, actionId, shellActionId) => {
       if (closed || closing) throw new Error('session host is closing');
       if (active) throw new Error('session turn is already active');
+      let attemptId;
       const operation = (async () => {
         let prior = await lease.read();
         if (retry) {
           if (prior?.state !== 'uncertain') throw new Error('session has no uncertain turn to retry');
           input = prior.uncertain.input;
-          if (!retryPending) throw new Error('retry requires reopening the uncertain checkpoint');
+          if (!retryPending) throw new Error(RECOVERY_REOPEN);
         } else if (prior?.state !== 'settled') throw new Error(prior?.uncertain?.recovery ? 'session has an interrupted step; select Retry to resume it' : 'session has an uncertain turn; select Retry or Discard');
         if (actionId === undefined && shellActionId === undefined && (typeof input !== 'string' || input.trim().length === 0)) throw new Error('session input must be nonempty');
         await created.reconcileRepositoryEffects();
@@ -67,7 +70,7 @@ export async function openSessionHost(options) {
           input = created.shell.submitShellAction(shellActionId);
         }
         terminal = undefined; replies = [];
-        const attemptId = options.createAttemptId?.() ?? randomUUID();
+        attemptId = options.createAttemptId?.() ?? randomUUID();
         const marked = retry ? await lease.beginRetry({ expectedAttemptId: prior.uncertain.attemptId, nextAttemptId: attemptId }) : await lease.beginTurn({ input, attemptId, attemptedExecutionProjection: config });
         retryPending = false;
         await replay.flushStoredRecords();
@@ -83,7 +86,7 @@ export async function openSessionHost(options) {
         return record;
       })().catch(async (error) => {
         try {
-          const parked = created.getInterruptedSettlement();
+          const parked = created.getInterruptedSettlement(attemptId);
           if (parked?.state === 'settled') {
             record = parked;
             await replay.flushStoredRecords();
@@ -109,6 +112,7 @@ export async function openSessionHost(options) {
       return closing;
     };
     const recover = async (input) => {
+      if ((await lease.read())?.state === 'uncertain' && !retryPending) throw new Error(RECOVERY_REOPEN);
       if (retryPending) {
         if (input !== undefined) throw new Error('Resume the recorded interrupted instruction before supplying new input');
         return execute(undefined, true);

@@ -2195,11 +2195,11 @@ Actions derive from the live snapshot, only at the same safe point the
 parked-session snapshot uses (actor status `active`, quiescent, no pending
 nested call); anywhere else `actions` is empty while the rest of the view
 still describes the state.
-While effect-possible outcome evidence remains unresolved and neither saved-result assessment nor verified read-only restoration is eligible under [recovery.md](../specs/packages/recovery.md), the view shall omit its pending Boss questions and state description and shall replace every ordinary action with exactly `reconcile:unresolved-effect` labeled `Retry unresolved effect reconciliation` and `abandon:unresolved-effect` labeled `Abandon unresolved workflow attempt`.
+While effect-possible outcome evidence remains unresolved, the view shall omit its pending Boss questions and state description and shall replace every ordinary action with exactly `reconcile:unresolved-effect` labeled `Retry unresolved effect reconciliation` and `abandon:unresolved-effect` labeled `Abandon unresolved workflow attempt`.
 A valid invocation checkpoint takes precedence over entry-event replay: it retries only the stopped invocation after its effect checks, using `retry:<EVENT_TYPE>` for the same entry target or `retry:step` otherwise.
 Saved-result assessment (`retry:adjudication`) never repeats the player, and verified read-only restoration (`retry:restored-step`) records an exact baseline check before replay.
-These retries have standing `ready`; an unsafe checkpoint grants no replay.
-Two ordinary action families use source state descriptions; an invocation checkpoint replaces only entry-event retry, leaving eligible public state jumps available:
+These retries have standing `ready`; an unsafe checkpoint grants no replay. Saved-result assessment withholds ordinary state jumps. Reconciliation and abandonment remain available whenever effects are unresolved, even alongside an eligible assessment or restoration.
+Two ordinary action families use source state descriptions; an ordinary invocation checkpoint replaces entry-event retry, leaving eligible public state jumps available only when assessment and unresolved-effect fences are absent:
 
 - **Failure-state retry** — while the singular state id is the recoverable
   failure state and the live snapshot accepts the retry event sourced below,

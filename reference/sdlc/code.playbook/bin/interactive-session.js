@@ -518,7 +518,7 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
           async runBossTurn(...args) {
             try { return await host.runBossTurn(...args); }
             catch (error) {
-              if (created.getInterruptedSettlement?.()) return;
+              if (created.getInterruptedSettlement?.(activeTurn?.attemptId)) return;
               throw error;
             }
           },

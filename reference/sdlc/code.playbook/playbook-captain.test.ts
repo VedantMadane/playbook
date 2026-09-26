@@ -6951,6 +6951,58 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     expect(failurePrompt).toContain('invalid nested visible set');
   });
 
+  it('disposes an exportable child when an ordinary error precedes input delivery', async () => {
+    let childResult: unknown;
+    const code = fakeCodeEntry(async (runtime, runtimeTurn) => {
+      if (!runtime.ports) throw new Error('runtime ports missing');
+      childResult = await runtime.ports.callPlaybook(
+        {
+          callId: 'code:docs:visibility',
+          playbookId: 'docs',
+          text: 'open docs',
+        },
+        runtimeTurn.signal,
+      );
+      return quiescentResult();
+    });
+    const docs = fakePlaybookEntry('docs', 'docs', async () =>
+      quiescentResult('drafting'),
+    );
+    const createChild = docs.entry.createRuntime;
+    docs.entry.createRuntime = (...args: any[]) => {
+      const child = createChild(...args);
+      child.describe = () => ({ state: quiescentResult('drafting').state, pendingQuestions: [], actions: [] });
+      // A describable child still must not be retained before input delivery.
+      child.exportSnapshot = () => ({}) as PlaybookRuntimeSnapshot;
+      return child;
+    };
+    // Give the child one role its caller does not map so the visibility
+    // request is observably the explicitly bound child leaf.
+    docs.entry.requiredRoleIds = ['docs'];
+    delete code.entry.summaryPolicy;
+    delete docs.entry.summaryPolicy;
+    const shell = makeShell([code, docs], {
+      sessionIds: [ROOT_ID, CHILD_ID],
+    });
+    const session = stubSession();
+    const context = stubContext();
+    const emitStatus = session.session.emitStatus;
+    session.session.emitStatus = async (...args) => {
+      if (String(args[0]).includes('called by')) throw new Error('status writer failed before delivery');
+      return emitStatus(...args);
+    };
+
+    await shell.init!(session.session);
+    await expect(
+      shell.handleBossTurn(turn('/code open a nested child'), context.context),
+    ).resolves.toBeUndefined();
+
+    expect(docs.runtimes[0]?.inputs).toEqual([]);
+    expect(docs.runtimes[0]?.disposeCount).toBe(1);
+    expect(childResult).toMatchObject({ state: 'settled', result: { status: 'error', error: { message: 'status writer failed before delivery' } } });
+    await shell.dispose!();
+  });
+
   it('uses the parent invocation lifetime signal for the child initial turn', async () => {
     const invocation = new AbortController();
     const childStarted = deferred<void>();
@@ -7021,6 +7073,30 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     });
     expect(docs.runtimes[0]?.disposeCount).toBe(1);
     expect(code.runtimes[0]?.disposeCount).toBe(0);
+  });
+
+  it('keeps a parked child when a finished Boss turn is cancelled later', async () => {
+    const code = fakeCodeEntry(async (runtime, input) => {
+      const child = await runtime.ports!.callPlaybook({ callId: 'code:docs:lifetime', playbookId: 'docs', text: 'open docs' }, input.signal);
+      if (child.state !== 'suspended') throw new Error('expected child pause');
+      return suspendedResult({ callId: 'code:docs:lifetime', playbookId: 'docs', childSessionId: child.childSessionId });
+    });
+    const docs = fakePlaybookEntry('docs', 'docs', async () => quiescentResult('drafting'));
+    delete code.entry.summaryPolicy;
+    delete docs.entry.summaryPolicy;
+    const shell = makeShell([code, docs], { sessionIds: [ROOT_ID, CHILD_ID] });
+    const session = stubSession();
+    const context = stubContext();
+    const oldTurn = new AbortController();
+    context.context.signal = oldTurn.signal;
+    await shell.init!(session.session);
+    await shell.handleBossTurn(turn('/code open child'), context.context);
+    oldTurn.abort(new Error('old Boss turn ended'));
+    await shell.handleBossTurn(turn('/docs continue child', 2), stubContext().context);
+    expect(docs.runtimes[0]?.disposeCount).toBe(0);
+    expect(code.runtimes[0]?.resumes).toEqual([]);
+    expect(docs.runtimes[0]?.inputs.map(({ text }) => text)).toEqual(['open docs', 'continue child']);
+    await shell.dispose!();
   });
 
   it('serializes invocation-abort cleanup against a simultaneous child return', async () => {
@@ -8218,7 +8294,16 @@ describe('Playbook Captain complete session snapshots (CAPTAIN-41/42/43)', () =>
     ).toBe('code-coder');
 
     const clone = (): any => JSON.parse(JSON.stringify(base));
+    const withRequest = clone();
+    withRequest.frames[0].request = 'Original task';
+    withRequest.frames[0].inputs = ['Later instruction'];
+    expect(() => assertPlaybookCaptainShellSnapshot(withRequest)).not.toThrow();
     const intrinsicMutations: Array<() => unknown> = [
+      ...[ [0, 'request', ' '], [1, 'request', 'child task'], [0, 'inputs', ['']], [1, 'inputs', ['child answer']] ].map(([index, key, field]) => () => {
+        const value = clone();
+        value.frames[index as number][key as string] = field;
+        return value;
+      }),
       () => {
         const value = clone();
         value.captain.agent.model = { kind: 'value', value: 'forbidden' };

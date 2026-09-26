@@ -414,6 +414,10 @@ Automatic discovery belongs only to the ordinary
 `~/.spex/sessions` profile with no `SPEX_HOME` or `sessions` override; custom
 profiles require an explicit migration request.
 
+Captain may answer a player from the original task when it already answers the question. It reports what it reused, respects later Boss instructions and never sends that original answer twice automatically.
+
+All applications sharing a session store, including Spex and the CLI, must upgrade together before using these recovery fields. Hosts from 15.1.x cannot read the extended records; see [the compatibility decision](../specs/decisions/068-interrupted-continuation-settlement.md).
+
 A single recovery entry point handles either a paused step or an uncertain attempt:
 
 ```ts
@@ -424,11 +428,13 @@ try {
 } finally { await controller.dispose(); }
 ```
 
-For uncertainty it uses the saved instruction and exact attempted settings. It checks later effects against a saved point before resuming it; without one, it checks whether the original turn can safely repeat. Later commits or pending-operation changes refuse replay, and saved assessment/restoration permits only its own verified evidence changes. It never chooses discard. For an already settled pause, `recover(bossInstruction)` requires Boss's instruction or answer and passes it through the same Captain turn as CLI input; an ordinary answer does not force preparation. New input cannot replace an uncertain instruction before recovery.
+For uncertainty it uses the saved instruction and exact attempted settings. It checks later effects against a saved point before resuming it; without one, it checks whether the original turn can safely repeat. Work beyond a saved position is preserved for review or abandonment instead of being repeated, and saved assessment/restoration permits only its own verified evidence changes. It never chooses discard. For an already settled pause, `recover(bossInstruction)` requires Boss's instruction or answer and passes it through the same Captain turn as CLI input; an ordinary answer does not force preparation. New input cannot replace an uncertain instruction before recovery.
+
+If a turn fails and leaves this open controller uncertain, dispose it and reopen with `mode:'recover'` before calling `recover()` without new input.
 
 Explicit `mode:'retry'` and `retry()` remain supported. Module-free
 `discardSessionUncertain(shared, sessionId)` restores the prior recovery only
-when neither recorded effects nor a preparation recovery point prevents discard.
+when neither recorded effects nor a recovery point prevents discard.
 
 `readHistory()` returns readable history and a damaged boundary, including a
 clearly marked synthetic projection when a validated legacy journal has no

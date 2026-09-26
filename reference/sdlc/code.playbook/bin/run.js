@@ -792,11 +792,12 @@ export async function driveHeadlessCaptainTurn({
   const replies = [];
   let shell;
   let host;
+  let createdHost;
   let baselineSnapshot;
   let uncertainRecord;
   try {
     try {
-      const created = await createCaptainSessionHost({
+      const created = createdHost = await createCaptainSessionHost({
         config,
         sessionId,
         cwd,
@@ -897,7 +898,7 @@ export async function driveHeadlessCaptainTurn({
       }
     }
     try {
-      if ((await sessionLease.read?.())?.state === 'settled') {
+      if (createdHost?.getInterruptedSettlement(uncertainRecord?.uncertain?.attemptId)) {
         await writeStream(stderr, 'The latest work is saved. Continue this session with a new instruction.\n');
       }
     } catch { /* Preserve the original turn or cleanup error. */ }
@@ -984,6 +985,34 @@ function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, continuatio
     const { semanticCandidate, restored, ...physical } = boundary;
     return physical;
   });
+  const assessmentOnly = assessmentRetry && current.boundaries.length === checkpoint.boundaries.length &&
+    isDeepStrictEqual(current.logicalOperations, checkpoint.logicalOperations) &&
+    isDeepStrictEqual(withoutAssessment(currentPrefix), withoutAssessment(checkpoint.boundaries));
+  const progressed = !isDeepStrictEqual(checkpoint, current);
+  const dispatched = continuation !== undefined || snapshot.frames?.some((frame) => frame.runtime.failedEffectAttempt !== undefined);
+  const unsafe = !isDeepStrictEqual(currentPrefix, checkpoint.boundaries) ||
+    !isDeepStrictEqual(current.logicalOperations, checkpoint.logicalOperations) ||
+    current.boundaries.slice(checkpointBoundaryCount).some((boundary) => boundary.physicalReceipt?.classification !== 'unchanged');
+  if (snapshot.mode === 'engaged.parked' && progressed && !assessmentOnly && (dispatched || unsafe)) {
+    const { pendingBossQuestions: _questions, ...base } = snapshot;
+    const sourceGenerationId = snapshot.frames[0].runtime.retainedEffectSourceSessionId ?? snapshot.frames[0].rootSessionId;
+    return assertPlaybookCaptainShellSnapshot({
+      ...base,
+      effectLedger: current,
+      retainedEffectReconciliation: { sourceGenerationId, checkpoint },
+      frames: snapshot.frames.map((frame) => {
+        const sourceSessionId = frame.runtime.retainedEffectSourceSessionId ?? frame.sessionId;
+        const { recoveryCheckpoint, ...runtime } = frame.runtime;
+        return { ...frame, runtime: { ...runtime,
+          ...(frame.runtime.state.stateId === 'failed' && recoveryCheckpoint ? { recoveryCheckpoint } : {}),
+          pendingBossQuestions: [],
+          effectLedger: current,
+          retainedEffectSourceSessionId: sourceSessionId,
+          retainedEffectReconciliation: { sourceSessionId, checkpoint, interruptedTurn: true },
+        } };
+      }),
+    });
+  }
   if (!isDeepStrictEqual(currentPrefix, checkpoint.boundaries) &&
       !(assessmentRetry && isDeepStrictEqual(withoutAssessment(currentPrefix), withoutAssessment(checkpoint.boundaries)))) {
     throw new Error(
@@ -1038,7 +1067,7 @@ export async function settleInterruptedRecovery(shell, lease) {
   if (!record?.uncertain?.recovery) return;
   const settlement = shell.exportSettlement();
   if (!settlement) return;
-  return lease.settle({ attemptId: record.uncertain.attemptId, ...settlement });
+  return { attemptId: record.uncertain.attemptId, record: await lease.settle({ attemptId: record.uncertain.attemptId, ...settlement }) };
 }
 
 export async function createCaptainSessionHost({
@@ -1202,8 +1231,12 @@ export async function createCaptainSessionHost({
     }
     presentationReady = true;
     for (const record of bufferedRecords) await forwardRecord(record);
-    if (recovery) shell.selectRecovery(interrupted.uncertain.input, recovery.instruction, recovery.continuation);
-    return { shell, host, snapshot, reconcileRepositoryEffects, getInterruptedSettlement: () => interruptedSettlement };
+    const progressed = reconcileUncertainTurnReplay && sourceSnapshot?.frames?.some((frame) => frame.runtime.retainedEffectReconciliation?.interruptedTurn);
+    if (progressed) shell.selectRecovery(interrupted.uncertain.input, recovery?.instruction ?? interrupted.uncertain.input, {
+      kind: 'settle', status: 'failed', facts: [...(recovery?.continuation?.facts ?? []), 'Work progressed beyond the saved step before the process stopped. Its files and receipts are preserved. Review the later work or abandon this workflow attempt; no player work was repeated.'],
+    });
+    else if (recovery) shell.selectRecovery(interrupted.uncertain.input, recovery.instruction, recovery.continuation);
+    return { shell, host, snapshot, reconcileRepositoryEffects, getInterruptedSettlement: (attemptId) => attemptId !== undefined && interruptedSettlement?.attemptId === attemptId ? interruptedSettlement.record : undefined };
   } catch (error) {
     let cleanupError;
     try {

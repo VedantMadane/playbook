@@ -2297,7 +2297,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 retainedEffectReconciliationRequired = false;
                 return;
             }
-            const safe = retainedAdoptionCheckpointIsSafe(retained.checkpoint, current);
+            const safe = !retained.interruptedTurn && retainedAdoptionCheckpointIsSafe(retained.checkpoint, current);
             retainedEffectReconciliationRequired = !safe;
             if (safe) {
                 retainedEffectReconciliation = undefined;
@@ -2481,6 +2481,8 @@ export function createXStatePlaybookRuntime(machine, spec) {
         }
         function prepareReconstructedGovernedDelivery(state, ledger = effectLedgerMirror) {
             reconstructedGovernedDelivery = undefined;
+            if (retainedEffectReconciliation?.interruptedTurn)
+                return;
             if (state.stateId === undefined ||
                 state.activeStateIds.length !== 1) {
                 return;
@@ -2630,10 +2632,21 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 const checkpointLength = retainedEffectReconciliation?.checkpoint
                     .boundaries.length ?? 0;
                 for (const boundary of current.boundaries.slice(checkpointLength)) {
-                    if (boundary.physicalReceipt?.classification === 'unchanged') {
+                    if (!retainedEffectReconciliation?.interruptedTurn && boundary.physicalReceipt?.classification === 'unchanged') {
                         continue;
                     }
                     boundaryIds.add(boundary.boundaryId);
+                }
+            }
+            if (retainedEffectReconciliation?.interruptedTurn) {
+                const prior = retainedEffectReconciliation.checkpoint;
+                for (const operation of current.logicalOperations) {
+                    if (!isDeepStrictEqual(operation, prior.logicalOperations.find(({ operationId }) => operationId === operation.operationId)))
+                        operationIds.add(operation.operationId);
+                }
+                for (const [index, boundary] of current.boundaries.entries()) {
+                    if (!isDeepStrictEqual(boundary, prior.boundaries[index]))
+                        boundaryIds.add(boundary.boundaryId);
                 }
             }
             for (const boundaryId of [...boundaryIds]) {
@@ -5963,7 +5976,8 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     : undefined;
                 const failedEffectAttempt = hasGovernedPlayerStates &&
                     state.stateId === 'failed' &&
-                    failedAttemptMatchesCurrentLedger(effectLedgerMirror)
+                    failedAttemptMatchesCurrentLedger(retainedEffectReconciliation?.interruptedTurn
+                        ? retainedEffectReconciliation.checkpoint : effectLedgerMirror)
                     ? {
                         boundaryPrefix: failedEffectBoundaryPrefix,
                         attemptId: failedGovernedAttemptId ?? null,

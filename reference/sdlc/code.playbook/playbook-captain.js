@@ -1370,6 +1370,7 @@ export function assertPlaybookCaptainShellSnapshot(value) {
             'parentSessionId',
             'parentCallId',
             'request',
+            'inputs',
             'options',
             'roleBindings',
             'runtime',
@@ -1387,6 +1388,8 @@ export function assertPlaybookCaptainShellSnapshot(value) {
         const runtime = assertPlaybookRuntimeSnapshot(frame.runtime, playbookId, { allowSuspendedCall: true });
         if (frame.request !== undefined && (index !== 0 || !snapshotString(frame.request, 'root frame request').trim()))
             throw new TypeError('Only a root frame may carry a nonempty request');
+        if (frame.inputs !== undefined && (index !== 0 || !Array.isArray(frame.inputs) || frame.inputs.some((input) => typeof input !== 'string' || !input.trim())))
+            throw new TypeError('Only a root frame may carry delivered input strings');
         const options = frame.options;
         const roleBindings = snapshotFrameRoleBindings(frame.roleBindings, `Captain shell snapshot.frames[${index}].roleBindings`);
         normalizedFrames.push({
@@ -1397,6 +1400,7 @@ export function assertPlaybookCaptainShellSnapshot(value) {
             ...(parentSessionId === undefined ? {} : { parentSessionId }),
             ...(parentCallId === undefined ? {} : { parentCallId }),
             ...(frame.request === undefined ? {} : { request: frame.request }),
+            ...(frame.inputs === undefined ? {} : { inputs: frame.inputs }),
             options,
             roleBindings,
             runtime,
@@ -2259,6 +2263,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     'parentSessionId',
                     'parentCallId',
                     'request',
+                    'inputs',
                     'options',
                     'roleBindings',
                     'runtime',
@@ -2287,6 +2292,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     : snapshotString(frame.parentCallId, `${framePath}.parentCallId`);
                 if (frame.request !== undefined && (index !== 0 || !snapshotString(frame.request, 'root frame request').trim()))
                     throw new TypeError('Only a root frame may carry a nonempty request');
+                if (frame.inputs !== undefined && (index !== 0 || !Array.isArray(frame.inputs) || frame.inputs.some((input) => typeof input !== 'string' || !input.trim())))
+                    throw new TypeError('Only a root frame may carry delivered input strings');
                 const options = frame.options;
                 if (index === 0 &&
                     !isDeepStrictEqual(options, frameEnablement.options)) {
@@ -2341,6 +2348,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     ...(parentSessionId === undefined ? {} : { parentSessionId }),
                     ...(parentCallId === undefined ? {} : { parentCallId }),
                     ...(frame.request === undefined ? {} : { request: frame.request }),
+                    ...(frame.inputs === undefined ? {} : { inputs: frame.inputs }),
                     options,
                     roleBindings,
                     runtime,
@@ -3139,6 +3147,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             playerBindings,
             ...(parent ? { parent } : {}),
             ...(snapshot.request === undefined ? {} : { request: snapshot.request }),
+            ...(snapshot.inputs === undefined ? {} : { inputs: [...snapshot.inputs] }),
             state: snapshot.runtime.state,
             inFlightHostCalls: new Set(),
         };
@@ -3264,9 +3273,16 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         // parked child must not inherit cancellation of a later call.
         const controller = new AbortController();
         const abort = () => controller.abort(signal.reason);
-        signal.addEventListener('abort', abort, { once: true });
-        if (signal.aborted)
-            abort();
+        const forward = () => {
+            signal.addEventListener('abort', abort, { once: true });
+            if (signal.aborted)
+                abort();
+        };
+        forward();
+        frame.pauseCancellation = () => {
+            signal.removeEventListener('abort', abort);
+            return forward;
+        };
         const scope = {};
         frame.playerCallScope = scope;
         let outcome;
@@ -3278,6 +3294,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         }
         finally {
             signal.removeEventListener('abort', abort);
+            frame.pauseCancellation = undefined;
         }
         const cleanupError = closePlayerCallScope(frame, scope);
         if (!outcome.ok)
@@ -3566,7 +3583,16 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         }
         const unresolvedEffects = freezeTurnUnresolvedEffects();
         if (unresolvedEffects.length === 0) {
-            throw new Error('unresolved-effect abandonment requires nonempty effect evidence');
+            if (unresolvedLeaf.runtime.exportSnapshot?.()?.retainedEffectReconciliation?.interruptedTurn !== true) {
+                throw new Error('unresolved-effect abandonment requires nonempty effect evidence');
+            }
+            // The position was lost, but no repository change needs the separate
+            // effect-settlement transaction. The ordinary turn atomically saves
+            // this dismissal; a loss before that save leaves the same safe exit.
+            await runEffect(() => disposeStack('unresolved-effect'));
+            pendingRetentionUpdates.set(root.entry.id, { kind: 'clear', rootPlaybookId: root.entry.id });
+            abandonmentSettlementUnsafe = false;
+            return;
         }
         if (unresolvedEffectSettlement === undefined) {
             throw new Error('unresolved-effect abandonment requires durable host settlement');
@@ -3767,7 +3793,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             }
             return;
         }
-        if (result.outcome === 'aborted' && frame.parent) {
+        if (result.outcome === 'aborted' && frame.parent && frame.runtime.exportSnapshot?.() === undefined) {
             await resumeParent(frame, callResultFor(frame, result), context);
             return;
         }
@@ -3854,13 +3880,18 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         let calledStatusEmitted = false;
         let childInputStarted = false;
         let returnStatusHandled = false;
+        let retainedChild = false;
+        let resumeCancellation;
         try {
             await initFrame(child);
             invocationSignal.throwIfAborted();
             await requireSession().emitStatus(`◇ ${frameLabel(child)} called by ${frameLabel(parent)}`);
             calledStatusEmitted = true;
+            // The active child receives Boss cancellation directly. Do not also
+            // destroy its suspended caller while the child is draining to a pause.
+            resumeCancellation = parent.pauseCancellation?.();
             const result = await driveFrame(child, request.text, activeContext, AbortSignal.any([invocationSignal, activeContext.signal]), () => { childInputStarted = true; });
-            if (result.outcome === 'terminal' || result.outcome === 'aborted') {
+            if (result.outcome === 'terminal' || (result.outcome === 'aborted' && child.runtime.exportSnapshot?.() === undefined)) {
                 const callResult = callResultFor(child, result);
                 returnStatusHandled = true;
                 const returned = await popChild(child, result.outcome === 'aborted' ? 'stopped' : 'returned');
@@ -3890,6 +3921,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             child.invocationSignal = invocationSignal;
             child.abortListener = abortListener;
             invocationSignal.addEventListener('abort', abortListener, { once: true });
+            retainedChild = true;
             return { state: 'suspended', childSessionId: child.sessionId };
         }
         catch (error) {
@@ -3904,6 +3936,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                         invocationSignal.addEventListener('abort', child.abortListener, { once: true });
                         await setMode('engaged.parked', 'turn:runtime-error');
                         runFailureFacts?.push(`${frameLabel(child)} stopped: ${compactEvidence(normalizeErrorCompact(error)?.message ?? String(error))}`);
+                        retainedChild = true;
                         return { state: 'suspended', childSessionId: child.sessionId };
                     }
                 }
@@ -3949,6 +3982,10 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 },
             };
         }
+        finally {
+            if (!retainedChild)
+                resumeCancellation?.();
+        }
     };
     // -------------------------------------------------------------------------
     // Turn-summary counting (CAPTAIN-20): counts are collected only while a
@@ -3957,12 +3994,13 @@ export function createPlaybookCaptainShell(options, deps = {}) {
     // -------------------------------------------------------------------------
     const withCounting = async (frame, execute) => {
         const prior = activeTurn?.countedSummary;
-        const policy = frame.entry.summaryPolicy;
+        const owner = frames.find((candidate) => candidate.entry.summaryPolicy !== undefined) ?? frame;
+        const policy = owner.entry.summaryPolicy;
         const counts = prior?.counts ?? { interruptions: 0, copyPastes: 0 };
         const stateCounts = prior?.stateCounts ?? new Map();
         activeTurnSummary = policy
             ? {
-                owner: frame,
+                owner,
                 counts,
                 stateCounts,
                 acceptedOutcomeTraceKeys: prior?.acceptedOutcomeTraceKeys ?? new Set(),
@@ -5084,6 +5122,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     ? { parent: { frame: parent, callId: 'playbook-1' } }
                     : {}),
                 ...(sourceFrame.request === undefined ? {} : { request: sourceFrame.request }),
+                ...(sourceFrame.inputs === undefined ? {} : { inputs: [...sourceFrame.inputs] }),
                 state: sourceFrame.runtime.state,
                 inFlightHostCalls: new Set(),
             });
@@ -5327,17 +5366,18 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         if (!checkpointRecovery)
             return;
         const base = turn.recoveryBase;
-        const captured = captureFrameSnapshots(true);
-        if (!base || !captured || mode !== 'engaged.parked') {
+        const reporting = continuation?.kind === 'settle';
+        const captured = mode === 'chat' && reporting ? [] : captureFrameSnapshots(true);
+        if (!base || !captured || (mode !== 'engaged.parked' && !reporting)) {
             if (!required)
                 return;
             throw new Error('Captain cannot save the stopped step; preparation has not started');
         }
-        const { pendingBossQuestions: _priorQuestions, lastError: _priorError, retainedEffectReconciliation: _priorFence, ...settled } = { ...base, retainedEffectReconciliation: undefined };
+        const { pendingBossQuestions: _priorQuestions, lastError: _priorError, retainedEffectReconciliation: _priorFence, frames: _priorFrames, ...settled } = { ...base, frames: undefined, retainedEffectReconciliation: undefined };
         const snapshot = assertPlaybookCaptainShellSnapshot({
             ...settled,
-            mode: 'engaged.parked',
-            frames: captured,
+            mode,
+            ...(mode === 'engaged.parked' ? { frames: captured } : {}),
             effectLedger: currentEffectLedger(),
             playerSessions: playerLedgerRecord(),
             issuedSessionIds: [...issuedSessionIds],
@@ -5347,9 +5387,17 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         });
         await checkpointRecovery({
             snapshot, instruction,
-            ...(continuation === undefined ? {} : { continuation }),
+            ...(continuation === undefined ? {} : { continuation: { ...continuation, facts: [...turn.settlementFacts] } }),
         });
         turn.recoveryInstruction = instruction;
+    };
+    const saveStoppedPoint = async (status) => {
+        if (activeTurn?.recoveryInstruction === undefined)
+            return;
+        try {
+            await saveRecoveryPoint(activeTurn.recoveryInstruction, { kind: 'settle', status }, false);
+        }
+        catch { /* The durable old point and ledger still provide a safe exit. */ }
     };
     const settleSelection = async (selection, signal, automaticRecovery = false) => {
         const turn = activeTurn;
@@ -5403,8 +5451,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                         break;
                 }
             }
-            if (turn?.recoveryInstruction !== undefined)
-                await saveRecoveryPoint(turn.recoveryInstruction, undefined, false);
+            await saveStoppedPoint(settlement.status);
             return finalizeSettlement(settlement);
         }
         catch (error) {
@@ -5472,8 +5519,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     : { receipt: turn.report.receipt }),
                 ...(summary === undefined ? {} : { leafStateSummary: summary }),
             };
-            if (turn.recoveryInstruction !== undefined)
-                await saveRecoveryPoint(turn.recoveryInstruction, undefined, false);
+            await saveStoppedPoint(settlement.status);
             return finalizeSettlement(settlement);
         }
         finally {
@@ -5501,6 +5547,16 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         const previousAction = lastAction;
         lastAction = selection.action;
         const facts = turn.settlementFacts;
+        if (turn.hostRecoveryContinuation?.kind === 'settle') {
+            turn.settled = true;
+            journalAction({ action: 'recover' });
+            const status = turn.hostRecoveryContinuation.status;
+            facts.push('Restored the saved result without repeating preparation or player work.');
+            journalOutcome(journalOutcomeEvidence(facts, status, undefined));
+            lastSettlementStatus = status;
+            turn.report = { status, facts: [...facts], ...emptyReport() };
+            return { status, facts: [...facts] };
+        }
         if (selection.action === 'respond') {
             // One durable call settles a chat turn: its validated text is the
             // turn's captain speech (DR-029). That text is the decision call's
@@ -5716,19 +5772,23 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             }
             let questionAnswered = false;
             if (automaticRecovery && offer.continuation.kind === 'reply') {
-                const task = rootFrame()?.request;
-                const instructions = task === undefined ? [] : [{ label: 'Current engagement request', instruction: task }];
+                const root = rootFrame();
+                const task = root?.request;
+                const instructions = task === undefined || root?.inputs?.includes(task) ? [] : [{ label: 'Current engagement request', instruction: task }];
+                const laterInputs = [...new Set([...(root?.inputs ?? []), ...(turn.hostRecovery || ['start', 'switch'].includes(previousAction ?? '') ? [] : [turn.bossText])])].filter((input) => input !== task);
                 // Ordinary questions need no tools, repository claim, or recovery point.
                 // The answer must be selected from existing instructions, never authored.
                 try {
-                    const result = await callCaptainQueued(leaf, context, [
+                    const result = await callCaptainQueued(leaf, context, hiddenJudgeEnvelope([
                         'Check whether existing instructions already answer every pending player question.',
                         'This is a tool-free question check, not preparation. Do not use tools or repair anything.',
                         'Return exactly {"instructionIndex":null} when Boss must decide, clarify, authorize, or supply missing information, or preparation is needed.',
                         'Otherwise return {"instructionIndex":N}, selecting one exact labeled instruction that fully answers the questions. Never treat a request to explain as an answer.',
+                        'Later Boss input is context only, never an answer candidate. Return null if any of it bears on the pending question, changes direction, or asks for another explanation. Never override it with the original request.',
+                        `Later Boss input (context only): ${JSON.stringify(laterInputs)}`,
                         `Existing instructions: ${JSON.stringify(instructions)}`,
                         `Pending questions (quoted evidence): ${JSON.stringify(before.pendingQuestions.map(({ question }) => question))}`,
-                    ].join('\n'), { visibility: 'hidden', resume: false, ...controlCallToolOptions(captainAdapter), settings: callSettings(captainAgent) }, signal);
+                    ].join('\n')), { visibility: 'hidden', resume: false, ...controlCallToolOptions(captainAdapter), settings: callSettings(captainAgent) }, signal);
                     const answer = result.status === 'ok' ? JSON.parse(result.finalText ?? '') : undefined;
                     if (answer && Object.keys(answer).join(',') === 'instructionIndex' && Number.isInteger(answer.instructionIndex) && instructions[answer.instructionIndex] !== undefined) {
                         continuationInstruction = instructions[answer.instructionIndex].instruction;
@@ -5832,9 +5892,14 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 journalAction({ action: 'deliver', playbookId: leaf.entry.id });
             const outcome = await withCounting(leaf, async () => {
                 await driveAndProcess(leaf, continuationInstruction, context, () => {
-                    facts.push(recovering && continuationInstruction !== turn.authoritativeText
-                        ? `Delivered the existing task instruction to ${frameLabel(leaf)}.`
-                        : `Delivered the Boss text to ${frameLabel(leaf)}.`);
+                    const root = rootFrame();
+                    if (root)
+                        (root.inputs ??= []).push(continuationInstruction);
+                    facts.push(turn.hostRecovery && turn.hostRecoveryContinuation?.facts?.length
+                        ? `Delivered the saved instruction to ${frameLabel(leaf)}.`
+                        : recovering && continuationInstruction !== turn.authoritativeText
+                            ? `Delivered the existing task instruction to ${frameLabel(leaf)}.`
+                            : `Delivered the Boss text to ${frameLabel(leaf)}.`);
                 });
             });
             if (outcome.error !== undefined) {
@@ -6345,6 +6410,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                         }
                         : {}),
                     ...(frame.request === undefined ? {} : { request: frame.request }),
+                    ...(frame.inputs === undefined ? {} : { inputs: [...frame.inputs] }),
                     options: frame.enablement.options,
                     roleBindings: Object.fromEntries([...frame.playerBindings].map(([role, binding]) => [
                         role,
@@ -7027,7 +7093,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             activeTurn = {
                 appliedActionCount: 0,
                 ...(recoveryBase === undefined ? {} : { recoveryBase }),
-                ...(decided?.kind === 'recover' ? { hostRecovery: true, hostRecoveryContinuation: decided.continuation } : {}),
+                ...(decided?.kind === 'recover' ? { hostRecovery: true, hostRecoveryContinuation: decided.continuation, recoveryInstruction: decided.instruction } : {}),
                 id: ++turnSequence,
                 captainSyncedJournalSeq: journalSeq,
                 bossText: turn.prompt,
@@ -7040,7 +7106,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 ...(hostGiveUp === undefined ? {} : { hostGiveUp }),
                 settled: false,
                 presentationAttempted: false,
-                settlementFacts: [],
+                settlementFacts: decided?.kind === 'recover' ? [...(decided.continuation?.facts ?? [])] : [],
                 effectThrows: new Set(),
                 controlFailures: new Set(),
                 settingsPreflightFailures: new Set(),
@@ -7049,7 +7115,6 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             };
             decisionCall = undefined;
             appendJournal('boss', turn.prompt);
-            let turnFailure;
             try {
                 await drainRetiredRetainedRuntimes();
                 await prepareRetainedGenerationOffers();
@@ -7085,7 +7150,6 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 }
             }
             catch (error) {
-                turnFailure = error;
                 if (context.signal.aborted) {
                     markConversationUnsynchronized();
                     throw error;
@@ -7111,14 +7175,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 servingCall = undefined;
                 decisionCall = undefined;
                 await drainHostCalls(turnHostCalls);
-                let saveError;
-                try {
-                    if (context.signal.aborted && activeTurn?.recoveryInstruction !== undefined) {
-                        await saveRecoveryPoint(activeTurn.recoveryInstruction, undefined, false);
-                    }
-                }
-                catch (error) {
-                    saveError = error;
+                if (context.signal.aborted && activeTurn?.recoveryInstruction !== undefined) {
+                    await saveStoppedPoint('failed');
                 }
                 activeTurn = undefined;
                 if (activeTurnHostCalls === turnHostCalls) {
@@ -7126,8 +7184,6 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 }
                 activeContext = undefined;
                 retentionSettlementReady = true;
-                if (saveError !== undefined)
-                    throw new AggregateError([...(turnFailure === undefined ? [] : [turnFailure]), saveError], 'Interrupted work could not save its latest stopped step');
             }
         },
         async prepareDispose() {

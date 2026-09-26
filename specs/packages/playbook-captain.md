@@ -124,9 +124,9 @@ validated `dismiss` or `switch` dismisses the root engagement, the
 shell shall dispose that engagement and return to its idle state;
 for a validated `switch`, that idle state lasts only until the same
 turn starts the target playbook ([[playbook-captain-2](#playbook-captain-2)]).
-A Boss-turn cancellation signal shall reach a runtime operation only while that operation is active; a previously returned parked child shall remain owned by its suspended parent until explicit return, dismissal or disposal.
 Nested child completion and dismissal shall instead follow
 [[playbook-captain-28](#playbook-captain-28)].
+A Boss-turn cancellation signal shall reach a runtime operation only while that operation is active; a previously returned parked child shall remain owned by its suspended parent until explicit return, dismissal or disposal ([DR-068](../decisions/068-interrupted-continuation-settlement.md)).
 
 #### playbook-captain-19
 
@@ -244,6 +244,7 @@ When the Captain cannot produce the normal reply after bounded
 recovery, the shell shall attempt one Boss-appropriate failure reply
 that states only established facts, preserves the engagement, and
 names a safe next step.
+It shall append the complete original pending question as a clearly identified quote without replacing the truthful action-result reply ([DR-068](../decisions/068-interrupted-continuation-settlement.md)).
 If that presentation rejects, the shell shall surface the boundary
 failure without another presentation attempt.
 It shall not claim that nothing changed or invite a retry when work may
@@ -565,7 +566,6 @@ opens a labeled block the model reads as host-authored. The shell shall
 therefore escape and bound at the one seam through which a value it did
 not author becomes part of a digest line, so a line added to a digest
 later carries the property without restating it.
-If Captain cannot produce a usable reply, the fallback shall show the complete original pending question as a clearly identified quote rather than hide it.
 Pending question text is an exception to length bounding: it shall enter every decision and reply digest complete, JSON-quoted on one physical line so its final choices and constraints remain available without forging prompt blocks.
 Digests and session-Captain prompts shall exclude session and call
 UUIDs, resume tokens, trace payloads, module specifiers, option
@@ -794,8 +794,8 @@ and shall instruct Captain to compose the closing reply required by
 outcome report and the current complete pending questions.
 While the turn's counted activity — the saved interruptions plus
 saved copy-pastes plus the summary-visible round total — is nonzero,
-the result-phase prompt shall instruct Captain to append the active
-entry's `summaryPolicy` saved-counts line verbatim with the supplied
+the result-phase prompt shall instruct Captain to append the
+outermost participating entry's `summaryPolicy` saved-counts line verbatim with the supplied
 counts and natural singular forms when a count is one; when that
 counted activity is zero or the entry declares no `summaryPolicy`,
 it shall instruct Captain to append no saved-counts line.
@@ -1109,7 +1109,7 @@ The module's default shell factory shall return `PlaybookCaptainShell`.
 | Journal record | `{ seq, turnId, kind, payload }`, where `kind` is `boss`, `reply`, `handoff`, `action`, or `outcome`, and `payload` is JSON-safe |
 | `mode: 'chat'` | No frame, pending-question, last-error, or separately derived control-ledger member |
 | `mode: 'engaged.parked'` | Nonempty ordered `frames`; optional JSON-safe `pendingBossQuestions` whose entries use the runtime snapshot's discriminated Captain-or-role asker; optional `lastError: { name: string, message: string }`; optional exact `retainedEffectReconciliation: { sourceGenerationId: UUID, checkpoint: PlaybookEffectLedger }`; and no separately derived control-ledger member |
-| Frame | Exactly `playbookId: string`, `sessionId: UUID`, `rootSessionId: UUID`, nonnegative-integer `depth`, optional `parentSessionId: UUID`, optional nonempty `parentCallId: string`, optional nonempty root-only `request: string` [[recovery-14](recovery.md#recovery-14)], JSON-safe `options`, exact `roleBindings: Readonly<Record<roleId, playerId>>`, and `runtime: PlaybookRuntimeSnapshot` |
+| Frame | Exactly `playbookId: string`, `sessionId: UUID`, `rootSessionId: UUID`, nonnegative-integer `depth`, optional `parentSessionId: UUID`, optional nonempty `parentCallId: string`, optional nonempty root-only `request: string` and root-only `inputs: readonly string[]` of nonempty delivered text [[recovery-14](recovery.md#recovery-14)], JSON-safe `options`, exact `roleBindings: Readonly<Record<roleId, playerId>>`, and `runtime: PlaybookRuntimeSnapshot` |
 
 The Captain and frame `runtime` members shall be complete `PlaybookRuntimeSnapshot` values exported under [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)].
 The shell `effectLedger` shall be the complete detached current-host mirror of [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)]; the internal Captain runtime snapshot shall carry the canonical empty ledger, while every workflow-frame runtime snapshot shall carry a ledger exactly equal to the shell member.
@@ -1228,9 +1228,9 @@ Before returning every controller settlement to the artifact-schema-3 session Ca
 The shell shall reuse an exact validated copy at that turn's later `exportSettlement()` boundary without another repository observation; a safe settlement reached without controller work shall instead project the current canonical list without fabricating controller evidence or result-phase facts.
 For every controller settlement whose list is nonempty, including one leaving an episode parked, a direct `respond` over that episode, and unresolved-effect abandonment, the shell shall append one deterministic Boss-visible report before any later recovery action: `one-descendant-commit`, `multiple-commits`, `rewritten-or-non-descendant`, `worktree-only-change`, and `concurrent-or-foreign-change` shall be identified as observed repository changes, while `observation-ambiguous` and `incomplete` shall be identified only as possible effects whose change could not be excluded; each entry shall carry its exact baseline HEAD, exact after HEAD or explicit unavailability, and proven commit OID when present, followed by an explicit statement that the evidence proves neither workflow completion nor ownership of a change or commit.
 That deterministic report shall pass through the one Captain-speech presentation seam, supplement rather than replace any already mandatory presentation suffix, and expose no path, projection, ledger, envelope identity, prose, semantic candidate, or correction budget.
-The list shall be nonempty exactly when the settlement leaves at least one effect-possible outcome-unresolved episode parked or records unresolved-effect abandonment and shall be empty otherwise.
-The shell's optional unresolved-effect settlement capability shall expose exactly asynchronous `begin({ rootPlaybookId, unresolvedEffects })` and `complete({ rootPlaybookId, unresolvedEffects })` operations over a nonblank active-root playbook id and the same nonempty validated frozen list, and absence of that capability shall make abandonment fail without disposal.
-After the state-only abandonment result of [[playbook-captain-56](#playbook-captain-56)], the shell shall freeze the final projection while the complete active stack still exists, await the capability's durable `begin` acknowledgement, dispose the complete root stack leaf to root without restoring source state, replaying a player, translating a nested result, or resuming a parent FSM, stage one `clear` update for that root even when the unresolved boundary belonged to a nested leaf, and await `complete` acknowledging that the host atomically persisted that same list with the root clear before controller presentation.
+The list shall be nonempty exactly when the settlement leaves or abandons an effect-possible outcome-unresolved episode and shall be empty otherwise; an interrupted-turn position with no repository-effect evidence [[recovery-18](recovery.md#recovery-18)] shall use ordinary atomic dismissal and a root retention clear instead of this nonempty-effect transaction.
+The shell's optional unresolved-effect settlement capability shall expose exactly asynchronous `begin({ rootPlaybookId, unresolvedEffects })` and `complete({ rootPlaybookId, unresolvedEffects })` operations over a nonblank active-root playbook id and the same nonempty validated frozen list, and absence of that capability shall make abandonment with nonempty evidence fail without disposal.
+For nonempty evidence after the state-only abandonment result of [[playbook-captain-56](#playbook-captain-56)], the shell shall freeze the final projection while the complete active stack still exists, await the capability's durable `begin` acknowledgement, dispose the complete root stack leaf to root without restoring source state, replaying a player, translating a nested result, or resuming a parent FSM, stage one `clear` update for that root even when the unresolved boundary belonged to a nested leaf, and await `complete` acknowledging that the host atomically persisted that same list with the root clear before controller presentation.
 Only that successful persistence and disposal shall return controller `status: 'ok'` with control-receipt `disposition: 'executed'`; a begin, disposal, clear, or completion failure shall return `failed`, make that turn's shell settlement unexportable so a front end cannot erase the uncertain boundary, never expose an executed receipt, and introduce no fourth controller status.
 
 #### playbook-captain-65
@@ -1632,6 +1632,7 @@ carrying no raw state id; and "what went
 wrong?" asked twice after a failure carries the engine's
 `ControlView.lastError` in both captured decision prompts with no
 `apply` and the machine untouched.
+The lifecycle cases shall verify that a returned child remains suspended when its former Boss-turn signal is later aborted [[playbook-captain-4](#playbook-captain-4)].
 The question-relay cases shall verify that marked runtime question statuses are suppressed and a failed Captain reply appends the complete original question to the truthful action-outcome reply, without digest state ids [[playbook-captain-3](#playbook-captain-3)] [[playbook-captain-34](#playbook-captain-34)].
 The suite shall fail unless a scripted `failed` receipt with a
 normalized error yields a captured result-phase call carrying the

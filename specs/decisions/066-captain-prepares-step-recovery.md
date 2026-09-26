@@ -24,7 +24,8 @@ The procedure author should not need to describe exception handling, and neither
 - One Boss turn permits at most two automatic recovery attempts and at most five minutes of preparation in total; an unchanged failure may be retried only once, and cancellation stops recovery.
 - Ordinary questions receive a tool-free check without a repository claim or preparation tools.
   A real question requiring a product decision or new authority remains for Boss; a question already answered by the current engagement's saved root request may continue using that exact instruction.
-  The saved request survives restoration and adoption; prior answers and unrelated engagements supply no candidate answer, and Captain tells Boss what it answered.
+  The saved request and later delivered Boss input survive restoration and adoption; later input is nonselectable context that prevents reuse when relevant, and the same root request cannot be automatically delivered twice.
+  Prior answers and unrelated engagements supply no candidate answer, and Captain tells Boss what it answered.
 - A missing or contradictory workflow transition is a playbook defect to explain to Boss, never permission to invent a state, report success, or keep retrying.
   Governed judgment can report that no result fits; this preserves its explanation without forcing an outcome or spending a structural correction.
 - Repository observations do not prove that an external publication or other outside action is safe to repeat.
@@ -43,11 +44,11 @@ The procedure author should not need to describe exception handling, and neither
   The host appends that restoration separately from the original receipt; it authorizes another read-only invocation, not acceptance of the failed result.
 - An unexpected child-runtime exception preserves a valid parked child and its parents instead of converting it to a completed workflow failure.
 - Preparation saves the current parked stack before tool use, so interruption resumes that step rather than the original turn selection.
-  Before continuation, the point is replaced by the saved continuation and its current effect baseline; replay refuses later commits or logical-operation progress.
-  Every parked continuation advances the point to the actual stopped stack; cancellation settles that stack through the shared host before disposal when possible, allowing fresh instructions without discarding edits.
+  Before continuation, the point is replaced by the saved continuation and its current effect baseline; later unrepresented progress enters reconciliation with an abandonment exit under [DR-068](068-interrupted-continuation-settlement.md).
+  Every stopped continuation attempts to advance the point to the actual stack or completed root with reporting-only retry; any thrown turn with a point settles through the shared host after calls drain and before disposal when possible.
   The last settled controller and journal remain the conversational baseline; the attempted turn remains in replay.
 - Uncertain-turn recovery never chooses discard automatically.
-  Without a saved preparation point, a continuation may retry only after the existing effect checks prove whole-turn replay safe; otherwise it explains the missing evidence instead of guessing whether work completed.
+  Without a saved recovery point, a continuation may retry only after the existing effect checks prove whole-turn replay safe; otherwise it explains the missing evidence instead of guessing whether work completed.
 - Recovery is host/runtime behavior, independent of individual workflow repair recipes; the default Captain source and compiled controller add `recover`, requiring SLC’s recovery-controller discriminator [[1]].
   Existing checkpoints without the new optional invocation checkpoint keep their existing advertised controls.
 

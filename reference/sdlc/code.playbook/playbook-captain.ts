@@ -107,7 +107,11 @@ type SnapshotAgentEnvelope = DeepReadonly<
 
 type PlayerLedgerSnapshotEntry = DeepReadonly<PlayerLedgerEntry>;
 
-type RecoveryContinuation = { kind: 'reply' } | { kind: 'runtime'; actionId: string };
+type RecoveryContinuation = (
+  | { kind: 'reply' }
+  | { kind: 'runtime'; actionId: string }
+  | { kind: 'settle'; status: 'ok' | 'failed' | 'rejected' }
+) & { facts?: readonly string[] };
 
 export interface PlaybookCaptainDeps {
   /** Stop the host's active turn, including admitted tool calls, on preparation expiry. */
@@ -231,6 +235,7 @@ export interface PlaybookCaptainFrameSnapshot {
   readonly parentSessionId?: string;
   readonly parentCallId?: string;
   readonly request?: string;
+  readonly inputs?: readonly string[];
   readonly options: JsonValue;
   readonly roleBindings: Readonly<Record<string, string>>;
   readonly runtime: DeepReadonly<PlaybookRuntimeSnapshot>;
@@ -395,7 +400,7 @@ export interface PlaybookCaptainShell extends Captain {
    * `handleBossTurn` (CAPTAIN-7).
    */
   submitShellAction?(actionId: string): string;
-  /** Resume a host-validated saved preparation point using its exact input. */
+  /** Resume a host-validated saved recovery point using its exact input. */
   selectRecovery?(text: string, instruction: string, continuation?: RecoveryContinuation): void;
 }
 
@@ -458,6 +463,8 @@ type PlayerTransaction =
 
 interface EngagementFrame {
   request?: string;
+  inputs?: string[];
+  pauseCancellation?: () => () => void;
   entry: PlaybookCaptainRegistryEntry;
   enablement: Enablement;
   runtime: PlaybookRuntime;
@@ -2544,6 +2551,7 @@ export function assertPlaybookCaptainShellSnapshot(
         'parentSessionId',
         'parentCallId',
         'request',
+        'inputs',
         'options',
         'roleBindings',
         'runtime',
@@ -2586,6 +2594,7 @@ export function assertPlaybookCaptainShellSnapshot(
       { allowSuspendedCall: true },
     );
     if (frame.request !== undefined && (index !== 0 || !snapshotString(frame.request, 'root frame request').trim())) throw new TypeError('Only a root frame may carry a nonempty request');
+    if (frame.inputs !== undefined && (index !== 0 || !Array.isArray(frame.inputs) || frame.inputs.some((input) => typeof input !== 'string' || !input.trim()))) throw new TypeError('Only a root frame may carry delivered input strings');
     const options = frame.options as JsonValue;
     const roleBindings = snapshotFrameRoleBindings(
       frame.roleBindings,
@@ -2599,6 +2608,7 @@ export function assertPlaybookCaptainShellSnapshot(
       ...(parentSessionId === undefined ? {} : { parentSessionId }),
       ...(parentCallId === undefined ? {} : { parentCallId }),
       ...(frame.request === undefined ? {} : { request: frame.request as string }),
+      ...(frame.inputs === undefined ? {} : { inputs: frame.inputs as string[] }),
       options,
       roleBindings,
       runtime,
@@ -3923,6 +3933,7 @@ export function createPlaybookCaptainShell(
             'parentSessionId',
             'parentCallId',
             'request',
+            'inputs',
             'options',
             'roleBindings',
             'runtime',
@@ -3973,6 +3984,7 @@ export function createPlaybookCaptainShell(
                 `${framePath}.parentCallId`,
               );
         if (frame.request !== undefined && (index !== 0 || !snapshotString(frame.request, 'root frame request').trim())) throw new TypeError('Only a root frame may carry a nonempty request');
+        if (frame.inputs !== undefined && (index !== 0 || !Array.isArray(frame.inputs) || frame.inputs.some((input) => typeof input !== 'string' || !input.trim()))) throw new TypeError('Only a root frame may carry delivered input strings');
         const options = frame.options as JsonValue;
         if (
           index === 0 &&
@@ -4070,6 +4082,7 @@ export function createPlaybookCaptainShell(
           ...(parentSessionId === undefined ? {} : { parentSessionId }),
           ...(parentCallId === undefined ? {} : { parentCallId }),
           ...(frame.request === undefined ? {} : { request: frame.request as string }),
+          ...(frame.inputs === undefined ? {} : { inputs: frame.inputs as string[] }),
           options,
           roleBindings,
           runtime,
@@ -5086,6 +5099,7 @@ export function createPlaybookCaptainShell(
       playerBindings,
       ...(parent ? { parent } : {}),
       ...(snapshot.request === undefined ? {} : { request: snapshot.request }),
+      ...(snapshot.inputs === undefined ? {} : { inputs: [...snapshot.inputs] }),
       state: snapshot.runtime.state,
       inFlightHostCalls: new Set(),
     };
@@ -5229,8 +5243,15 @@ export function createPlaybookCaptainShell(
     // parked child must not inherit cancellation of a later call.
     const controller = new AbortController();
     const abort = (): void => controller.abort(signal.reason);
-    signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) abort();
+    const forward = (): void => {
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    };
+    forward();
+    frame.pauseCancellation = () => {
+      signal.removeEventListener('abort', abort);
+      return forward;
+    };
     const scope = {};
     frame.playerCallScope = scope;
     let outcome:
@@ -5242,6 +5263,7 @@ export function createPlaybookCaptainShell(
       outcome = { ok: false, error };
     } finally {
       signal.removeEventListener('abort', abort);
+      frame.pauseCancellation = undefined;
     }
     const cleanupError = closePlayerCallScope(frame, scope);
     if (!outcome.ok) throw outcome.error;
@@ -5559,9 +5581,16 @@ export function createPlaybookCaptainShell(
     }
     const unresolvedEffects = freezeTurnUnresolvedEffects();
     if (unresolvedEffects.length === 0) {
-      throw new Error(
-        'unresolved-effect abandonment requires nonempty effect evidence',
-      );
+      if (unresolvedLeaf.runtime.exportSnapshot?.()?.retainedEffectReconciliation?.interruptedTurn !== true) {
+        throw new Error('unresolved-effect abandonment requires nonempty effect evidence');
+      }
+      // The position was lost, but no repository change needs the separate
+      // effect-settlement transaction. The ordinary turn atomically saves
+      // this dismissal; a loss before that save leaves the same safe exit.
+      await runEffect(() => disposeStack('unresolved-effect'));
+      pendingRetentionUpdates.set(root.entry.id, { kind: 'clear', rootPlaybookId: root.entry.id });
+      abandonmentSettlementUnsafe = false;
+      return;
     }
     if (unresolvedEffectSettlement === undefined) {
       throw new Error(
@@ -5806,7 +5835,7 @@ export function createPlaybookCaptainShell(
       }
       return;
     }
-    if (result.outcome === 'aborted' && frame.parent) {
+    if (result.outcome === 'aborted' && frame.parent && frame.runtime.exportSnapshot?.() === undefined) {
       await resumeParent(frame, callResultFor(frame, result), context);
       return;
     }
@@ -5906,6 +5935,8 @@ export function createPlaybookCaptainShell(
     let calledStatusEmitted = false;
     let childInputStarted = false;
     let returnStatusHandled = false;
+    let retainedChild = false;
+    let resumeCancellation: (() => void) | undefined;
     try {
       await initFrame(child);
       invocationSignal.throwIfAborted();
@@ -5913,6 +5944,9 @@ export function createPlaybookCaptainShell(
         `◇ ${frameLabel(child)} called by ${frameLabel(parent)}`,
       );
       calledStatusEmitted = true;
+      // The active child receives Boss cancellation directly. Do not also
+      // destroy its suspended caller while the child is draining to a pause.
+      resumeCancellation = parent.pauseCancellation?.();
       const result = await driveFrame(
         child,
         request.text,
@@ -5920,7 +5954,7 @@ export function createPlaybookCaptainShell(
         AbortSignal.any([invocationSignal, activeContext.signal]),
         () => { childInputStarted = true; },
       );
-      if (result.outcome === 'terminal' || result.outcome === 'aborted') {
+      if (result.outcome === 'terminal' || (result.outcome === 'aborted' && child.runtime.exportSnapshot?.() === undefined)) {
         const callResult = callResultFor(child, result);
         returnStatusHandled = true;
         const returned = await popChild(
@@ -5956,6 +5990,7 @@ export function createPlaybookCaptainShell(
       child.invocationSignal = invocationSignal;
       child.abortListener = abortListener;
       invocationSignal.addEventListener('abort', abortListener, { once: true });
+      retainedChild = true;
       return { state: 'suspended', childSessionId: child.sessionId };
     } catch (error) {
       if (childInputStarted && !(error instanceof VisibilityControlError) && !invocationSignal.aborted && leafFrame() === child) {
@@ -5969,6 +6004,7 @@ export function createPlaybookCaptainShell(
             invocationSignal.addEventListener('abort', child.abortListener, { once: true });
             await setMode('engaged.parked', 'turn:runtime-error');
             runFailureFacts?.push(`${frameLabel(child)} stopped: ${compactEvidence(normalizeErrorCompact(error)?.message ?? String(error))}`);
+            retainedChild = true;
             return { state: 'suspended', childSessionId: child.sessionId };
           }
         } catch { /* An invalid or unreportable child cannot be retained. */ }
@@ -6019,6 +6055,8 @@ export function createPlaybookCaptainShell(
           error: normalizeErrorFull(boundaryError),
         },
       };
+    } finally {
+      if (!retainedChild) resumeCancellation?.();
     }
   };
 
@@ -6033,12 +6071,13 @@ export function createPlaybookCaptainShell(
     execute: () => Promise<T>,
   ): Promise<{ result?: T; error?: unknown; report: Omit<OutcomeReport, 'facts' | 'status'> }> => {
     const prior = activeTurn?.countedSummary;
-    const policy = frame.entry.summaryPolicy;
+    const owner = frames.find((candidate) => candidate.entry.summaryPolicy !== undefined) ?? frame;
+    const policy = owner.entry.summaryPolicy;
     const counts: TurnSummaryCounts = prior?.counts ?? { interruptions: 0, copyPastes: 0 };
     const stateCounts = prior?.stateCounts ?? new Map<string, number>();
     activeTurnSummary = policy
       ? {
-          owner: frame,
+          owner,
           counts,
           stateCounts,
           acceptedOutcomeTraceKeys: prior?.acceptedOutcomeTraceKeys ?? new Set(),
@@ -7397,6 +7436,7 @@ export function createPlaybookCaptainShell(
           ? { parent: { frame: parent, callId: 'playbook-1' } }
           : {}),
         ...(sourceFrame.request === undefined ? {} : { request: sourceFrame.request }),
+        ...(sourceFrame.inputs === undefined ? {} : { inputs: [...sourceFrame.inputs] }),
         state: sourceFrame.runtime.state,
         inFlightHostCalls: new Set(),
       });
@@ -7683,8 +7723,9 @@ export function createPlaybookCaptainShell(
     if (!turn) return;
     if (!checkpointRecovery) return;
     const base = turn.recoveryBase;
-    const captured = captureFrameSnapshots(true);
-    if (!base || !captured || mode !== 'engaged.parked') {
+    const reporting = continuation?.kind === 'settle';
+    const captured = mode === 'chat' && reporting ? [] : captureFrameSnapshots(true);
+    if (!base || !captured || (mode !== 'engaged.parked' && !reporting)) {
       if (!required) return;
       throw new Error('Captain cannot save the stopped step; preparation has not started');
     }
@@ -7692,12 +7733,13 @@ export function createPlaybookCaptainShell(
       pendingBossQuestions: _priorQuestions,
       lastError: _priorError,
       retainedEffectReconciliation: _priorFence,
+      frames: _priorFrames,
       ...settled
-    } = { ...base, retainedEffectReconciliation: undefined };
+    } = { ...base, frames: undefined, retainedEffectReconciliation: undefined };
     const snapshot = assertPlaybookCaptainShellSnapshot({
       ...settled,
-      mode: 'engaged.parked',
-      frames: captured,
+      mode,
+      ...(mode === 'engaged.parked' ? { frames: captured } : {}),
       effectLedger: currentEffectLedger(),
       playerSessions: playerLedgerRecord(),
       issuedSessionIds: [...issuedSessionIds],
@@ -7707,9 +7749,16 @@ export function createPlaybookCaptainShell(
     });
     await checkpointRecovery({
       snapshot, instruction,
-      ...(continuation === undefined ? {} : { continuation }),
+      ...(continuation === undefined ? {} : { continuation: { ...continuation, facts: [...turn.settlementFacts] } }),
     });
     turn.recoveryInstruction = instruction;
+  };
+
+  const saveStoppedPoint = async (status: 'ok' | 'failed' | 'rejected'): Promise<void> => {
+    if (activeTurn?.recoveryInstruction === undefined) return;
+    try {
+      await saveRecoveryPoint(activeTurn.recoveryInstruction, { kind: 'settle', status }, false);
+    } catch { /* The durable old point and ledger still provide a safe exit. */ }
   };
 
   const settleSelection = async (
@@ -7764,7 +7813,7 @@ export function createPlaybookCaptainShell(
           if (settlement.status !== 'ok') break;
         }
       }
-      if (turn?.recoveryInstruction !== undefined) await saveRecoveryPoint(turn.recoveryInstruction, undefined, false);
+      await saveStoppedPoint(settlement.status);
       return finalizeSettlement(settlement);
     } catch (error) {
       if (turn?.presentationError === error) throw error;
@@ -7847,7 +7896,7 @@ export function createPlaybookCaptainShell(
           : { receipt: turn.report.receipt }),
         ...(summary === undefined ? {} : { leafStateSummary: summary }),
       };
-      if (turn.recoveryInstruction !== undefined) await saveRecoveryPoint(turn.recoveryInstruction, undefined, false);
+      await saveStoppedPoint(settlement.status);
       return finalizeSettlement(settlement);
     } finally {
       runFailureFacts = undefined;
@@ -7883,6 +7932,16 @@ export function createPlaybookCaptainShell(
     const previousAction = lastAction;
     lastAction = selection.action;
     const facts = turn.settlementFacts;
+    if (turn.hostRecoveryContinuation?.kind === 'settle') {
+      turn.settled = true;
+      journalAction({ action: 'recover' });
+      const status = turn.hostRecoveryContinuation.status;
+      facts.push('Restored the saved result without repeating preparation or player work.');
+      journalOutcome(journalOutcomeEvidence(facts, status, undefined));
+      lastSettlementStatus = status;
+      turn.report = { status, facts: [...facts], ...emptyReport() };
+      return { status, facts: [...facts] };
+    }
 
     if (selection.action === 'respond') {
       // One durable call settles a chat turn: its validated text is the
@@ -8149,19 +8208,23 @@ export function createPlaybookCaptainShell(
       }
       let questionAnswered = false;
       if (automaticRecovery && offer.continuation.kind === 'reply') {
-        const task = rootFrame()?.request;
-        const instructions = task === undefined ? [] : [{ label: 'Current engagement request', instruction: task }];
+        const root = rootFrame();
+        const task = root?.request;
+        const instructions = task === undefined || root?.inputs?.includes(task) ? [] : [{ label: 'Current engagement request', instruction: task }];
+        const laterInputs = [...new Set([...(root?.inputs ?? []), ...(turn.hostRecovery || ['start', 'switch'].includes(previousAction ?? '') ? [] : [turn.bossText])])].filter((input) => input !== task);
         // Ordinary questions need no tools, repository claim, or recovery point.
         // The answer must be selected from existing instructions, never authored.
         try {
-          const result = await callCaptainQueued(leaf, context, [
+          const result = await callCaptainQueued(leaf, context, hiddenJudgeEnvelope([
             'Check whether existing instructions already answer every pending player question.',
             'This is a tool-free question check, not preparation. Do not use tools or repair anything.',
             'Return exactly {"instructionIndex":null} when Boss must decide, clarify, authorize, or supply missing information, or preparation is needed.',
             'Otherwise return {"instructionIndex":N}, selecting one exact labeled instruction that fully answers the questions. Never treat a request to explain as an answer.',
+            'Later Boss input is context only, never an answer candidate. Return null if any of it bears on the pending question, changes direction, or asks for another explanation. Never override it with the original request.',
+            `Later Boss input (context only): ${JSON.stringify(laterInputs)}`,
             `Existing instructions: ${JSON.stringify(instructions)}`,
             `Pending questions (quoted evidence): ${JSON.stringify(before.pendingQuestions.map(({ question }) => question))}`,
-          ].join('\n'), { visibility: 'hidden', resume: false, ...controlCallToolOptions(captainAdapter), settings: callSettings(captainAgent!) }, signal);
+          ].join('\n')), { visibility: 'hidden', resume: false, ...controlCallToolOptions(captainAdapter), settings: callSettings(captainAgent!) }, signal);
           const answer = result.status === 'ok' ? JSON.parse(result.finalText ?? '') : undefined;
           if (answer && Object.keys(answer).join(',') === 'instructionIndex' && Number.isInteger(answer.instructionIndex) && instructions[answer.instructionIndex] !== undefined) {
             continuationInstruction = instructions[answer.instructionIndex]!.instruction;
@@ -8265,7 +8328,11 @@ export function createPlaybookCaptainShell(
       if (!recovering) journalAction({ action: 'deliver', playbookId: leaf.entry.id });
       const outcome = await withCounting(leaf, async () => {
         await driveAndProcess(leaf, continuationInstruction, context, () => {
-          facts.push(recovering && continuationInstruction !== turn.authoritativeText
+          const root = rootFrame();
+          if (root) (root.inputs ??= []).push(continuationInstruction);
+          facts.push(turn.hostRecovery && turn.hostRecoveryContinuation?.facts?.length
+            ? `Delivered the saved instruction to ${frameLabel(leaf)}.`
+            : recovering && continuationInstruction !== turn.authoritativeText
             ? `Delivered the existing task instruction to ${frameLabel(leaf)}.`
             : `Delivered the Boss text to ${frameLabel(leaf)}.`);
         });
@@ -8887,6 +8954,7 @@ export function createPlaybookCaptainShell(
               }
             : {}),
           ...(frame.request === undefined ? {} : { request: frame.request }),
+          ...(frame.inputs === undefined ? {} : { inputs: [...frame.inputs] }),
           options: frame.enablement.options,
           roleBindings: Object.fromEntries(
             [...frame.playerBindings].map(([role, binding]) => [
@@ -9713,7 +9781,7 @@ export function createPlaybookCaptainShell(
       activeTurn = {
         appliedActionCount: 0,
         ...(recoveryBase === undefined ? {} : { recoveryBase }),
-        ...(decided?.kind === 'recover' ? { hostRecovery: true as const, hostRecoveryContinuation: decided.continuation } : {}),
+        ...(decided?.kind === 'recover' ? { hostRecovery: true as const, hostRecoveryContinuation: decided.continuation, recoveryInstruction: decided.instruction } : {}),
         id: ++turnSequence,
         captainSyncedJournalSeq: journalSeq,
         bossText: turn.prompt,
@@ -9726,7 +9794,7 @@ export function createPlaybookCaptainShell(
         ...(hostGiveUp === undefined ? {} : { hostGiveUp }),
         settled: false,
         presentationAttempted: false,
-        settlementFacts: [],
+        settlementFacts: decided?.kind === 'recover' ? [...(decided.continuation?.facts ?? [])] : [],
         effectThrows: new Set<unknown>(),
         controlFailures: new Set<unknown>(),
         settingsPreflightFailures: new Set<unknown>(),
@@ -9735,7 +9803,6 @@ export function createPlaybookCaptainShell(
       };
       decisionCall = undefined;
       appendJournal('boss', turn.prompt);
-      let turnFailure: unknown;
       try {
         await drainRetiredRetainedRuntimes();
         await prepareRetainedGenerationOffers();
@@ -9780,7 +9847,6 @@ export function createPlaybookCaptainShell(
           );
         }
       } catch (error) {
-        turnFailure = error;
         if (context.signal.aborted) {
           markConversationUnsynchronized();
           throw error;
@@ -9806,19 +9872,15 @@ export function createPlaybookCaptainShell(
         servingCall = undefined;
         decisionCall = undefined;
         await drainHostCalls(turnHostCalls);
-        let saveError: unknown;
-        try {
-          if (context.signal.aborted && activeTurn?.recoveryInstruction !== undefined) {
-            await saveRecoveryPoint(activeTurn.recoveryInstruction, undefined, false);
-          }
-        } catch (error) { saveError = error; }
+        if (context.signal.aborted && activeTurn?.recoveryInstruction !== undefined) {
+          await saveStoppedPoint('failed');
+        }
         activeTurn = undefined;
         if (activeTurnHostCalls === turnHostCalls) {
           activeTurnHostCalls = undefined;
         }
         activeContext = undefined;
         retentionSettlementReady = true;
-        if (saveError !== undefined) throw new AggregateError([...(turnFailure === undefined ? [] : [turnFailure]), saveError], 'Interrupted work could not save its latest stopped step');
       }
     },
 

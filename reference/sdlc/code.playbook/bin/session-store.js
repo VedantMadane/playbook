@@ -3648,7 +3648,7 @@ async function createLease({
         );
       }
       if (prior.uncertain.recovery !== undefined) {
-        throw new Error('Captain preparation may have changed prerequisites; resume its saved step instead of discarding');
+        throw new Error('The saved step preserves work from the interrupted turn; resume its saved step instead of discarding');
       }
       if (!isDeepStrictEqual(prior.effectLedger, prior.snapshot.effectLedger)) {
         throw new Error(
@@ -4150,26 +4150,31 @@ function validateCanonicalCaptainSessionRecord(
       artifactSchemas,
     );
     if (uncertain.recovery !== undefined) {
-      const point = requireRecord(uncertain.recovery, 'Captain preparation recovery point');
-      rejectUnknownOrMissingKeys(point, ['snapshot', 'instruction', ...(Object.hasOwn(point, 'continuation') ? ['continuation'] : [])], 'Captain preparation recovery point');
+      const point = requireRecord(uncertain.recovery, 'Captain recovery point');
+      rejectUnknownOrMissingKeys(point, ['snapshot', 'instruction', ...(Object.hasOwn(point, 'continuation') ? ['continuation'] : [])], 'Captain recovery point');
       if (point.continuation !== undefined) {
         const continuation = requireRecord(point.continuation, 'Captain recovery continuation');
-        if (continuation.kind === 'reply') rejectUnknownOrMissingKeys(continuation, ['kind'], 'Captain recovery continuation');
+        const factsKey = Object.hasOwn(continuation, 'facts') ? ['facts'] : [];
+        if (factsKey.length && (!Array.isArray(continuation.facts) || continuation.facts.some((fact) => typeof fact !== 'string' || !fact.trim()))) throw new Error('Captain recovery facts must be nonempty strings');
+        if (continuation.kind === 'reply') rejectUnknownOrMissingKeys(continuation, ['kind', ...factsKey], 'Captain recovery continuation');
         else if (continuation.kind === 'runtime') {
-          rejectUnknownOrMissingKeys(continuation, ['kind', 'actionId'], 'Captain recovery continuation');
+          rejectUnknownOrMissingKeys(continuation, ['kind', 'actionId', ...factsKey], 'Captain recovery continuation');
           requireCanonicalNonblank(continuation.actionId, 'Captain recovery action');
-        } else throw new Error('Captain recovery continuation must be reply or runtime');
+        } else if (continuation.kind === 'settle') {
+          rejectUnknownOrMissingKeys(continuation, ['kind', 'status', ...factsKey], 'Captain recovery continuation');
+          if (!['ok', 'failed', 'rejected'].includes(continuation.status)) throw new Error('Captain saved settlement status is invalid');
+        } else throw new Error('Captain recovery continuation must be reply, runtime or settle');
       }
       assertAcceptedInput(point.instruction);
       const prepared = assertPlaybookCaptainShellSnapshot(point.snapshot);
       assertSnapshotMatchesStructure(prepared, structural, artifactSchemas);
-      if (prepared.mode !== 'engaged.parked' ||
+      if ((prepared.mode !== 'engaged.parked' && point.continuation?.kind !== 'settle') ||
           !isDeepStrictEqual(prepared.captain, snapshot.captain) ||
           !isDeepStrictEqual(prepared.journal, snapshot.journal) ||
           !isDeepStrictEqual(prepared.sequences, snapshot.sequences) ||
           !isPlaybookEffectLedgerMonotonicExtension(snapshot.effectLedger, prepared.effectLedger) ||
           !isPlaybookEffectLedgerMonotonicExtension(prepared.effectLedger, effectLedger)) {
-        throw new Error('Captain preparation recovery point must retain the settled controller and current parked work');
+        throw new Error('Captain recovery point must retain the settled controller and current parked work');
       }
     }
     if (uncertain.baseUpdatedAt === null) {
@@ -6063,7 +6068,7 @@ function validateRetainedGenerationFrame(
       'roleBindings',
       'runtime',
     ],
-    ['parentSessionId', 'parentCallId', 'request'],
+    ['parentSessionId', 'parentCallId', 'request', 'inputs'],
     path,
   );
   if (frame.request !== undefined) {
@@ -6080,6 +6085,7 @@ function validateRetainedGenerationFrame(
       `${path}.playbookId names unknown stored playbook ${JSON.stringify(playbookId)}`,
     );
   }
+  if (frame.inputs !== undefined && (index !== 0 || !Array.isArray(frame.inputs) || frame.inputs.some((input) => typeof input !== 'string' || !input.trim()))) throw new Error(`${path}.inputs belongs only to the root and must contain nonempty strings`);
   assertUuid(frame.sessionId, `${path}.sessionId`);
   assertUuid(frame.rootSessionId, `${path}.rootSessionId`);
   if (sessionIds.has(frame.sessionId)) {

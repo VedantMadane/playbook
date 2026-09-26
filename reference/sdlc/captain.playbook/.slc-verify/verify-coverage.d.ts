@@ -1,6 +1,10 @@
 import { type MachineConfigLike } from './verify.js';
 /** The `gears2fsm`-mandated captain actor name a machine declares. */
 export declare const CAPTAIN_ACTOR = "captain";
+/** Incomplete coverage is not an unsatisfiable transition or Source question. */
+export declare class FsmCoverageDeadlineError extends Error {
+    constructor();
+}
 /** The minimal machine surface the coverage driver needs. */
 interface MachineLike {
     config: MachineConfigLike & {
@@ -17,6 +21,7 @@ interface MachineLike {
     root?: ResolvedStateNodeLike;
 }
 interface ResolvedStateNodeLike {
+    id?: string;
     states?: Record<string, ResolvedStateNodeLike>;
     invoke?: Array<{
         id?: string;
@@ -58,18 +63,21 @@ export declare function guardSatisfiable(guard: (arg: {
 export declare function fsmCoverageTestTimeout(fsmModule: unknown): number;
 /**
  * Checks transition coverage over a compiled `playbook` artifact's machine
- * (VERIFY-6) and returns findings (empty when every declared transition is
- * reachable). Requires the machine to declare the `gears2fsm` surfaces it
- * drives through: the `BOSS_INTERRUPT` root event and the Boss-reply wait
- * state.
+ * (verification-6) and returns findings (empty when every declared transition is
+ * reachable). Drives the machine through the `gears2fsm` surfaces it
+ * declares; a workflow without pre-emption may omit the `BOSS_INTERRUPT`
+ * surface entirely, in which case interrupt coverage is skipped.
  */
 export declare function checkFsmCoverage(fsmModule: unknown, opts?: {
     /** The artifact's source text, mined for routing-value candidates. */
     sourceText?: string;
+    signal?: AbortSignal;
+    /** A caller may shorten, never extend, the derived cooperative deadline. */
+    timeoutMs?: number;
 }): Promise<string[]>;
 /**
  * Builds a per-artifact vitest module running the transition-coverage check
- * beside the artifacts (VERIFY-6).
+ * beside the artifacts (verification-6).
  */
 export declare function generateFsmCoverageTest(opts: {
     basename: string;
@@ -81,7 +89,7 @@ export declare function generateFsmCoverageTest(opts: {
 }): string;
 /**
  * Emits the transition-coverage test beside a compiled `playbook` artifact
- * (VERIFY-6): validates the produced `fsm` drives cleanly, then writes
+ * (verification-6): validates the produced `fsm` drives cleanly, then writes
  * `<basename>.fsm.coverage.test.ts` and returns its path with any coverage
  * findings as diagnostics.
  *

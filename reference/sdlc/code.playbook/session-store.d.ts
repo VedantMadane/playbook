@@ -135,7 +135,7 @@ export interface SessionRecovery {
     readonly markedAt: string;
     readonly attemptedExecutionProjection: SessionExecutionProjection;
     readonly abandonment?: Readonly<Record<string, any>>;
-    readonly recovery?: { readonly snapshot: SessionSnapshot; readonly instruction: string; readonly continuation?: { readonly kind: 'reply' } | { readonly kind: 'runtime'; readonly actionId: string } };
+    readonly recovery?: { readonly snapshot: SessionSnapshot; readonly instruction: string; readonly continuation?: ({ readonly kind: 'reply' } | { readonly kind: 'runtime'; readonly actionId: string } | { readonly kind: 'settle'; readonly status: 'ok' | 'failed' | 'rejected' }) & { readonly facts?: readonly string[] } };
   };
 }
 export interface SessionReplayCheckpoint {
@@ -216,7 +216,7 @@ export interface PlaybookSessionLifecycle extends PlaybookSessionLease {
   abandonFreshSettled(options: { expected: SessionRecovery }): Promise<boolean>;
   beginTurn(options: { input: string; attemptId: string; attemptedExecutionProjection: SessionExecutionProjection }): Promise<SessionRecovery>;
   beginRetry(options: { expectedAttemptId: string; nextAttemptId: string }): Promise<SessionRecovery>;
-  checkpointRecovery(point: { snapshot: SessionSnapshot; instruction: string; continuation?: { kind: 'reply' } | { kind: 'runtime'; actionId: string } }): Promise<void>;
+  checkpointRecovery(point: { snapshot: SessionSnapshot; instruction: string; continuation?: ({ kind: 'reply' } | { kind: 'runtime'; actionId: string } | { kind: 'settle'; status: 'ok' | 'failed' | 'rejected' }) & { facts?: readonly string[] } }): Promise<void>;
   settle(options: { attemptId: string; snapshot: SessionSnapshot; unresolvedEffects: readonly SessionUnresolvedEffect[]; retentionUpdates?: readonly SessionRetentionUpdate[] }): Promise<SessionRecovery>;
   discard(options: { attemptId: string }): Promise<SessionRecovery | undefined>;
   beginUnresolvedEffectAbandonment(options: any): Promise<any>;

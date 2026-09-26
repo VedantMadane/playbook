@@ -2779,7 +2779,7 @@ export function assertPlaybookRuntimeSnapshot(
     }
     rejectUnknownKeys(
       snapshot.retainedEffectReconciliation,
-      ['sourceSessionId', 'checkpoint'],
+      ['sourceSessionId', 'checkpoint', 'interruptedTurn'],
       'runtime snapshot retainedEffectReconciliation',
     );
     const sourceSessionId = effectUuid(
@@ -2812,9 +2812,14 @@ export function assertPlaybookRuntimeSnapshot(
         'runtime snapshot retainedEffectReconciliation.sourceSessionId must equal retainedEffectSourceSessionId',
       );
     }
+    const interruptedTurn = snapshot.retainedEffectReconciliation.interruptedTurn;
+    if (interruptedTurn !== undefined && interruptedTurn !== true) {
+      throw new TypeError('runtime retained reconciliation interruptedTurn must be true');
+    }
     retainedEffectReconciliation = Object.freeze({
       sourceSessionId,
       checkpoint,
+      ...(interruptedTurn === true ? { interruptedTurn: true as const } : {}),
     });
   }
   if (
@@ -2847,7 +2852,9 @@ export function assertPlaybookRuntimeSnapshot(
       snapshot.failedEffectAttempt.boundaryPrefix,
       'runtime snapshot failedEffectAttempt.boundaryPrefix',
     );
-    const lastBoundarySequence = effectLedger.boundaries.at(-1)?.sequence ?? 0;
+    const failureLedger = retainedEffectReconciliation?.interruptedTurn
+      ? retainedEffectReconciliation.checkpoint : effectLedger;
+    const lastBoundarySequence = failureLedger.boundaries.at(-1)?.sequence ?? 0;
     if (boundaryPrefix > lastBoundarySequence) {
       throw new TypeError(
         'runtime snapshot failedEffectAttempt.boundaryPrefix exceeds the effect ledger',
@@ -2860,7 +2867,9 @@ export function assertPlaybookRuntimeSnapshot(
             snapshot.failedEffectAttempt.attemptId,
             'runtime snapshot failedEffectAttempt.attemptId',
           );
-    const causalBoundaries = effectLedger.boundaries.filter(
+    // A fenced old machine still describes its original attempt, not the
+    // later attempt whose acknowledged work the host is preserving.
+    const causalBoundaries = failureLedger.boundaries.filter(
       ({ sequence }) => sequence > boundaryPrefix,
     );
     if (attemptId === null && causalBoundaries.length !== 0) {
