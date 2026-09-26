@@ -250,14 +250,12 @@ Where DECIDE runs under artifact schema `3`, each delegated outcome shall declar
 
 | Source state | Accepted outcome | Payload authority | Repository disposition | Target state |
 | --- | --- | --- | --- | --- |
-| `askCoderProposal` | `proposed` | none | `unchanged` | `coderProposalStaged` when Coder finishes first; `synthesizeCommit` when Coder completes the pair |
+| `askCoderProposal` | `proposed` | presentation `coderProposal` | `unchanged` | `coderProposalStaged` when Coder finishes first; `synthesizeCommit` when Coder completes the pair |
 | `askCoderProposal` | `needsBossReply` | presentation `question` | `unchanged` | `awaitCoderProposalReply` |
 | `askReviewerProposal` | `proposed` | presentation `reviewerProposal` | `unchanged` | `reviewerProposalStaged` when Reviewer finishes first; `synthesizeCommit` when Reviewer completes the pair |
 | `askReviewerProposal` | `needsBossReply` | presentation `question` | `unchanged` | `awaitReviewerProposalReply` |
 | `synthesizeCommit` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewCommit` |
 | `synthesizeCommit` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
-
-- Coder's `proposed` carries no payload because no later item relays Coder's own proposal ([DR-066](../decisions/066-compiled-builtins-keep-their-public-interface.md)).
 
 The two proposal calls shall execute as one declared concurrent all-`unchanged` cohort under [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)] and [[playbook-runtime-90](playbook-runtime.md#playbook-runtime-90)], while `synthesizeCommit` shall begin only after both cohort receipts complete and shall execute through the exclusive host transaction of [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)].
 Each proposal `proposed` or `needsBossReply` arm shall require an exact matching `unchanged` receipt under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)] before staging its result or publishing its question.
@@ -389,7 +387,7 @@ The suites shall further fail unless every accepted matrix row publishes its exa
 
 When the DECIDE conformance suites drive its real artifact-schema-3 runtime, they shall fail unless the source, GEARS, and compiled prompts contain no `Commit:` response-format instruction; no presentation parser influences a transition; missing, glued, fenced, quoted, duplicated, or misleading `Commit:` prose leaves the accepted arm unchanged under equal semantic and effect evidence; both proposal calls overlap from one common baseline without revealing either proposal early; every proposal `proposed` and `needsBossReply` outcome and every separately governed proposal answer continuation accepts only a matching `unchanged` receipt; the merge waits for both proposal receipts and then runs exclusively; `committed` accepts only a matching `one-descendant-commit` receipt and obtains `latestCommit` from its exact OID; every mismatched or ambiguous proposal or merge receipt remains unresolved without an unauthorized player call; and merge `needsBossReply` uses one exact-checkpoint cumulative deferred operation (verifying [[playbook-12](#playbook-12)], [[playbook-22](#playbook-22)], [[playbook-30](#playbook-30)], and [[playbook-36](#playbook-36)]).
 The suites shall further fail unless each accepted matrix row publishes its exact confirmed marker and status, including the completion-order-specific proposal target, while an unaccepted fallback publishes neither, and the source, GEARS, FSM, linked runtime, declarations, and registry agree on schema `3`, runtime ABI `1`, and the matrix of [[playbook-36](#playbook-36)] (verifying [[playbook-1](#playbook-1)]).
-The suites shall further fail unless the proposal and merge adjudicator prompts carry no `Output shall include` clause, state each arm's exact reply JSON of `guard` alone, name `reviewerProposal`, `coderOutput`, and `question` as presentation-owned and `latestCommit` as effect-owned runtime-supplied fields to omit, name no runtime-supplied field for Coder's `proposed`, and a guard-only reply resolves each arm with its correction budget unspent while the runtime supplies the omitted fields (verifying [[playbook-36](#playbook-36)]).
+The suites shall further fail unless the proposal and merge adjudicator prompts carry no `Output shall include` clause, state each arm's exact reply JSON of `guard` alone, name `coderProposal`, `reviewerProposal`, `coderOutput`, and `question` as presentation-owned and `latestCommit` as effect-owned runtime-supplied fields to omit, and a guard-only reply resolves each arm with its correction budget unspent while the runtime supplies the omitted fields (verifying [[playbook-36](#playbook-36)]).
 
 #### playbook-40
 
