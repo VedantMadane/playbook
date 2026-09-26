@@ -8,7 +8,7 @@
 // defaults (entry event, parked-state classifier, prompt composition,
 // adjudication, statuses).
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -6300,6 +6300,7 @@ describe('parked-session snapshot over the shared factory', () => {
     const playerScript: PlayerResult[] = [
       { status: 'error', error: 'source failed' },
       { status: 'error', error: 'source retry failed' },
+      { status: 'error', error: 'adopted retry failed' },
     ];
     const { ports, telemetry } = makeRecordingPorts({
       callPlayer: async () => {
@@ -6368,7 +6369,8 @@ describe('parked-session snapshot over the shared factory', () => {
         key: 'target-retry',
         signal: new AbortController().signal,
       }),
-    ).toMatchObject({ disposition: 'failed' });
+    ).toMatchObject({ disposition: 'failed', error: { message: 'adopted retry failed' } });
+    expect(playerScript).toHaveLength(0);
     const targetApplyTraces = telemetry
       .map(({ payload }) => payload as PlaybookTraceEvent)
       .filter(
@@ -7560,7 +7562,42 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it('retries the captured step when the failure state refuses the recorded event', async () => {
+  // Non-JSON in-memory context intentionally has no invocation checkpoint.
+  const eventOnlyMachine = (source: typeof workflowMachine) => createMachine({
+    ...source.config,
+    context: (...args: any[]) => ({
+      ...(typeof source.config.context === 'function' ? (source.config.context as Function)(...args) : source.config.context),
+      ephemeral: () => undefined,
+    }),
+  } as any, source.implementations);
+  const eventOnlyFactory = createXStatePlaybookRuntime(eventOnlyMachine(workflowMachine), workflowSpec);
+  const eventOnlyRuntime = (options: WorkflowOptions) => eventOnlyFactory(governedRuntimeConstruction(options, 'factory-test', []));
+
+  it('keeps foreign completed work out of a pending question recovery offer', async () => {
+    const construction = governedRuntimeConstruction({}, 'factory-test');
+    const capabilities = construction.hostCapabilities!;
+    let ledgerOverride: PlaybookEffectLedger | undefined;
+    const runtime = createWorkflowRuntimeFactory({ ...construction, hostCapabilities: {
+      ...capabilities,
+      effectLedger: { ...capabilities.effectLedger, snapshot: () => ledgerOverride ?? capabilities.effectLedger.snapshot() },
+    } });
+    const { ports } = makeRecordingPorts({
+      callPlayer: async () => ({ status: 'ok', finalText: 'Which database should I use?' }),
+      callJudge: async () => '{"guard":"needsBossReply"}',
+    });
+    await runtime.init(makeSession(ports));
+    await runtime.handleBossInput(turn('build storage'));
+    const ledger = capabilities.effectLedger.snapshot();
+    const { logicalOperationId, ...own } = ledger.boundaries.at(-1)!;
+    ledgerOverride = assertPlaybookEffectLedger({ ...ledger, revision: ledger.revision + 1, boundaries: [...ledger.boundaries, {
+      ...own, sequence: own.sequence + 1, boundaryId: randomUUID(), runtimeSessionId: randomUUID(), playbookId: 'foreign', sourceStateId: 'foreign-step', callId: 'foreign-call', finalText: 'Foreign private result',
+    }] });
+    expect(runtime.describe!().recovery?.evidence).toMatchObject({ savedPlayerText: 'Which database should I use?' });
+    expect(JSON.stringify(runtime.describe!().recovery)).not.toContain('Foreign private result');
+    await runtime.dispose();
+  });
+
+  it.each([true, false])('retries the captured step when the failure state refuses the recorded event (checkpoint=%s)', async (checkpoint) => {
     let playerCalls = 0;
     const { ports } = makeRecordingPorts({
       callPlayer: async () => {
@@ -7576,7 +7613,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
         return '{"guard":"needsBossReply"}';
       },
     });
-    const runtime = createWorkflowRuntime({});
+    const runtime = checkpoint ? createWorkflowRuntime({}) : eventOnlyRuntime({});
     await runtime.init(makeSession(ports));
     await runtime.handleBossInput(turn('build storage'));
     const failedRun = await runtime.handleBossInput(turn('use sqlite'));
@@ -7587,7 +7624,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     const view = runtime.describe!();
     expect(view.state.stateId).toBe('failed');
     expect(view.lastError).toMatchObject({ message: 'resume crashed' });
-    expect(view.actions.map(({ id }) => id)).toEqual(['retry:START', 'jump:implement']);
+    expect(view.actions.map(({ id }) => id)).toEqual(checkpoint ? ['retry:START', 'jump:implement'] : ['jump:implement']);
     await runtime.dispose();
   });
 
@@ -7651,7 +7688,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await restored.dispose();
   });
 
-  it('recovers a failure reached after a Boss reply, which the recorded event cannot', async () => {
+  it.each([true, false])('recovers a failure reached after a Boss reply, which the recorded event cannot (checkpoint=%s)', async (checkpoint) => {
     const makePorts = () => {
       let playerCalls = 0;
       return makeRecordingPorts({
@@ -7677,24 +7714,24 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     // The invocation checkpoint recovers even when the recorded reply is
     // not accepted by the failure state.
     const { ports: recordedPorts } = makePorts();
-    const recorded = createWorkflowRuntime({});
+    const recorded = checkpoint ? createWorkflowRuntime({}) : eventOnlyRuntime({});
     await recorded.init(makeSession(recordedPorts));
     await recorded.handleBossInput(turn('build storage'));
     // At the wait the question is pending on every surface.
     expect(recorded.describe!().pendingQuestions).toHaveLength(1);
-    expect(recorded.exportSnapshot!()!.pendingBossQuestions).toHaveLength(1);
+    if (checkpoint) expect(recorded.exportSnapshot!()!.pendingBossQuestions).toHaveLength(1);
     expect((await recorded.handleBossInput(turn('use sqlite'))).outcome).toBe(
       'failed',
     );
     expect(recorded.describe!().actions.map(({ id }) => id)).toEqual([
-      'retry:START',
+      ...(checkpoint ? ['retry:START'] : []),
       'jump:implement',
     ]);
     // The answered question the failure state retains in context is not
     // pending: the view and the snapshot agree with the gated state
     // telemetry, so a mirroring shell can settle this parked record.
     expect(recorded.describe!().pendingQuestions).toEqual([]);
-    expect(recorded.exportSnapshot!()!.pendingBossQuestions).toEqual([]);
+    if (checkpoint) expect(recorded.exportSnapshot!()!.pendingBossQuestions).toEqual([]);
     await recorded.dispose();
 
     // The declared source names the entry text the machine still holds, so
@@ -7712,6 +7749,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       { id: 'jump:implement', label: 'Resume from: implement state', standing: 'ready' },
     ]);
     const snapshot = declared.exportSnapshot!()!;
+    if (!checkpoint) delete snapshot.recoveryCheckpoint;
     expect(snapshot.pendingBossQuestions).toEqual([]);
     await declared.dispose();
 
@@ -7775,8 +7813,8 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it('recovers the captured invocation without inventing a missing entry payload', async () => {
-    const createUnsourcedRuntime = createXStatePlaybookRuntime(workflowMachine, {
+  it.each([true, false])('recovers the captured invocation without inventing a missing entry payload (checkpoint=%s)', async (checkpoint) => {
+    const createUnsourcedRuntime = createXStatePlaybookRuntime(checkpoint ? workflowMachine : eventOnlyMachine(workflowMachine), {
       ...workflowSpec,
       label: 'unsourced-workflow',
       // Declared, but naming a member this machine never populates.
@@ -7799,7 +7837,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     // The invocation checkpoint supplies the original input independently
     // of the absent entry context field; no replacement text is invented.
     expect(runtime.describe!().actions.map(({ id }) => id)).toEqual([
-      'retry:START',
+      ...(checkpoint ? ['retry:START'] : []),
       'jump:implement',
     ]);
     await runtime.dispose();
@@ -8733,7 +8771,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it('labels a guarded BOSS_INTERRUPT retry from its recorded targetId', async () => {
+  it.each([true, false])('labels a guarded BOSS_INTERRUPT retry from its recorded targetId (checkpoint=%s)', async (checkpoint) => {
     const interruptMachine = createMachine({
       id: 'interrupt-retry',
       context: { lastError: undefined as unknown },
@@ -8808,7 +8846,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     },
   );
     const createInterruptRuntime = createXStatePlaybookRuntime(
-      interruptMachine,
+      checkpoint ? interruptMachine : eventOnlyMachine(interruptMachine as any),
       {
         label: 'interrupt-retry',
         compat: { artifactSchema: 3, runtimeAbi: RUNTIME_ABI },
@@ -8844,12 +8882,12 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     const failed = await runtime.handleBossInput(turn('take the second route'));
     expect(failed.outcome).toBe('failed');
     expect(runtime.describe!().actions).toContainEqual({
-      id: 'retry:step',
+      id: checkpoint ? 'retry:step' : 'retry:BOSS_INTERRUPT',
       label: 'Retry: secondRoute state',
       standing: 'ready',
     });
     expect(runtime.describe!().actions).not.toContainEqual({
-      id: 'retry:step',
+      id: checkpoint ? 'retry:step' : 'retry:BOSS_INTERRUPT',
       label: 'Retry: firstRoute state',
       standing: 'ready',
     });

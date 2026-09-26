@@ -127,9 +127,9 @@ const createRuntime = createXStatePlaybookRuntime(machine, {
 
 describe('interrupted-step recovery with real Git', () => {
   for (const restored of [false, true])
-    for (const failureKind of ['player', 'judge', 'files', 'missing-transition']) {
-      const failedJudge = failureKind === 'judge';
-      const unwantedFiles = failureKind === 'files';
+    for (const failureKind of ['player', 'judge', 'blocked-judge', 'files', 'moved-head', 'missing-transition']) {
+      const failedJudge = ['judge', 'blocked-judge'].includes(failureKind);
+      const unwantedFiles = ['files', 'moved-head'].includes(failureKind);
       const missingTransition = failureKind === 'missing-transition';
       it(`preserves the commit after ${failureKind} failure (${restored ? 'restored' : 'live'})`, async () => {
         const cwd = await mkdtemp(join(tmpdir(), 'playbook-step-recovery-'));
@@ -265,6 +265,14 @@ describe('interrupted-step recovery with real Git', () => {
               (value: PlaybookRuntimeSnapshot) => {
                 (value.recoveryCheckpoint!.machine as any).children = {};
               },
+              (value: PlaybookRuntimeSnapshot) => {
+                value.recoveryCheckpoint!.stateId = 'ready';
+                (value.recoveryCheckpoint!.machine as any).value = 'ready';
+              },
+              (value: PlaybookRuntimeSnapshot) => {
+                const child = Object.values((value.recoveryCheckpoint!.machine as any).children)[0] as any;
+                child.src = 'captain';
+              },
             ]) {
               const invalid = JSON.parse(JSON.stringify(snapshot));
               corrupt(invalid);
@@ -322,6 +330,13 @@ describe('interrupted-step recovery with real Git', () => {
               Object.assign(corrupted.boundaries[1], amendment);
               expect(() => assertPlaybookEffectLedger(corrupted)).toThrow();
             }
+            if (failureKind === 'moved-head') {
+              git('commit', '--allow-empty', '-qm', 'external commit');
+              expect(await runtime.apply!({ actionId, key: 'moved-head', signal: new AbortController().signal })).toMatchObject({ disposition: 'failed' });
+              expect(calls).toHaveLength(2);
+              expect(runtime.describe!().state.stateId).toBe('failed');
+              return;
+            }
             if (!restored) {
               injectDrift = true;
               expect(await runtime.apply!({ actionId, key: 'drift-after-check', signal: new AbortController().signal })).toMatchObject({ disposition: 'failed' });
@@ -332,7 +347,30 @@ describe('interrupted-step recovery with real Git', () => {
               await rm(join(cwd, 'late-change'));
             }
           }
+          let repeatedCalls = 0;
+          if (unwantedFiles) {
+            // The repaired read-only call can itself fail again. Its checkpoint
+            // must replace the old one, so a second exact repair remains possible.
+            const nextBoundaryPrefix = hostCapabilities.effectLedger.snapshot().boundaries.length;
+            expect(await runtime.apply!({ actionId, key: 'second-stray-file', signal: new AbortController().signal })).toMatchObject({ disposition: 'failed' });
+            repeatedCalls = 1;
+            expect(runtime.exportSnapshot!()!.recoveryCheckpoint!.boundaryPrefix).toBe(nextBoundaryPrefix);
+            expect(runtime.describe!().actions.map(({ id }) => id)).toContain('retry:restored-step');
+            await rm(join(cwd, 'intermediate-output'));
+            actionId = 'retry:restored-step';
+          }
           fail = false;
+          if (failureKind === 'blocked-judge') {
+            judgeReply = '{"blocked":"No declared result allows this completed commit."}';
+            expect(await runtime.apply!({ actionId, key: 'blocked-assessment', signal: new AbortController().signal })).toMatchObject({ disposition: 'failed' });
+            expect(runtime.describe!().lastError).toMatchObject({ cause: { code: 'runtime-defect', evidence: { reason: expect.stringContaining('No declared result') } } });
+            expect(hostCapabilities.effectLedger.snapshot().boundaries[0]!.semanticCandidate).toEqual({ blocked: 'No declared result allows this completed commit.' });
+            expect(runtime.describe!().actions.map(({ id }) => id)).not.toContain(actionId);
+            expect(calls).toHaveLength(1);
+            expect(judgeCalls).toBe(2);
+            expect(git('rev-list', '--count', 'HEAD')).toBe('2');
+            return;
+          }
           if (failedJudge) {
             for (const invalid of ['not JSON', '{"guard":"unknown"}']) {
               judgeReply = invalid;
@@ -381,8 +419,9 @@ describe('interrupted-step recovery with real Git', () => {
             disposition: 'executed',
             run: { outcome: 'terminal' },
           });
-          expect(calls).toHaveLength(failedJudge ? 2 : 3);
-          if (!failedJudge) expect(calls[2]).toBe(calls[1]);
+          expect(calls).toHaveLength(failedJudge ? 2 : 3 + repeatedCalls);
+          if (failedJudge) expect(judgeCalls).toBe(5);
+          if (!failedJudge) expect(calls.at(-1)).toBe(calls[1]);
           expect(calls.at(-1)).toContain('first-completed');
           if (unwantedFiles) {
             const saved = hostCapabilities.effectLedger.snapshot().boundaries[1]!;
@@ -401,7 +440,7 @@ describe('interrupted-step recovery with real Git', () => {
               signal: new AbortController().signal,
             }),
           ).toEqual(receipt);
-          expect(calls).toHaveLength(failedJudge ? 2 : 3);
+          expect(calls).toHaveLength(failedJudge ? 2 : 3 + repeatedCalls);
         } finally {
           await runtime?.dispose();
           await rm(cwd, { recursive: true, force: true });

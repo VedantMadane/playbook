@@ -307,7 +307,7 @@ export async function runPlaybookRun(options = {}) {
       if (!args.retryUncertain) {
         const releaseError = await releaseLease(lease);
         lease = undefined;
-        await reportUncertainSession(stderr, sessionId);
+        await reportUncertainSession(stderr, sessionId, priorRecord.uncertain.recovery !== undefined);
         if (releaseError !== undefined) {
           await writeStream(
             stderr,
@@ -884,6 +884,7 @@ export async function driveHeadlessCaptainTurn({
     };
   } catch (error) {
     if (host !== undefined) {
+      await settleStoppedPreparation(shell, sessionLease);
       try {
         await host.dispose();
       } catch (cleanupError) {
@@ -962,7 +963,7 @@ function isCaptainSessionHostCleanupIncomplete(error) {
   );
 }
 
-function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, stoppedStep = false) {
+function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, continuation) {
   const checkpoint = assertPlaybookEffectLedger(snapshot.effectLedger);
   const current = assertPlaybookEffectLedger(ledger);
   const checkpointBoundaryCount = checkpoint.boundaries.length;
@@ -970,13 +971,23 @@ function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, stoppedStep
   if (!isPlaybookEffectLedgerMonotonicExtension(checkpoint, current)) {
     throw new Error('Captain recovery evidence changed incompatibly');
   }
-  if (!stoppedStep && !isDeepStrictEqual(currentPrefix, checkpoint.boundaries)) {
+  const assessmentRetry = continuation?.kind === 'runtime' &&
+    ['retry:adjudication', 'retry:restored-step'].includes(continuation.actionId);
+  const leaf = snapshot.mode === 'engaged.parked' ? snapshot.frames.at(-1) : undefined;
+  const invocation = leaf?.runtime.recoveryCheckpoint;
+  const withoutAssessment = (boundaries) => boundaries.map((boundary, index) => {
+    if (!invocation || index < invocation.boundaryPrefix || boundary.runtimeSessionId !== leaf.sessionId || boundary.sourceStateId !== invocation.stateId) return boundary;
+    const { semanticCandidate, restored, ...physical } = boundary;
+    return physical;
+  });
+  if (!isDeepStrictEqual(currentPrefix, checkpoint.boundaries) &&
+      !(assessmentRetry && isDeepStrictEqual(withoutAssessment(currentPrefix), withoutAssessment(checkpoint.boundaries)))) {
     throw new Error(
       "Captain uncertain turn repository-effect reconciliation cannot restore a changed pre-turn boundary",
     );
   }
   if (
-    !stoppedStep && !isDeepStrictEqual(current.logicalOperations, checkpoint.logicalOperations)
+    !isDeepStrictEqual(current.logicalOperations, checkpoint.logicalOperations)
   ) {
     throw new Error(
       "Captain uncertain turn repository-effect reconciliation found deferred logical-operation progress and cannot replay the Boss turn",
@@ -986,7 +997,7 @@ function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, stoppedStep
   const blocking = suffix.find(
     (boundary) => boundary.physicalReceipt?.classification !== "unchanged",
   );
-  if (!stoppedStep && blocking !== undefined) {
+  if (blocking !== undefined) {
     const classification =
       blocking.physicalReceipt?.classification ?? "incomplete";
     throw new Error(
@@ -1013,6 +1024,17 @@ function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, stoppedStep
     effectLedger: current,
     ...(frames === undefined ? {} : { frames }),
   });
+}
+
+// A drained preparation has not dispatched the player. Keep its latest parked
+// stack so cancellation does not force the same preparation forever.
+export async function settleStoppedPreparation(shell, lease) {
+  const record = await lease.read();
+  const point = record?.uncertain?.recovery;
+  if (!point || point.continuation || !isDeepStrictEqual(point.snapshot.effectLedger, record.effectLedger)) return;
+  const settlement = shell.exportSettlement();
+  if (!settlement) return;
+  return lease.settle({ attemptId: record.uncertain.attemptId, ...settlement });
 }
 
 export async function createCaptainSessionHost({
@@ -1085,7 +1107,7 @@ export async function createCaptainSessionHost({
       sourceSnapshot,
       currentEffectLedger(),
       config.catalog,
-      recovery !== undefined,
+      recovery?.continuation,
     );
   } else if (
     sourceSnapshot !== undefined &&
@@ -1175,7 +1197,7 @@ export async function createCaptainSessionHost({
     }
     presentationReady = true;
     for (const record of bufferedRecords) await forwardRecord(record);
-    if (recovery) shell.selectRecovery(interrupted.uncertain.input, recovery.instruction);
+    if (recovery) shell.selectRecovery(interrupted.uncertain.input, recovery.instruction, recovery.continuation);
     return { shell, host, snapshot, reconcileRepositoryEffects };
   } catch (error) {
     let cleanupError;
@@ -1731,14 +1753,16 @@ async function reportHeadlessReplay(channel, status) {
   await channel.flushWarning();
 }
 
-async function reportUncertainSession(stderr, sessionId) {
+async function reportUncertainSession(stderr, sessionId, hasRecoveryPoint = false) {
   await writeStream(
     stderr,
     [
       `playbook run: Captain session ${JSON.stringify(sessionId)} has an uncertain turn and will not be replayed automatically`,
-      "Retry may duplicate external effects from the interrupted attempt; discard abandons that attempted turn.",
+      hasRecoveryPoint
+        ? "Resume the saved step with Retry. Discard is unavailable because preparation may have changed prerequisites."
+        : "Retry may duplicate external effects from the interrupted attempt; discard abandons that attempted turn.",
       `playbook run --session ${sessionId} --retry-uncertain`,
-      `playbook run --session ${sessionId} --discard-uncertain`,
+      ...(hasRecoveryPoint ? [] : [`playbook run --session ${sessionId} --discard-uncertain`]),
       "",
     ].join("\n"),
   );

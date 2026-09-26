@@ -142,7 +142,7 @@ This single-attempt rule applies to every captain reply, including a
 `respond` reply and a recovery failure reply.
 The closing reply shall use a natural chat-like tone and clear
 formatting while remaining brief.
-It shall state only what was done or what changed, composed from the
+It shall state what was done or changed and relay all current pending questions [[captain-playbook-5](captain-playbook.md#captain-playbook-5)], grounding effects in the
 turn's reported outcome — the settlement facts — and shall claim no
 work the outcome report does not contain.
 When the closing reply mentions progress detail, it shall use only
@@ -335,6 +335,7 @@ parsing the command:
 | bare `/<command>`, enabled command | any | `respond` only — status or clarification, never a restart |
 | the text a host selection of an advertised runtime action returned, on the turn carrying it [[playbook-captain-60](#playbook-captain-60)] | engaged | `runtime` that selected action id |
 | the text a host selection of the shell's give-up control returned, on the turn carrying it [[playbook-captain-62](#playbook-captain-62)] | engaged | `dismiss` |
+| exact text armed by `selectRecovery(text, instruction, continuation?)` [[recovery-18](recovery.md#recovery-18)] | engaged | `recover`, or the saved continuation, using the saved instruction for delivery |
 | unregistered `/<x>` or ordinary text | any | the session Captain's decision call |
 
 A host selection ([DR-051](../decisions/051-host-selected-runtime-recovery.md))
@@ -492,6 +493,7 @@ Where the Playbook Captain shell uses cligent Captain primitives,
 the shell shall use one Captain agent configuration and shall
 serialize durable session-Captain calls and hidden sub-runtime judge
 calls through one abort-aware concurrency-one queue.
+The ControlView digest shall state whether recovery preparation is available and its published description, with full context reserved for preparation [[recovery-5](recovery.md#recovery-5)].
 Every session-Captain call and sub-runtime judge call shall pass
 `{ visibility: 'hidden' }` to `callCaptain`; no visible Captain call
 shall exist.
@@ -562,12 +564,13 @@ opens a labeled block the model reads as host-authored. The shell shall
 therefore escape and bound at the one seam through which a value it did
 not author becomes part of a digest line, so a line added to a digest
 later carries the property without restating it.
+If Captain cannot produce a usable reply, the fallback shall show the complete original pending question as a clearly identified quote rather than hide it.
 Pending question text is an exception to length bounding: it shall enter every decision and reply digest complete, JSON-quoted on one physical line so its final choices and constraints remain available without forging prompt blocks.
 Digests and session-Captain prompts shall exclude session and call
 UUIDs, resume tokens, trace payloads, module specifiers, option
 values, player rosters, raw recovery records, and ledger JSON; player
 output shall enter the conversation only as fenced quotes.
-A raw recovery record shall reach no prompt, ever; the sole
+A raw recovery record shall reach no prompt, ever; outside the bounded question check [[recovery-14](recovery.md#recovery-14)], the sole
 history-derived text any prompt may carry is the deterministic
 reseed digest the shell composes from those records
 ([[playbook-captain-35](#playbook-captain-35)]), permitted on exactly the first call of a
@@ -749,7 +752,7 @@ shall serialize these calls.
 
 Where the Playbook Captain shell settles a non-`respond` selection for
 a Boss turn, the shell shall collect turn-summary counts only for the
-duration of any action execution — the sub-runtime
+combined duration of action execution and its automatic continuation [[recovery-14](recovery.md#recovery-14)] — the sub-runtime
 `handleBossInput` call, the `apply()` call, or a `switch`'s
 dismissals and start — and only when the active registry entry
 declares a `summaryPolicy`.
@@ -786,8 +789,8 @@ not make that call itself, and shall supply, inside that call's
 facts verbatim, the exact saved interruption and copy-paste counts,
 and the aggregate summary-visible progress phrase and round total,
 and shall instruct Captain to compose the closing reply required by
-[[playbook-captain-19](playbook-captain.md#playbook-captain-19)] only from that
-outcome report.
+[[playbook-captain-19](playbook-captain.md#playbook-captain-19)] from that
+outcome report and the current complete pending questions.
 While the turn's counted activity — the saved interruptions plus
 saved copy-pastes plus the summary-visible round total — is nonzero,
 the result-phase prompt shall instruct Captain to append the active
@@ -967,7 +970,7 @@ registry without imposing a separate numeric limit.
 When the initial child turn parks or suspends, `callPlaybook` shall
 return its suspended child session id so the parent runtime can settle
 its Boss turn; only the top frame shall receive later Boss turns.
-When a child returns terminal output, rejects at the runtime boundary,
+When a child returns terminal output, rejects without a retainable parked invocation [[recovery-16](recovery.md#recovery-16)],
 is aborted, or is dismissed, the
 shell shall dispose and pop it, restore the parent's player
 visibility, and call the parent's `resumePlaybookCall` with the same call id
@@ -1094,7 +1097,7 @@ the underlying diagnostic outside Boss-visible prose.
 
 #### playbook-captain-41
 
-Where `@sublang/playbook/playbook-captain` exposes the Playbook Captain shell, the module shall export `PlaybookCaptainShellSnapshot`, `assertPlaybookCaptainShellSnapshot(value: unknown): PlaybookCaptainShellSnapshot`, `PlaybookCaptainFrameSnapshot`, `PlaybookCaptainRetainedGeneration`, `PlaybookCaptainRetentionUpdate`, `PlaybookCaptainUnresolvedEffect`, `assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[]`, `PlaybookCaptainSettlement`, and `PlaybookCaptainShell`, with `PlaybookCaptainShell` extending tmux-play's `Captain` by exactly `installRetainedGenerations(generations: Readonly<Record<string, PlaybookCaptainRetainedGeneration>>): Promise<void>`, `exportSnapshot(): PlaybookCaptainShellSnapshot | undefined`, `exportSettlement(): PlaybookCaptainSettlement | undefined`, `restore(session: CaptainSession, snapshot: PlaybookCaptainShellSnapshot): Promise<void>`, optional `describeRuntimeActions?(): readonly PlaybookControlAction[]` [[playbook-captain-60](#playbook-captain-60)], optional `submitRuntimeAction?(actionId: string): string` [[playbook-captain-7](#playbook-captain-7)], optional `describeShellActions?(): readonly PlaybookControlAction[]` [[playbook-captain-62](#playbook-captain-62)], and optional `submitShellAction?(actionId: string): string` [[playbook-captain-7](#playbook-captain-7)], the four host members declared optional so a shell that publishes none advertises nothing.
+Where `@sublang/playbook/playbook-captain` exposes the Playbook Captain shell, the module shall export `PlaybookCaptainShellSnapshot`, `assertPlaybookCaptainShellSnapshot(value: unknown): PlaybookCaptainShellSnapshot`, `PlaybookCaptainFrameSnapshot`, `PlaybookCaptainRetainedGeneration`, `PlaybookCaptainRetentionUpdate`, `PlaybookCaptainUnresolvedEffect`, `assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[]`, `PlaybookCaptainSettlement`, and `PlaybookCaptainShell`, with `PlaybookCaptainShell` extending tmux-play's `Captain` by exactly `installRetainedGenerations(generations: Readonly<Record<string, PlaybookCaptainRetainedGeneration>>): Promise<void>`, `exportSnapshot(): PlaybookCaptainShellSnapshot | undefined`, `exportSettlement(): PlaybookCaptainSettlement | undefined`, `restore(session: CaptainSession, snapshot: PlaybookCaptainShellSnapshot): Promise<void>`, optional `describeRuntimeActions?(): readonly PlaybookControlAction[]` [[playbook-captain-60](#playbook-captain-60)], optional `submitRuntimeAction?(actionId: string): string` [[playbook-captain-7](#playbook-captain-7)], optional `describeShellActions?(): readonly PlaybookControlAction[]` [[playbook-captain-62](#playbook-captain-62)], and optional `submitShellAction?(actionId: string): string` [[playbook-captain-7](#playbook-captain-7)], and optional `selectRecovery?(text: string, instruction: string, continuation?: {kind:'reply'} | {kind:'runtime',actionId:string}): void` [[recovery-18](recovery.md#recovery-18)], the five host members declared optional so a shell that publishes none advertises nothing.
 The module's default shell factory shall return `PlaybookCaptainShell`.
 `PlaybookCaptainShellSnapshot` shall be a detached JSON-safe schema-version-4 value with these exact common and mode-discriminated members:
 
@@ -1273,12 +1276,11 @@ status, visibility request, or telemetry event (verifying [[playbook-captain-1](
 
 #### playbook-captain-13
 
-
 Where the test suite drives ordinary Boss text through the Playbook
 Captain shell with scripted decision replies, the test suite shall
 fail unless every non-command turn produces exactly one hidden
 durable decision call; the executable selections are exactly
-`respond`, `resume`, `start`, `switch`, `dismiss`, `deliver`, and `runtime`;
+`respond`, `resume`, `start`, `switch`, `dismiss`, `deliver`, `runtime`, and `recover`;
 `deliver` hands the shell-supplied original Boss text unchanged to
 the active leaf — a scripted `deliver` selection carrying a
 divergent text payload still delivers the exact Boss text, the
@@ -1629,6 +1631,7 @@ carrying no raw state id; and "what went
 wrong?" asked twice after a failure carries the engine's
 `ControlView.lastError` in both captured decision prompts with no
 `apply` and the machine untouched.
+The question-relay cases shall verify that marked runtime question statuses are suppressed and a failed Captain reply falls back to the complete original question [[playbook-captain-9](#playbook-captain-9)] [[playbook-captain-10](#playbook-captain-10)].
 The suite shall fail unless a scripted `failed` receipt with a
 normalized error yields a captured result-phase call carrying the
 disposition, the error `{ name, message }`, and the settlement facts

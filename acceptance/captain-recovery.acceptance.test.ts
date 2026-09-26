@@ -331,12 +331,13 @@ playbooks:
         await expect(controller.handleBossTurn(task)).rejects.toThrow();
         const broken = await controller.read();
         await writeFile(join(root, 'broken.json'), JSON.stringify(broken, null, 2));
-        expect(broken?.uncertain?.recovery?.snapshot.frames?.[0]?.runtime.recoveryCheckpoint?.stateId).toBe('second');
+        expect(broken?.state).toBe('settled');
+        expect(broken?.snapshot.frames?.[0]?.runtime.recoveryCheckpoint?.stateId).toBe('second');
         expect(git('rev-list', '--count', 'HEAD')).toBe('2');
         const id = controller.sessionId;
         await controller.dispose();
         controller = await openSessionHost({ store, mode: 'recover', sessionId: id, config, loadModule, adapterImports });
-        recovered = await controller.recover();
+        recovered = await controller.recover('Continue the existing task, preserving completed commits and preparing only its next step.');
       } else {
         recovered = await controller.handleBossTurn(task);
       }

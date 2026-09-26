@@ -40,7 +40,7 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
     // Frozen historical inputs remain unshipped reproduction artifacts.
     expect(sha(read('slc/materialize-link.mjs'))).toBe('5024778548509370d899f3709829fd7609d67bc4fe5d72b2c76d5d0ab26f59eb');
     expect(sha(read('scripts/experiments/materialize-link-v2.mjs'))).toBe('fe7336bc4c1511c4170ac3cdaeda4ffc30f3848b40ae7301f6660c20067e58e0');
-    expect(sha(full)).toBe('86d516ac3e5a593c87a62477e9160d37de327ab8812892ef48be77fdf96b1bc6');
+    expect(sha(full)).toBe('47f1e66eae2db07ecc1d9f1302c5212b2e237152ec1e5bfbdf11bde00f5d5bd8');
     // Recovery is additive; strip its exact additions before auditing the
     // frozen pre-recovery experiment contracts below.
     const recoveryAdditions = [
@@ -52,6 +52,11 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
 ];
     // Remove the later question-presentation contract before historical comparison.
     let beforeRecovery = full
+      .replace('  readonly restored?: PlaybookRepositoryObservation;\n', '')
+      .replace("  | 'restored'\n", '')
+      .replace('Except for eligible saved-result assessment or verified read-only restoration under [recovery.md](../specs/packages/recovery.md), while effect-possible', 'While effect-possible')
+      .replace('A valid invocation checkpoint takes precedence over entry-event replay: it retries only the stopped invocation after its effect checks, using `retry:<EVENT_TYPE>` for the same entry target or `retry:step` otherwise.\nSaved-result assessment (`retry:adjudication`) never repeats the player, and verified read-only restoration (`retry:restored-step`) records an exact baseline check before replay.\nThese retries have standing `ready`; an unsafe checkpoint grants no replay.\nWithout an invocation checkpoint, two ordinary families exist, labeled from source state descriptions:', 'Otherwise two ordinary families exist, labeled from source state descriptions:')
+      .replace('Executing an event-based retry or jump sends', 'Executing an ordinary retry or jump sends')
       .replace("  Mark both a player-question status and its waiting marker with status data\n  `{ kind: \"boss-question\" }`; the session Captain replaces those statuses with\n  its own clear reply, using the complete pending question from the control view.\n  Keep the original question in state and telemetry, and deliver Boss input unchanged.\n", '')
       .replace('one closed reason from `no-matching-outcome`, `missing-presentation-evidence`', 'one closed reason from `missing-presentation-evidence`')
       .replace('  preparation?: string;\n  evidence?: JsonValue;\n', '')

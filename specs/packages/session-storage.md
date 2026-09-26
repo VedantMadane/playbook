@@ -171,7 +171,7 @@ When migrating a stopped legacy store, the shared migrator shall hold the sessio
 
 ### session-storage-11
 
-The published session API shall offer applications the same create, open, begin-turn, settle, retry, discard, abandonment and release operations as both CLIs, using the same store, validators, writer leases and durable effect ledger [[playbook-cli-23](playbook-cli.md#playbook-cli-23)]:
+The published session API shall offer applications the same create, open, begin-turn, checkpointRecovery [[recovery-18](recovery.md#recovery-18)], settle, retry, discard, abandonment and release operations as both CLIs, using the same store, validators, writer leases and durable effect ledger [[playbook-cli-23](playbook-cli.md#playbook-cli-23)]:
 
 - opening validates required replay/context and destination compatibility before module imports, shell restoration, hint consumption or repository reconciliation [[session-storage-4](#session-storage-4)] [[session-storage-9](#session-storage-9)];
 - hosts supply agent calls, module loading, presentation and repository dependencies; they do not reimplement manifest writes, journal authority or recovery decisions;

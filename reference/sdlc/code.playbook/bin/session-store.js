@@ -4151,7 +4151,15 @@ function validateCanonicalCaptainSessionRecord(
     );
     if (uncertain.recovery !== undefined) {
       const point = requireRecord(uncertain.recovery, 'Captain preparation recovery point');
-      rejectUnknownOrMissingKeys(point, ['snapshot', 'instruction'], 'Captain preparation recovery point');
+      rejectUnknownOrMissingKeys(point, ['snapshot', 'instruction', ...(Object.hasOwn(point, 'continuation') ? ['continuation'] : [])], 'Captain preparation recovery point');
+      if (point.continuation !== undefined) {
+        const continuation = requireRecord(point.continuation, 'Captain recovery continuation');
+        if (continuation.kind === 'reply') rejectUnknownOrMissingKeys(continuation, ['kind'], 'Captain recovery continuation');
+        else if (continuation.kind === 'runtime') {
+          rejectUnknownOrMissingKeys(continuation, ['kind', 'actionId'], 'Captain recovery continuation');
+          requireCanonicalNonblank(continuation.actionId, 'Captain recovery action');
+        } else throw new Error('Captain recovery continuation must be reply or runtime');
+      }
       assertAcceptedInput(point.instruction);
       const prepared = assertPlaybookCaptainShellSnapshot(point.snapshot);
       assertSnapshotMatchesStructure(prepared, structural, artifactSchemas);

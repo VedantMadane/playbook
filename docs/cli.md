@@ -144,17 +144,16 @@ uses the exact stable player IDs configured under its `roles` map. Equal IDs
 share one pane and provider conversation across nested and later root
 engagements; distinct IDs remain isolated even when their agent settings are
 identical. When a player surfaces a
-clarifying question the FSM parks, the pane shows the question, and a
-judge classifies your next turn as its reply or a fresh directive that
-abandons it
+clarifying question, the playbook pauses and Captain explains the complete question briefly.
+Answer or ask for clarification through Captain; reading a player pane is unnecessary.
+A request to explain preserves the pending question, while an answer or explicit player follow-up reaches the waiting player
 ([[playbook-runtime-2](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-runtime.md#playbook-runtime-2)]).
 
 The Captain pane shows start/stop/finished status with `◇` lines and
-streams progress with captain-speech classification and questions
+streams progress; Captain relays pending questions in its reply
 ([[playbook-runtime-3](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-runtime.md#playbook-runtime-3)]), while player
 prompts ride their own panes. A turn that actually did something ends
-with one Captain reply summarizing what changed, composed only from that
-turn's reported outcome; a turn that changed nothing ends with an
+with one Captain reply summarizing what changed, grounded in that turn's reported outcome and current pending questions; a turn that changed nothing ends with an
 ordinary reply and no saved-counts line
 ([[playbook-captain-19](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-captain.md#playbook-captain-19)]).
 
@@ -383,7 +382,7 @@ The runtime checks the continuation. It retries the interrupted step, keeps earl
 
 Captain asks Boss for a real missing decision, uncertain permission, or a missing or contradictory playbook transition. Repository checks alone cannot prove that publishing or another outside action is safe to repeat; Captain must check that separately.
 
-Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline that cancels the host turn if exceeded. A saved point is written before tools run, allowing another process to resume that stopped step after an interruption during preparation. Custom hosts must provide cancellation before preparation is available.
+Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline. When cancellation drains safely before continuation, the step stays paused and accepts a new instruction. A process loss instead keeps a saved point for Retry. Immediately before continuation, that point is replaced so Retry cannot rerun preparation or bypass checks on later work. Custom hosts must provide cancellation before preparation is available.
 
 Custom runtimes can provide the same recovery offer: step prompt, optional preparation conditions and evidence, and a continuation they will validate. Captain needs no list of repair tools or error strings. Older checkpoints without this offer keep their existing controls.
 

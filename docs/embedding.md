@@ -418,10 +418,13 @@ A single recovery entry point handles either a paused step or an uncertain attem
 
 ```ts
 const controller = await openSessionHost({ store: shared, sessionId, mode: 'recover' });
-try { await controller.recover(); } finally { await controller.dispose(); }
+try {
+  const record = await controller.read();
+  await controller.recover(record.state === 'uncertain' ? undefined : bossInstruction);
+} finally { await controller.dispose(); }
 ```
 
-For uncertainty it uses the saved instruction and exact attempted settings. It resumes the saved preparation point when available; otherwise it checks whether the original turn can safely repeat. It never chooses discard. For an already settled pause, `recover(answer)` may supply Boss's missing input. New input cannot replace an uncertain instruction before recovery.
+For uncertainty it uses the saved instruction and exact attempted settings. It resumes the saved preparation point when available; otherwise it checks whether the original turn can safely repeat. It never chooses discard. For an already settled pause, `recover(bossInstruction)` requires Boss's instruction or answer; it never invents one. New input cannot replace an uncertain instruction before recovery.
 
 Explicit `mode:'retry'` and `retry()` remain supported. Module-free
 `discardSessionUncertain(shared, sessionId)` restores the prior recovery only

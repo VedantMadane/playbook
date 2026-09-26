@@ -354,6 +354,7 @@ interface PlaybookEffectBoundary {
   readonly baseline: PlaybookRepositoryObservation;
   readonly after?: PlaybookRepositoryObservation;
   readonly physicalReceipt?: PlaybookRepositoryReceipt;
+  readonly restored?: PlaybookRepositoryObservation;
   readonly finalText?: string;
   readonly semanticCandidate?: JsonValue;
   readonly initialSemanticCandidate?: JsonValue;
@@ -393,6 +394,7 @@ type PlaybookEffectBoundaryStart = Omit<
   | 'finalText'
   | 'semanticCandidate'
   | 'initialSemanticCandidate'
+  | 'restored'
 >;
 
 type PlaybookEffectLogicalOperationStart = Omit<
@@ -2193,8 +2195,11 @@ Actions derive from the live snapshot, only at the same safe point the
 parked-session snapshot uses (actor status `active`, quiescent, no pending
 nested call); anywhere else `actions` is empty while the rest of the view
 still describes the state.
-While effect-possible outcome evidence remains unresolved, the view shall omit its pending Boss questions and state description and shall replace every ordinary action with exactly `reconcile:unresolved-effect` labeled `Retry unresolved effect reconciliation` and `abandon:unresolved-effect` labeled `Abandon unresolved workflow attempt`.
-Otherwise two ordinary families exist, labeled from source state descriptions:
+Except for eligible saved-result assessment or verified read-only restoration under [recovery.md](../specs/packages/recovery.md), while effect-possible outcome evidence remains unresolved, the view shall omit its pending Boss questions and state description and shall replace every ordinary action with exactly `reconcile:unresolved-effect` labeled `Retry unresolved effect reconciliation` and `abandon:unresolved-effect` labeled `Abandon unresolved workflow attempt`.
+A valid invocation checkpoint takes precedence over entry-event replay: it retries only the stopped invocation after its effect checks, using `retry:<EVENT_TYPE>` for the same entry target or `retry:step` otherwise.
+Saved-result assessment (`retry:adjudication`) never repeats the player, and verified read-only restoration (`retry:restored-step`) records an exact baseline check before replay.
+These retries have standing `ready`; an unsafe checkpoint grants no replay.
+Without an invocation checkpoint, two ordinary families exist, labeled from source state descriptions:
 
 - **Failure-state retry** — while the singular state id is the recoverable
   failure state and the live snapshot accepts the retry event sourced below,
@@ -2240,7 +2245,7 @@ pair, and may execute once the action is advertised — and a key whose call
 threw before reaching acceptance (lifecycle misuse, invalid input, a
 pre-acceptance abort, a rejected start-boundary sink) likewise records
 nothing, so a later call with that key may execute.
-Executing an ordinary retry or jump sends the validated event through the same actor drive as `handleBossInput` — state
+Executing an event-based retry or jump sends the validated event through the same actor drive as `handleBossInput` — state
 transitions, player/judge boundaries, statuses, and traces flow unchanged —
 and settles `executed` with the projected run result, or `failed` with the
 normalized error when the run settles in the failure state, aborts, or a

@@ -5610,7 +5610,7 @@ export function createXStatePlaybookRuntime<
 
     let requiredRecoveryBaseline: PlaybookRepositoryReceipt['baseline'] | undefined;
 
-    function captureRecoveryCheckpoint(stateId: string, prompt: string): void {
+    function captureRecoveryCheckpoint(stateId: string, prompt: string, boundaryPrefix?: number): void {
       if (requiredRecoveryBaseline !== undefined) return;
       // Capture after the entry emissions drain: the invocation is now a
       // real active child in XState's persisted snapshot, before host work.
@@ -5622,7 +5622,7 @@ export function createXStatePlaybookRuntime<
           stateId,
           prompt,
           machine: detachPersistedMachineSnapshot(actor.getPersistedSnapshot()),
-          boundaryPrefix: current.boundaries.length,
+          boundaryPrefix: boundaryPrefix ?? current.boundaries.length,
         });
       } catch {
         // An in-memory-only context is still executable; it simply cannot
@@ -5735,11 +5735,6 @@ export function createXStatePlaybookRuntime<
         finalText: saved.finalText,
         receipt: saved.physicalReceipt,
       });
-      if (result.status !== 'resolved') {
-        throw new Error(
-          `${label} saved result could not be reconciled; the playbook remains parked`,
-        );
-      }
       signal.throwIfAborted();
       const next = {
         ...saved,
@@ -5765,6 +5760,21 @@ export function createXStatePlaybookRuntime<
       }
       effectLedgerMirror = acknowledged;
       refreshUnresolvedSemanticReconciliation(acknowledged);
+      if (result.status !== 'resolved') {
+        const error = attachPlaybookFailureCause(new Error(
+          result.status === 'unresolved' && 'reason' in result.cause.evidence && result.cause.evidence.reason
+            ? String(result.cause.evidence.reason)
+            : `${label} saved result could not be reconciled; the playbook remains parked`,
+        ), result.status === 'unresolved' ? result.cause : runtimeDefectCause('Saved result still needs a Boss answer'));
+        const paused = detachPersistedMachineSnapshot(actor!.getPersistedSnapshot()) as Record<string, JsonValue>;
+        stopActor();
+        actor = buildActor(runtimePorts!, {
+          ...paused, context: { ...(paused.context as Record<string, JsonValue>), lastError: snapshotJsonValue(normalizeErrorFull(error)) },
+        });
+        suppressInspectionEmissions = false;
+        actor.start();
+        throw error;
+      }
       // Reuse the established reconstruction bridge to deliver the recorded
       // result to XState without a second physical boundary or player call.
       reconstructedGovernedPrefixSequence = checkpoint.boundaryPrefix;
@@ -6179,6 +6189,8 @@ export function createXStatePlaybookRuntime<
                     throw new Error(`${label} repository changed after preparation; the stopped step remains paused`);
                   }
                   requiredRecoveryBaseline = undefined;
+                  captureRecoveryCheckpoint(input.stateId, freshPrompt,
+                    currentEffectLedger().boundaries.findIndex(({ boundaryId }) => boundaryId === effectBoundary.boundaryId));
                 }
                 return runTracedPlayerCall(
                   selectedResume,
@@ -8684,7 +8696,8 @@ export function createXStatePlaybookRuntime<
           id.startsWith('retry:') &&
           (standing ?? 'ready') === 'ready');
         const stoppedBoundary = recoveryCheckpoint === undefined ? undefined :
-          currentEffectLedger().boundaries.slice(recoveryCheckpoint.boundaryPrefix).at(-1);
+          currentEffectLedger().boundaries.slice(recoveryCheckpoint.boundaryPrefix)
+            .filter((boundary) => runtimeBoundaryIsOwned(boundary) && boundary.sourceStateId === recoveryCheckpoint!.stateId).at(-1);
         const recovery = recoveryCheckpoint === undefined ||
           (pending === undefined && retry === undefined) ? undefined : {
             prompt: recoveryCheckpoint.prompt,
@@ -8955,11 +8968,15 @@ export function createXStatePlaybookRuntime<
                   const checkpoint = recoveryCheckpoint!;
                   requiredRecoveryBaseline = currentEffectLedger().boundaries
                     .slice(checkpoint.boundaryPrefix).find(({ restored }) => restored !== undefined)?.restored;
-                  stopActor();
-                  actor = buildActor(runtimePorts!, checkpoint.machine);
-                  suppressInspectionEmissions = false;
-                  actor.start();
-                  await waitForPlaybookQuiescence(actor, { pendingCalls: nestedBridge });
+                  try {
+                    stopActor();
+                    actor = buildActor(runtimePorts!, checkpoint.machine);
+                    suppressInspectionEmissions = false;
+                    actor.start();
+                    await waitForPlaybookQuiescence(actor, { pendingCalls: nestedBridge });
+                  } finally {
+                    requiredRecoveryBaseline = undefined;
+                  }
                   run = runResultFor(settledOutcome(signal));
                 } else {
                   actor.send(candidate.event!);

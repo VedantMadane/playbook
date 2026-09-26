@@ -12923,7 +12923,7 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     await shell.handleBossTurn(turn(text, 2), context.context);
 
     // The leaf's own `apply` ran once, under the turn's idempotency key.
-    expect(applied).toEqual([{ actionId: RETRY.id, key: 'turn-2-apply-retry:step' }]);
+    expect(applied).toEqual([{ actionId: RETRY.id, key: 'turn-2-apply-retry:step-1' }]);
     // No decision call was allocated, for this turn or the command turn.
     expect(
       context.captainCalls.filter((call) => isDecisionPrompt(call.prompt)),

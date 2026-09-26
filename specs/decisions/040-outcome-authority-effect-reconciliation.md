@@ -5,6 +5,8 @@
 
 ## Status
 
+Recovery amended by [DR-066](066-captain-prepares-step-recovery.md): bounded preparation, saved-step continuation and automatic recovery apply to host-selected actions.
+
 Accepted.
 Refines the registry construction and summary ownership of [DR-009](009-generic-playbook-cli-and-registry.md), transition evidence of [DR-010](010-playbook-session-tracing-and-resume.md), corrective retries of [DR-025](025-resilient-captain-control-adjudication.md) and [DR-028](028-empty-ok-result-re-ask.md), result grounding of [DR-029](029-session-scoped-conversational-captain.md), uncertain recovery of [DR-031](031-shared-captain-session-front-ends.md), failure retry of [DR-034](034-durable-failure-retry-continuity.md), and retained resumption of [DR-038](038-universal-run-resumption.md).
 Refines [DR-005](005-boss-reply-suspension-path.md)'s Boss-reply path for an effect-authorized call by binding the question and its continuation to one cumulative repository operation.

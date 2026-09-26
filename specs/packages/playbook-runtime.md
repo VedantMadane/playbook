@@ -35,7 +35,6 @@ Where a factory-backed artifact supplies linker-emitted `roleStates` and no arti
 - On entry to failure, emit `◆ workflow failed; awaiting Boss recovery.` with the compact normalized error, carrying its cause [[playbook-runtime-96](#playbook-runtime-96)], as status data.
 - Emit no canonical status on entry to an idle, terminal, or other unlisted state.
 
-The shell shall replace marked question statuses with its Captain reply, using the full pending question [[playbook-captain-9](playbook-captain.md#playbook-captain-9)], while standalone hosts may render the original lines ([DR-067](../decisions/067-captain-relays-player-questions.md)).
 The runtime shall compose only each line's meaningful content, while the host owns speaker chrome, wrapping, and visual nesting and keeps judge calls hidden per [[playbook-runtime-15](#playbook-runtime-15)].
 
 ### Host configuration
@@ -1068,7 +1067,7 @@ The runtime shall decide one failure cause `{ code, evidence }` where each failu
 Each action a control view advertises shall read as one standing — `ready`, `no-op`, or `blocked` — declared by its optional `standing` member and `ready` when that member is absent, with `reason` from a closed list present exactly when the standing is not `ready`, so no host draws a control without saying what running it would do while a runtime declaring none keeps advertising what it always did ([DR-063](../decisions/063-failures-explain-themselves.md)):
 
 - `reconcile:unresolved-effect` [[playbook-runtime-79](#playbook-runtime-79)] shall be `no-op` with reason `receipt-complete` when no checkpoint restoration is eligible and every unresolved envelope's boundary already holds a complete `physicalReceipt` in the ledger mirror the view just refreshed [[playbook-runtime-69](#playbook-runtime-69)], and `ready` otherwise.
-- `abandon:unresolved-effect`, `retry:<EVENT_TYPE>`, and `jump:<stateId>` [[playbook-runtime-52](#playbook-runtime-52)] shall be `ready`, since the runtime cannot see whether the Boss changed the outside world.
+- `abandon:unresolved-effect`, `retry:<EVENT_TYPE>`, `retry:step`, `retry:adjudication`, `retry:restored-step` [[recovery-3](recovery.md#recovery-3)] [[recovery-10](recovery.md#recovery-10)] [[recovery-12](recovery.md#recovery-12)], and `jump:<stateId>` [[playbook-runtime-52](#playbook-runtime-52)] shall be `ready`, since the runtime cannot see whether the Boss changed the outside world.
 
 
 ## Verification
@@ -1180,7 +1179,7 @@ When no declared result matches, the integration suite shall verify that live an
 
 #### playbook-runtime-80
 
-When the unresolved-effect control matrix drives live, restored, and retained-adopted schema-3 runtimes at the safe control-capture point of [[playbook-runtime-52](#playbook-runtime-52)], it shall fail unless every unresolved view omits its pending questions and state description and, outside the eligible saved-result assessment case, advertises exactly `reconcile:unresolved-effect` and `abandon:unresolved-effect`, with no ordinary retry or jump, while a resolved runtime advertises neither action (verifying [[playbook-runtime-79](#playbook-runtime-79)]).
+When the unresolved-effect control matrix drives live, restored, and retained-adopted schema-3 runtimes at the safe control-capture point of [[playbook-runtime-52](#playbook-runtime-52)], it shall fail unless every unresolved view omits its pending questions and state description and, outside eligible saved-result assessment and verified-restoration cases, advertises exactly `reconcile:unresolved-effect` and `abandon:unresolved-effect`, with no ordinary retry or jump, while a resolved runtime advertises neither action (verifying [[playbook-runtime-79](#playbook-runtime-79)]).
 The matrix shall fail unless an unequal deferred-checkpoint reconciliation retains the unresolved operation and starts no player or judge, while exact checkpoint restoration consumes eligibility, republishes the identical stable question and bound wait, returns an ordinary nonterminal run result, and likewise starts no player, judge, or semantic-candidate delivery (verifying [[playbook-runtime-79](#playbook-runtime-79)] and [[playbook-runtime-73](#playbook-runtime-73)]).
 The matrix shall fail unless abandonment moves no actor state and returns one accepted control receipt whose run is exactly `{ outcome: 'unresolved-effect', state }`, whose state remains active, quiescent, and nonfinal, and whose run carries no state description, output, pending call, error, repository receipt, effect ledger, semantic evidence, or unresolved-effects projection; replaying its idempotency key shall return that receipt without another action boundary (verifying [[playbook-runtime-79](#playbook-runtime-79)] and [[playbook-runtime-52](#playbook-runtime-52)]).
 The public-contract matrix shall fail unless the SLC, authored runtime source, committed declaration, and packaged declaration all expose that exact state-only arm while preserving the distinct terminal, suspended, failure, abort, quiescent, and no-action shapes (verifying [[playbook-runtime-34](#playbook-runtime-34)], [[playbook-runtime-41](#playbook-runtime-41)], and [[playbook-runtime-79](#playbook-runtime-79)]).
@@ -1599,6 +1598,7 @@ When the integration suite constructs a shared-factory runtime over an artifact 
 
 #### playbook-runtime-53
 
+The legacy event-retry cases below shall run without an invocation checkpoint; checkpoint-bearing cases shall instead assert the interrupted-step behavior [[playbook-runtime-52](#playbook-runtime-52)].
 
 Where the integration suite drives shared-factory runtimes — synthetic
 workflow machines plus the real linked CODE runtime, under fake ports

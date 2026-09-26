@@ -44,6 +44,10 @@ class ScriptedAdapter implements AgentAdapter {
     prompt: string,
     _options?: AgentOptions,
   ): AsyncGenerator<AgentEvent, void, void> {
+    if (prompt.startsWith('Check whether existing instructions already answer')) {
+      yield createEvent('done', this.agent, { status: 'success', result: '{"instructionIndex":null}', usage: { toolUses: 0 }, durationMs: 1 }, 'question-check');
+      return;
+    }
     if (prompt.includes('You are Captain preparing an interrupted playbook')) {
       yield createEvent('done', this.agent, { status: 'success', result: '{"status":"blocked","summary":"This fixture requires Boss input before continuing."}', usage: { toolUses: 0 }, durationMs: 1 }, 'preparation');
       return;

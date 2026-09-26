@@ -2788,7 +2788,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await target.harness.shell.dispose?.();
   });
 
-  it('adopts a real CODE failure without replaying its governed call', async () => {
+  it('adopts a real CODE failure without driving until Boss retries', async () => {
     const sourceCode = realEntry(codeRegistryEntry);
     const sourceReview = realEntry(reviewRegistryEntry);
     const source = realArtifactHarness(
@@ -2816,7 +2816,8 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
 
     const target = completingTarget('5a20');
     await adoptWithoutDriving(target.harness, generation);
-    expect(target.code.runtimes[0]?.describe?.().state.stateId).toBe('failed');
+    expect(target.code.runtimes[0]?.describe?.()).toMatchObject({ state: { stateId: 'failed' }, lastError: { message: 'coder exploded', cause: { code: 'player-failed' } } });
+    expect(target.harness.playerCalls).toEqual([]);
 
     await target.harness.turn('Retry the retained failure now.', 2);
 
@@ -3037,7 +3038,26 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await target.shell.dispose?.();
   });
 
-  it('keeps a stopped REVIEW child and its CODE parent after an unexpected error', async () => {
+
+  it('shows the complete pending question when Captain cannot write a reply', async () => {
+    const harness = realArtifactHarness([realEntry(codeRegistryEntry)], {
+      players: () => ({ status: 'ok', finalText: CODE_PENDING_QUESTION }),
+      adjudicate: () => ({ guard: 'needsBossReply' }),
+      decide: retainedDecision,
+      closing: () => { throw new Error('Captain reply unavailable'); },
+    });
+    await harness.init();
+    await harness.turn('/code ask the worker', 1);
+    expect(harness.surfaced.at(-1)).toContain(CODE_PENDING_QUESTION);
+    expect(harness.surfaced.at(-1)).toContain('I could not simplify');
+    expect(harness.statuses.some((status) => status.includes(' asks: '))).toBe(false);
+    expect(harness.shell.exportSnapshot()!.mode).toBe('engaged.parked');
+    await harness.shell.dispose?.();
+  });
+
+  it.each(['an unexpected player error', 'Boss dismisses the child'])(
+    'retains real CODE and REVIEW work after %s', async (interruption) => {
+    const dismissed = interruption === 'Boss dismisses the child';
     let breakReview = false;
     const sourceCode = realEntry(codeRegistryEntry);
     const sourceReview = realEntry(reviewRegistryEntry);
@@ -3076,7 +3096,9 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
           }
           return { guard: 'needsBossReply' };
         },
-        decide: retainedDecision,
+        decide: (prompt, advertised, boss) => boss === 'Stop only the current review.'
+          ? { action: 'dismiss' }
+          : retainedDecision(prompt, advertised, boss),
         closing: () => 'The REVIEW boundary was reported truthfully.',
       },
       { sessionNamespace: '4a40' },
@@ -3086,15 +3108,22 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     const preTerminal = retainedGeneration(source);
     expect(preTerminal.frames).toHaveLength(2);
 
-    breakReview = true;
-    await source.turn('Use release 6.0 for the review.', 2);
+    breakReview = !dismissed;
+    await source.turn(dismissed ? 'Stop only the current review.' : 'Use release 6.0 for the review.', 2);
 
     const stopped = source.shell.exportSnapshot()!;
-    expect(stopped).toMatchObject({ mode: 'engaged.parked' });
-    expect(stopped.mode === 'engaged.parked' && stopped.frames.map(frame => frame.runtime.state.stateId)).toEqual(['reviewFirstCommit', 'failed']);
-    expect(traceEvents(source).filter(({ type }) => type === 'playbook.call.finished')).toHaveLength(0);
+    if (dismissed) {
+      expect(stopped.mode).toBe('chat');
+      expect(source.statuses).toContain('◇ /code finished');
+      expect(source.closingPrompts().at(-1)).toContain('reported a REVIEW failure');
+    } else {
+      expect(stopped).toMatchObject({ mode: 'engaged.parked' });
+      expect(stopped.mode === 'engaged.parked' && stopped.frames.map(frame => frame.runtime.state.stateId)).toEqual(['reviewFirstCommit', 'failed']);
+      expect(traceEvents(source).filter(({ type }) => type === 'playbook.call.finished')).toHaveLength(0);
+    }
     const retainedAfterTerminal = retainedGeneration(source);
     expect(retainedAfterTerminal.frames).toHaveLength(2);
+    if (dismissed) expect(retainedAfterTerminal).toEqual(preTerminal);
     await source.shell.dispose?.();
 
     const targetCode = realEntry(codeRegistryEntry);
@@ -3122,7 +3151,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await target.turn('Retry using release 6.0 and finish the review.', 2);
 
     expect(target.playerCalls, target.decisionPrompts().at(-1)).toEqual(['review-reviewer']);
-    expect(classifierPrompts(target)).toHaveLength(0);
+    expect(classifierPrompts(target)).toHaveLength(dismissed ? 1 : 0);
     expectNoReadyClassification(target);
     expectCleanCompletion(target);
     await target.shell.dispose?.();
@@ -4400,7 +4429,7 @@ describe('CAPTAIN-38 validated actions and command table', () => {
     const executedKey = (
       (applyStarts[0]!.payload as { payload: { key: string } }).payload
     ).key;
-    expect(executedKey).toBe('turn-2-apply-retry:START_CODE');
+    expect(executedKey).toBe('turn-2-apply-retry:START_CODE-1');
     expect(harness.closingPrompts().at(-1)).toContain(
       'Runtime action receipt: executed',
     );

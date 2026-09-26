@@ -21,7 +21,8 @@ The procedure author should not need to describe exception handling, and neither
 - Starting or continuing a task authorizes bounded preparation of its next step; the host may select the same `recover` operation after a recoverable stop without asking Boss to repeat that authorization.
 - Recovery is a contract between the host and the runtime, not a catalog of repair tools or error strings: the runtime supplies the interrupted task and an available continuation, Captain prepares prerequisites with its configured tools, and the runtime checks whether that continuation is now valid.
 - One Boss turn permits at most two automatic recovery attempts and at most five minutes of preparation in total; an unchanged failure may be retried only once, and cancellation stops recovery.
-- A real question requiring a product decision or new authority remains for Boss; a question already answered by the task may continue using that exact task instruction.
+- Ordinary questions receive a tool-free check without a repository claim or preparation tools.
+  A real question requiring a product decision or new authority remains for Boss; a question already answered by the task may continue using that exact task instruction.
 - A missing or contradictory workflow transition is a playbook defect to explain to Boss, never permission to invent a state, report success, or keep retrying.
   Governed judgment can report that no result fits; this preserves its explanation without forcing an outcome or spending a structural correction.
 - Repository observations do not prove that an external publication or other outside action is safe to repeat.
@@ -40,15 +41,18 @@ The procedure author should not need to describe exception handling, and neither
   The host appends that restoration separately from the original receipt; it authorizes another read-only invocation, not acceptance of the failed result.
 - An unexpected child-runtime exception preserves a valid parked child and its parents instead of converting it to a completed workflow failure.
 - Preparation saves the current parked stack before tool use, so interruption resumes that step rather than the original turn selection.
+  Before continuation, the point is replaced by the saved continuation and its current effect baseline; replay refuses later commits or logical-operation progress.
+  Cancellation before dispatch settles the drained parked stack when possible, allowing fresh instructions without discarding edits.
   The last settled controller and journal remain the conversational baseline; the attempted turn remains in replay.
 - Uncertain-turn recovery never chooses discard automatically.
   Without a saved preparation point, a continuation may retry only after the existing effect checks prove whole-turn replay safe; otherwise it explains the missing evidence instead of guessing whether work completed.
-- Recovery is host/runtime behavior, independent of individual playbook source and compiler output.
+- Recovery is host/runtime behavior, independent of individual workflow repair recipes; the default Captain source and compiled controller add `recover`, requiring SLC’s recovery-controller discriminator (SLC DR-053, `specs/decisions/053-recovery-controller-discrimination.md` in the SLC repository).
   Existing checkpoints without the new optional invocation checkpoint keep their existing advertised controls.
 
 ## Consequences
 
 Captain can repair a missing prerequisite and resume the interrupted leaf without restarting its ancestors or completed phases.
 The source language, artifact ABI, and ordinary player permissions are unchanged.
+Release the supporting SLC verifier before compiling this Captain, and ship Spex’s Captain input and recovery controls with the corresponding Playbook SDK behavior; UI-only presentation remains in Spex.
 Historical receipts and unresolved-effect fences remain evidence rather than editable instructions.
 Unsupported or irreparable historical states are reported honestly rather than advanced by a guessed event.

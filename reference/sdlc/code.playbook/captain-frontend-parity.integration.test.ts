@@ -30,10 +30,11 @@ it.each(['SDK', 'CLI'] as const)('continues a Captain conversation starting in %
       const index = prompt.lastIndexOf(marker);
       const policy = index < 0 ? prompt : prompt.slice(index + marker.length).split('--- END VERBATIM RUNTIME PROMPT ---')[0]!;
       let result: string;
-      if (prompt.startsWith('You are Captain preparing an interrupted playbook')) {
+      if (prompt.startsWith('Check whether existing instructions already answer')) {
         preparations.push(prompt);
-        expect(prompt).toContain('If any choice, approval, or clarification is still missing, return blocked immediately');
-        result = JSON.stringify({ status: 'blocked', summary: 'Boss must choose preview or production.' });
+        expect(options?.allowedTools).toEqual([]);
+        expect(prompt).toContain('when Boss must decide');
+        result = JSON.stringify({ instructionIndex: null });
       } else if (policy.includes('An action just settled for the current Boss turn')) {
         if (phase !== 'answer') expect(prompt).toContain(QUESTION);
         result = phase === 'answer' ? 'The worker confirmed preview. The task is finished.' : relayedQuestion;

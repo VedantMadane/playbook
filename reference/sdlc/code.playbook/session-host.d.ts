@@ -98,7 +98,7 @@ export interface SessionHostController {
    */
   submitShellAction(actionId: string): Promise<SessionRecovery>;
   retry(): Promise<SessionRecovery>;
-  /** Resume a stopped step, or safely retry the recorded uncertain turn. Never discards work. */
+  /** Resume an uncertain instruction without input; a settled pause requires Boss input. Never discards work. */
   recover(input?: string): Promise<SessionRecovery>;
   dispose(): Promise<void>;
 }

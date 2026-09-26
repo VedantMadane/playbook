@@ -5,6 +5,8 @@
 
 ## Status
 
+Recovery amended by [DR-066](066-captain-prepares-step-recovery.md): bounded preparation, saved-step continuation and automatic recovery apply to host-selected actions.
+
 Accepted.
 Extends [DR-029](029-session-scoped-conversational-captain.md)'s runtime-owned recovery actions to the recovery a parked failure state still offers after the process that reached it ends.
 [DR-040](040-outcome-authority-effect-reconciliation.md) withholds that entry-event retry from an effect-possible unresolved boundary, whose only retry reconciles retained evidence.
