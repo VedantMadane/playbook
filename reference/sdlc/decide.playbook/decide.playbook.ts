@@ -56,6 +56,7 @@ const UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string> = new Set([
   "reportedReviewFailure"
 ]);
 const VERBATIM_PAYLOAD_FIELDS: ReadonlySet<string> = new Set([
+  "coderProposal",
   "reviewerProposal",
   "coderOutput"
 ]);
@@ -118,9 +119,16 @@ const runtimeSpec = {
     {
       "type": "BOSS_INTERRUPT",
       "fields": {
+        "targetId": {
+          "source": "judge",
+          "required": true,
+          "values": [
+            "independentProposals",
+            "synthesizeCommit"
+          ]
+        },
         "callerTopic": {
-          "source": "text",
-          "required": true
+          "source": "text"
         }
       }
     }
@@ -136,14 +144,16 @@ const runtimeSpec = {
     },
     "synthesizeCommit": {
       "role": "coder",
-      "label": "Coder is synthesizing both proposals into DRs and/or spec items and committing the result."
+      "label": "Coder synthesizes both proposals into the necessary DRs and/or spec items and commits the result as one new commit."
     }
   },
   "outcomeAuthority": {
     "governedPlayerStates": {
       "askCoderProposal": {
         "proposed": {
-          "fields": {},
+          "fields": {
+            "coderProposal": "presentation"
+          },
           "repositoryDisposition": "unchanged"
         },
         "needsBossReply": {
@@ -191,7 +201,11 @@ const runtimeSpec = {
     "answer",
     "questionId"
   ],
-  "controlContextFields": []
+  "controlContextFields": [
+    "decideCommit",
+    "evaluatedRevision",
+    "reviewStatus"
+  ]
 },
   snapshotOptions: validateOptions,
   machineInput: (options: PlaybookRuntimeOptions) => Object.fromEntries(

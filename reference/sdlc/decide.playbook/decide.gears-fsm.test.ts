@@ -64,15 +64,16 @@ const states = machineConfig.states;
 // `false`, `null`, or empty-record default rather than being optional.
 const CONTEXT: DecideContext = {
   callerTopic: 'Choose a durable design.',
-  stagedCoderProposed: false,
+  stagedCoderProposal: '',
   stagedReviewerProposal: '',
-  coderProposed: true,
+  coderProposal: 'Coder proposes package items.',
   reviewerProposal: 'Reviewer proposes one DR.',
   coderOutput: 'Committed the synthesized design.',
   decideCommit: 'abc123',
   evaluatedRevision: '',
   reviewStatus: null,
   reviewError: null,
+  reviewEvidence: null,
   lastError: null,
   pendingBossQuestions: {},
   bossReplies: {},
@@ -86,8 +87,9 @@ const done = (output: unknown) => ({
   output,
 });
 
-// A proposal branch finishing after its sibling has staged completes the
-// join, so its arm is ordered first and marks `synthesizeCommit` as target.
+// A question suspends the branch before any proposal arm is read; a proposal
+// branch finishing after its sibling has staged completes the join, so its
+// arm precedes the plain staging arm and marks `synthesizeCommit` as target.
 const proposalDoneFixtures = (
   joiningGuard: string,
   successGuard: string,
@@ -97,6 +99,12 @@ const proposalDoneFixtures = (
   questionTarget: string,
   fallbackOutput: unknown,
 ): readonly TransitionFixture[] => [
+  {
+    guard: 'needsBossReply',
+    target: questionTarget,
+    context: CONTEXT,
+    event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
+  },
   {
     guard: joiningGuard,
     target: stagedTarget,
@@ -108,12 +116,6 @@ const proposalDoneFixtures = (
     target: stagedTarget,
     context: CONTEXT,
     event: done(successOutput),
-  },
-  {
-    guard: 'needsBossReply',
-    target: questionTarget,
-    context: CONTEXT,
-    event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
   },
   {
     guard: '<fallback>',
@@ -191,11 +193,10 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       'coderProposedJoining',
       'coderProposed',
       'coderProposalStaged',
-      // DECIDE-1 declares no `coderProposal`: nothing relays Coder's own
-      // proposal, so the bare outcome is the complete result.
-      { guard: 'proposed' },
+      // DECIDE-1 declares `coderProposal`, which DECIDE-4 relays to `review`.
+      { guard: 'proposed', coderProposal: 'Coder proposal' },
       { stagedReviewerProposal: 'Reviewer proposal' },
-      'awaitCoderProposalReply',
+      '#awaitCoderProposalReply',
       { guard: 'needsBossReply', question: '  ' },
     ),
   'independentProposals.coderProposalRegion.awaitCoderProposalReply.on.BOSS_REPLY':
@@ -206,13 +207,19 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       'reviewerProposed',
       'reviewerProposalStaged',
       { guard: 'proposed', reviewerProposal: 'Reviewer proposal' },
-      { stagedCoderProposed: true },
-      'awaitReviewerProposalReply',
+      { stagedCoderProposal: 'Coder proposal' },
+      '#awaitReviewerProposalReply',
       { guard: 'proposed' },
     ),
   'independentProposals.reviewerProposalRegion.awaitReviewerProposalReply.on.BOSS_REPLY':
     bossReplyFixtures('askReviewerProposal', 'DECIDE-2', 'reviewer'),
   'synthesizeCommit.invoke.onDone': [
+    {
+      guard: 'needsBossReply',
+      target: '#awaitBossReply',
+      context: CONTEXT,
+      event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
+    },
     {
       guard: 'committed',
       target: 'reviewCommit',
@@ -224,14 +231,8 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       }),
     },
     {
-      guard: 'needsBossReply',
-      target: 'awaitBossReply',
-      context: CONTEXT,
-      event: done({ guard: 'needsBossReply', question: 'Which scope?' }),
-    },
-    {
       guard: '<fallback>',
-      target: 'failed',
+      target: '#failed',
       context: CONTEXT,
       event: done({ guard: 'committed' }),
     },
@@ -556,8 +557,12 @@ describe('DECIDE GEARS to FSM compilation', () => {
         ?.prompt.join('\n')
         .replaceAll('<caller-topic>', CONTEXT.callerTopic)
         .replaceAll('<decide-commit>', CONTEXT.decideCommit)
+        .replaceAll('<coder-proposal>', CONTEXT.coderProposal)
         .replaceAll('<coder-output>', CONTEXT.coderOutput),
     });
+    expect(input && 'text' in input ? input.text : '').toContain(
+      "> Coder's independent proposal: Coder proposes package items.",
+    );
     expect(tagsOf(state ?? {})).toContain('playbook.suspended');
     expect(state?.meta).toEqual({
       playbook: {
@@ -578,7 +583,7 @@ describe('DECIDE GEARS to FSM compilation', () => {
     }
     const reviewSection = gearsText.slice(gearsText.indexOf('### DECIDE-4'));
     expect(reviewSection).toContain(
-      '`decide` is complete only when `review` returns a result that applies to the supplied review scope, gives the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain; `decide` shall then return the `decide`-owned commit and that evaluated revision to its caller.',
+      '`decide` is complete only when `review` returns a result that applies to the supplied review scope, gives the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain.\nIt then returns the `decide`-owned commit and that evaluated revision to its caller.',
     );
     expect(reviewSection).toContain(
       'When `review` returns an authored abort or failure, or a terminal result that does not establish those facts, `decide` shall report the failure and the last `decide`-owned commit to its caller.',
@@ -681,10 +686,10 @@ describe('DECIDE GEARS to FSM compilation', () => {
       'rememberUnestablishedReview',
     ]);
     expect(states.done?.description).toContain(
-      'REVIEW established no unsettled findings',
+      'review established no unsettled findings',
     );
     expect(states.reportedReviewFailure?.description).toContain(
-      "reported REVIEW's abort, failure, or unestablished result",
+      "reported review's abort, failure, or unestablished result",
     );
     expect(states.reportedReviewFailure?.description).not.toContain(
       'established no unsettled findings',
@@ -735,7 +740,7 @@ describe('DECIDE GEARS to FSM compilation', () => {
         },
       }),
     ).start();
-    const initial = { ...CONTEXT, coderProposed: false, reviewerProposal: '' };
+    const initial = { ...CONTEXT, coderProposal: '', reviewerProposal: '' };
     expect(actor.getSnapshot().context).toEqual({
       ...initial,
       callerTopic: '',
@@ -745,25 +750,29 @@ describe('DECIDE GEARS to FSM compilation', () => {
 
     actor.send({ type: 'START_DECIDE', callerTopic: 'Choose a durable design.' });
     await waitFor(actor, () => inputs.length === 2);
-    // Neither proposal call carries the other's proposal.
+    // Neither proposal call carries either proposal.
     expect(inputs.map(({ stateId }) => stateId).sort()).toEqual([
       'askCoderProposal',
       'askReviewerProposal',
     ]);
     for (const input of inputs) {
+      expect(input).not.toHaveProperty('coderProposal');
       expect(input).not.toHaveProperty('reviewerProposal');
       expect(input).toMatchObject({ callerTopic: 'Choose a durable design.' });
     }
 
-    settle.askCoderProposal?.({ guard: 'proposed' });
+    settle.askCoderProposal?.({
+      guard: 'proposed',
+      coderProposal: 'Coder proposes package items.',
+    });
     const staged = await waitFor(actor, (snapshot) =>
       snapshot.matches({
         independentProposals: { coderProposalRegion: 'coderProposalStaged' },
       }),
     );
     expect(staged.context).toMatchObject({
-      stagedCoderProposed: true,
-      coderProposed: false,
+      stagedCoderProposal: 'Coder proposes package items.',
+      coderProposal: '',
       reviewerProposal: '',
     });
 
@@ -776,7 +785,7 @@ describe('DECIDE GEARS to FSM compilation', () => {
     );
     expect(joined.context).toEqual({
       ...initial,
-      coderProposed: true,
+      coderProposal: 'Coder proposes package items.',
       reviewerProposal: 'Reviewer proposes one DR.',
       coderOutput: '',
       decideCommit: '',
@@ -786,6 +795,8 @@ describe('DECIDE GEARS to FSM compilation', () => {
       callerTopic: 'Choose a durable design.',
       reviewerProposal: 'Reviewer proposes one DR.',
     });
+    // Coder's own proposal reaches only `review`, never the synthesis call.
+    expect(inputs.at(-1)).not.toHaveProperty('coderProposal');
     actor.stop();
   });
 
@@ -794,8 +805,8 @@ describe('DECIDE GEARS to FSM compilation', () => {
     [
       'malformed output',
       { guard: 'needsBossReply', question: '  ' },
-      'PlayerOutputError',
-      'Player result for DECIDE-1 did not match a declared outcome.',
+      'MalformedPlayerOutput',
+      'Player output for DECIDE-1 declared needsBossReply without a question.',
     ],
   ] as const)(
     'clears the sibling question and staged results when a proposal fails with %s',
@@ -835,7 +846,7 @@ describe('DECIDE GEARS to FSM compilation', () => {
       expect(failed.context.pendingBossQuestions).toEqual({});
       expect(failed.context.bossReplies).toEqual({});
       expect(failed.context).toMatchObject({
-        stagedCoderProposed: false,
+        stagedCoderProposal: '',
         stagedReviewerProposal: '',
         lastError: { name, message },
       });
@@ -859,7 +870,9 @@ describe('DECIDE GEARS to FSM compilation', () => {
         actors: {
           player: fromPromise(async ({ input }: { input: PlayerInput }) => {
             inputs.push(input);
-            if (input.stateId === 'askCoderProposal') return { guard: 'proposed' };
+            if (input.stateId === 'askCoderProposal') {
+              return { guard: 'proposed', coderProposal: 'Coder proposal' };
+            }
             if (input.stateId === 'askReviewerProposal') {
               return { guard: 'proposed', reviewerProposal: 'Reviewer proposal' };
             }

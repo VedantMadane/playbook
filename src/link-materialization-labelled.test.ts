@@ -80,8 +80,11 @@ const dev = fixture('dev', {
 // working leaves are role states and resume through their own wait leaves.
 const decide = fixture('decide', {
   machineExport: 'decideMachine', options: {}, inputMapping: {},
-  bossEvents: [{ type: 'BOSS_INTERRUPT', fields: { callerTopic: { source: 'text', required: true } } }],
-  verbatimPayloadFields: ['reviewerProposal', 'coderOutput'],
+  bossEvents: [{ type: 'BOSS_INTERRUPT', fields: {
+    targetId: { source: 'judge', required: true, values: ['independentProposals', 'synthesizeCommit'] },
+    callerTopic: { source: 'text' },
+  } }],
+  verbatimPayloadFields: ['coderProposal', 'reviewerProposal', 'coderOutput'],
   resumableStateIds: ['askCoderProposal', 'askReviewerProposal', 'synthesizeCommit'],
   unfinishedFinalStateIds: ['reportedReviewFailure'], omitEmptyRelayLines: [],
   identityPlaceholders: { 'coder-llm': 'coder', 'reviewer-llm': 'reviewer' }, fsmSpecifier: './decide.fsm.js',
@@ -203,7 +206,7 @@ it('passes the maintained DECIDE parallel-proposal suite with only its factory w
     assert.deepEqual(Object.keys(_internal), ['composePlayerPrompt', 'RESUMABLE_STATE_IDS', 'UNFINISHED_FINAL_STATE_IDS', 'VERBATIM_PAYLOAD_FIELDS']);
     assert.deepEqual([..._internal.RESUMABLE_STATE_IDS], ['askCoderProposal', 'askReviewerProposal', 'synthesizeCommit']);
     assert.deepEqual([..._internal.UNFINISHED_FINAL_STATE_IDS], ['reportedReviewFailure']);
-    assert.deepEqual([..._internal.VERBATIM_PAYLOAD_FIELDS], ['reviewerProposal', 'coderOutput']);
+    assert.deepEqual([..._internal.VERBATIM_PAYLOAD_FIELDS], ['coderProposal', 'reviewerProposal', 'coderOutput']);
   `], { cwd: root, encoding: 'utf8' });
   expect(probe.status, probe.stderr + probe.stdout).toBe(0);
   // Every maintained assertion runs unchanged against the emitted module.

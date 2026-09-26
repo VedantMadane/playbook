@@ -3753,7 +3753,8 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(runtime.describe).toBeTypeOf('function');
     expect(runtime.apply).toBeTypeOf('function');
     expect(runtime.describe!()).toMatchObject({
-      stateDescription: 'DECIDE failed and is waiting for Boss to recover it.',
+      stateDescription:
+        'DECIDE parked after a control-plane failure and waits for Boss to restart or resume it.',
       actions: [
         {
           id: 'retry:START_DECIDE',
@@ -3769,7 +3770,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
 
     const digest = harness.decisionPrompts().at(-1) ?? '';
     expect(digest).toContain(
-      'DECIDE failed and is waiting for Boss to recover it.',
+      'DECIDE parked after a control-plane failure and waits for Boss to restart or resume it.',
     );
     expect(advertisedActionIds(digest)).toEqual(['retry:START_DECIDE']);
     // The status question settled `respond` on the published control view:
@@ -3797,7 +3798,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       reviewResult: 'approved' as const,
       terminalId: 'done',
       meaning:
-        'DECIDE completed: REVIEW established no unsettled findings for the decide-owned commit at the reported evaluated revision.',
+        'DECIDE completed: review established no unsettled findings for the decide-owned commit at the reported evaluated revision.',
       hiddenOutputKeys: [
         'decideCommit',
         'evaluatedRevision',
@@ -3809,7 +3810,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       reviewResult: 'aborted' as const,
       terminalId: 'reportedReviewFailure',
       meaning:
-        "DECIDE reported REVIEW's abort, failure, or unestablished result to its caller with the last decide-owned commit.",
+        "DECIDE reported review's abort, failure, or unestablished result to its caller with the last decide-owned commit.",
       hiddenOutputKeys: [
         'lastDecideCommit',
         'noUnsettledFindings',
