@@ -8,6 +8,8 @@
 Accepted.
 Records the abort-settlement model the post-[DR-034](034-durable-failure-retry-continuity.md) review rounds converged on piecemeal, so conformance replaces per-round design relitigation.
 
+Amended by [DR-068](068-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-069](069-host-owned-interrupted-work-settlement.md).
+
 ## Context
 
 - The linked runtime races two authorities at every public boundary: the machine, which settles by reaching quiescence, and the Boss signal, which may abort at any instant — including from inside the runtime's own emission sinks.

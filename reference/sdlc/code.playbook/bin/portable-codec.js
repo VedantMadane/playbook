@@ -75,7 +75,7 @@ export function manifestFromRecovery(value, replay, contextSeq) {
 export function projectRecovery(value) {
   const source = clone(value);
   if (source.uncertain?.recovery) {
-    source.uncertain.recovery.snapshot = clone(sanitizeReplayRecord(source.uncertain.recovery.snapshot));
+    source.uncertain.recovery = clone(sanitizeReplayRecord(source.uncertain.recovery));
   }
   for (const key of ['snapshot', 'effectLedger', 'retainedGenerations']) {
     if (source[key] !== undefined) source[key] = clone(sanitizeReplayRecord(source[key]));

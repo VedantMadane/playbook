@@ -416,6 +416,8 @@ profiles require an explicit migration request.
 
 Captain may answer a player from the original task when it already answers the question. It reports what it reused, respects later Boss instructions and never sends that original answer twice automatically.
 
+If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
+
 All applications sharing a session store, including Spex and the CLI, must upgrade together before using these recovery fields. Hosts from 15.1.x cannot read the extended records; see [the compatibility decision](../specs/decisions/068-interrupted-continuation-settlement.md).
 
 A single recovery entry point handles either a paused step or an uncertain attempt:

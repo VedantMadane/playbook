@@ -386,8 +386,6 @@ export interface PlaybookRuntimeSnapshot {
     retainedEffectReconciliation?: {
         readonly sourceSessionId: string;
         readonly checkpoint: PlaybookEffectLedger;
-        /** Later work exists without its machine position being saved. */
-        readonly interruptedTurn?: true;
     };
     failedEffectAttempt?: {
         readonly boundaryPrefix: number;

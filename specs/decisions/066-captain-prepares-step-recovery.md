@@ -10,6 +10,8 @@ Amends [DR-029](029-session-scoped-conversational-captain.md)'s tool-free Captai
 Refines [DR-034](034-durable-failure-retry-continuity.md)'s entry retry with a runtime-owned checkpoint of the actual interrupted invocation.
 Amends [DR-040](040-outcome-authority-effect-reconciliation.md) with saved-result assessment and verified read-only restoration, and [DR-051](051-host-selected-runtime-recovery.md) with saved continuation points and automatic recovery after host-selected actions.
 
+Amended by [DR-068](068-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-069](069-host-owned-interrupted-work-settlement.md).
+
 ## Context
 
 A restored machine is insufficient when its next invocation still encounters the repository or environment condition that stopped it.
@@ -44,11 +46,11 @@ The procedure author should not need to describe exception handling, and neither
   The host appends that restoration separately from the original receipt; it authorizes another read-only invocation, not acceptance of the failed result.
 - An unexpected child-runtime exception preserves a valid parked child and its parents instead of converting it to a completed workflow failure.
 - Preparation saves the current parked stack before tool use, so interruption resumes that step rather than the original turn selection.
-  Before continuation, the point is replaced by the saved continuation and its current effect baseline; later unrepresented progress enters reconciliation with an abandonment exit under [DR-068](068-interrupted-continuation-settlement.md).
+  Before continuation, the point is replaced by the saved continuation and its current effect baseline; later unrepresented progress settles at host level under [DR-069](069-host-owned-interrupted-work-settlement.md).
   Every stopped continuation attempts to advance the point to the actual stack or completed root with reporting-only retry; any thrown turn with a point settles through the shared host after calls drain and before disposal when possible.
   The last settled controller and journal remain the conversational baseline; the attempted turn remains in replay.
 - Uncertain-turn recovery never chooses discard automatically.
-  Without a saved recovery point, a continuation may retry only after the existing effect checks prove whole-turn replay safe; otherwise it explains the missing evidence instead of guessing whether work completed.
+  Without a saved recovery point, a continuation may retry only after the existing effect checks prove whole-turn replay safe; otherwise it settles lost progress without replay under [DR-069](069-host-owned-interrupted-work-settlement.md).
 - Recovery is host/runtime behavior, independent of individual workflow repair recipes; the default Captain source and compiled controller add `recover`, requiring SLC’s recovery-controller discriminator [[1]].
   Existing checkpoints without the new optional invocation checkpoint keep their existing advertised controls.
 

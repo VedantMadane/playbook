@@ -1,7 +1,7 @@
 import { type Captain, type CaptainSession, type TuningSelection } from '@sublang/cligent/tmux-play';
 import type { Effort, PermissionPolicy } from '@sublang/cligent';
 import type { JsonValue, PlaybookEffectLedger, PlaybookEffectLedgerCommandBatch, PlaybookControlAction, PlaybookFailureCause, PlaybookRuntime, PlaybookRuntimeSnapshot } from '@sublang/playbook/runtime';
-import { type CaptainControllerPort } from '../captain.playbook/captain.playbook.js';
+import { type CaptainControllerPort, type SettlementEvidence } from '../captain.playbook/captain.playbook.js';
 import type { PlaybookSummaryPolicy } from './code.registry.js';
 interface SessionAgent {
     readonly adapter: string;
@@ -42,9 +42,16 @@ type RecoveryContinuation = ({
 } | {
     kind: 'settle';
     status: 'ok' | 'failed' | 'rejected';
+    settlement?: RecoverySettlement;
 }) & {
     facts?: readonly string[];
 };
+interface RecoverySettlement {
+    retentionUpdates: readonly PlaybookCaptainRetentionUpdate[];
+    unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[];
+    report?: OutcomeReport;
+    presentation?: string;
+}
 export interface PlaybookCaptainDeps {
     /** Stop the host's active turn, including admitted tool calls, on preparation expiry. */
     abortPreparation?: () => void;
@@ -265,8 +272,39 @@ export interface PlaybookCaptainShell extends Captain {
     /** Resume a host-validated saved recovery point using its exact input. */
     selectRecovery?(text: string, instruction: string, continuation?: RecoveryContinuation): void;
 }
+interface TurnSummaryCounts {
+    interruptions: number;
+    copyPastes: number;
+}
+interface OutcomeReport {
+    playbookId?: string;
+    facts: readonly string[];
+    /**
+     * The Boss-facing rendering of `facts`, present only where the two differ —
+     * today, where a fact names a runtime action by its id and the Boss-facing
+     * form names it by the runtime's own label. `facts` is hidden control text
+     * for the result-phase prompt; this is what the CAPTAIN-34 fallback may
+     * speak.
+     */
+    bossFacts?: readonly string[];
+    status: SettlementEvidence['status'];
+    receipt?: SettlementEvidence['receipt'];
+    leafStateSummary?: string;
+    counts: TurnSummaryCounts;
+    progressPhrase: string;
+    progressRounds: number;
+    savedLine?: string;
+}
 export declare function assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[];
 /** Validate, detach, and freeze one untrusted shell snapshot. */
 export declare function assertPlaybookCaptainShellSnapshot(value: unknown): PlaybookCaptainShellSnapshot;
+type UnresolvedEnvelopeReference = {
+    readonly kind: 'boundary';
+    readonly boundaryId: string;
+} | {
+    readonly kind: 'logical-operation';
+    readonly operationId: string;
+};
+export declare const projectUnresolvedEffects: (ledger: PlaybookEffectLedger, references: readonly UnresolvedEnvelopeReference[]) => readonly PlaybookCaptainUnresolvedEffect[];
 export declare function createPlaybookCaptainShell(options: unknown, deps?: PlaybookCaptainDeps): PlaybookCaptainShell;
 export default createPlaybookCaptainShell;

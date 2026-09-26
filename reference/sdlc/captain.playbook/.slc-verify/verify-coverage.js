@@ -2615,7 +2615,12 @@ async function runFsmCoverage(fsmModule, sourceText) {
                     targetRef.state.invoke === undefined &&
                     targetRef.state.states === undefined &&
                     !Object.hasOwn(targetRef.state, 'always') &&
-                    transitionArms(captain.invocation.onError).some((errorArm) => stateRefForTarget(refs, rawArmTarget(errorArm) ?? '', captain.ref) === targetRef)) {
+                    !rawDoneArms
+                        .slice(0, index)
+                        .some((otherArm) => stateRefForTarget(refs, rawArmTarget(otherArm) ?? '', captain.ref) === targetRef) &&
+                    transitionArms(captain.invocation.onError).some((errorArm, errorIndex, errorArms) => errorIndex === errorArms.length - 1 &&
+                        armGuard(errorArm) === undefined &&
+                        stateRefForTarget(refs, rawArmTarget(errorArm) ?? '', captain.ref) === targetRef)) {
                     continue;
                 }
                 const guard = orderedArmPredicate(machine, rawDoneArms, index);

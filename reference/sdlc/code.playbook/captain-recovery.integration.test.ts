@@ -466,9 +466,13 @@ describe('Captain preparation through a durable session', () => {
           config,
           loadModule,
           adapterImports,
-          onCheckpoint(record: any) {
+          async onCheckpoint(record: any) {
             checkpoints.push(record.state);
-            if (failCheckpoint && record.state === 'uncertain') throw new Error('checkpoint observer failed');
+            if (failCheckpoint && record.state === 'uncertain') {
+                await expect(controller.recover()).rejects.toThrow('turn is already active');
+                await expect(controller.recover('continue')).rejects.toThrow('turn is already active');
+                throw new Error('checkpoint observer failed');
+              }
           },
         });
         let timeoutOverride: ReturnType<typeof vi.spyOn> | undefined;
@@ -686,7 +690,11 @@ describe('Captain preparation through a durable session', () => {
             adapterImports,
             onCheckpoint: async (record: any) => {
               checkpoints.push(record.state);
-              if (failCheckpoint && record.state === 'uncertain') throw new Error('checkpoint observer failed');
+              if (failCheckpoint && record.state === 'uncertain') {
+                await expect(controller.recover()).rejects.toThrow('turn is already active');
+                await expect(controller.recover('continue')).rejects.toThrow('turn is already active');
+                throw new Error('checkpoint observer failed');
+              }
               if (rejectAdmission) { rejectAdmission = false; throw new Error('injected admission failure'); }
             },
           });
@@ -720,7 +728,7 @@ describe('Captain preparation through a durable session', () => {
             await expect(controller.recover('Try the repair again.')).rejects.toThrow('checkpoint observer failed');
             expect((await controller.read()).state).toBe('uncertain');
             expect(checkpoints.at(-1)).toBe('uncertain');
-            for (const operation of [() => controller.recover(), () => controller.recover('New instruction'), () => controller.retry()]) {
+            for (const operation of [() => controller.recover(), () => controller.recover('New instruction'), () => controller.retry(), () => controller.handleBossTurn('Continue')]) {
               await expect(operation()).rejects.toThrow("reopen with mode: 'recover'");
             }
             await controller.dispose();
@@ -753,9 +761,9 @@ describe('Captain preparation through a durable session', () => {
             controller = await openSessionHost({ store, mode: 'recover', sessionId: id, config, loadModule, adapterImports });
             const recovered = await controller.recover();
             expect(recovered.state).toBe('settled');
-            expect(recovered.snapshot.frames.at(-1).runtime.retainedEffectReconciliation.interruptedTurn).toBe(true);
+            expect(recovered.snapshot.mode).toBe('chat');
+            expect(recovered.unresolvedEffects).not.toEqual([]);
             expect(RecoveryAdapter.calls.slice(calls).every(({ kind }) => kind === 'closing')).toBe(true);
-            expect((await controller.submitRuntimeAction('abandon:unresolved-effect')).snapshot.mode).toBe('chat');
             expect(Number((await execFileAsync('git', ['rev-list', '--count', 'HEAD'], { cwd })).stdout.trim())).toBe(beforeCommits + 1);
             return;
           }

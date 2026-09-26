@@ -83,7 +83,7 @@ A blocked preparation, cancellation, unavailable offer, or unsuccessful continua
 For a pending question, the host shall first make one fresh tool-free check on the same serialized Captain queue, without a repository claim or recovery point, using the hidden-control envelope of [[playbook-captain-31](playbook-captain.md#playbook-captain-31)].
 The root frame shall retain its exact handed-off request as optional nonempty `request`, through capture, restore and adoption; the root shall also retain optional `inputs`, an array of nonempty exact texts subsequently delivered to this engagement, while a child shall carry neither member; older snapshots omitting them remain valid.
 The check shall receive only that request as `{label:"Current engagement request",instruction:<exact request>}`, or an empty list when no request was saved or that exact request has already been delivered again.
-Later delivered Boss input and the current turn instruction, excluding the turn that started that task, shall be provided as context that cannot be selected; when any bears on the question, the check shall return null rather than override it with the original request.
+Later delivered Boss input and the current turn instruction, excluding the entire turn that started that task even after automatic preparation, shall be provided as context that cannot be selected; when any bears on the question, the check shall return null rather than override it with the original request.
 It shall return exactly `{instructionIndex:null}` for missing input, or `{instructionIndex:N}` selecting an in-range integer index; an absent, out-of-range, malformed, or failed selection shall preserve the original question and outcome without claiming blocked preparation.
 A previous answer or another engagement's task shall not be a candidate.
 A selected instruction shall become the continuation point's exact instruction; the outcome shall record the asker, full question and exact reused instruction, and Captain's closing reply shall briefly name the asker, question and instruction reused, including after retry ([DR-068](../decisions/068-interrupted-continuation-settlement.md)).
@@ -97,16 +97,19 @@ When an unexpected child-runtime exception or cancellation after delivery of its
 
 Before Captain uses preparation tools, and before any saved-assessment or verified-restoration action changes earlier evidence, a durable host shall save the parked working stack, current effect ledger and exact instruction as the uncertain attempt's recovery point [[playbook-cli-23](playbook-cli.md#playbook-cli-23)]:
 
-- the exact point has `snapshot`, `instruction`, and optional `continuation` of `{kind:'reply'}`, `{kind:'runtime',actionId}`, or `{kind:'settle',status:'ok'|'failed'|'rejected'}`, each allowing optional nonempty-string-array `facts`; it retains the last settled controller, journal and sequences, while replay retains the attempted input;
+- the exact point has `snapshot`, `instruction`, and optional `continuation` of `{kind:'reply'}`, `{kind:'runtime',actionId}`, or `{kind:'settle',status:'ok'|'failed'|'rejected',settlement?}`, each allowing optional nonempty-string-array `facts`; it retains the last settled controller, journal and sequences, while replay retains the attempted input;
 - a required save fails before tools or continuation and excludes provider hints [[session-storage-7](session-storage.md#session-storage-7)];
 - preparation saves a point without `continuation`; immediately before dispatch it replaces that point with the current parked stack, selected continuation and truthful explanation;
-- after the continuation stops, the host shall attempt to advance the point to that actual stack or completed root, acknowledged ledger and `settle` continuation; failure of this optional save shall not alter the action's result;
-- retry arms point tracking, restores the saved stack and selects preparation, the recorded continuation, or reporting only for `settle`, without repeating the original routing action or completed preparation;
-- when the ledger proves progress beyond dispatched work or a failed attempt whose exact later position was not saved, the host shall preserve the saved stack behind an `interruptedTurn:true` runtime reconciliation marker and expose the existing reconciliation and abandonment controls, including for unchanged receipts; when no repository-effect evidence remains, abandonment shall use ordinary atomic dismissal rather than require the nonempty-effect settlement transaction [[playbook-captain-58](playbook-captain.md#playbook-captain-58)]; the old failed attempt shall validate against its checkpoint ledger and never authorize replay, while later evidence remains unchanged ([DR-068](../decisions/068-interrupted-continuation-settlement.md));
+- after the continuation stops, the host shall attempt to advance the point to that actual stack or completed root, acknowledged ledger and `settle` continuation containing the full pending settlement; failure of this optional save shall not alter the action's result;
+- retry arms point tracking, restores the saved stack and selects preparation, the recorded continuation, or reporting only for `settle`, without repeating the original routing action or completed preparation or adding an automatic recovery loop;
+- unrepresentable later progress shall follow the shared host decision [[recovery-27](#recovery-27)], without adding runtime fields;
 - saved assessment/restoration may consume its own monotonic evidence changes without repeating the player [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)];
 - a vanished continuation shall settle a rejected turn through the ordinary controller path, never fail host setup [[playbook-captain-7](playbook-captain.md#playbook-captain-7)];
 - discard refuses a saved point because it preserves work from the attempted turn; retry never chooses discard automatically.
 
+The optional closed `settlement` shall contain `retentionUpdates` and `unresolvedEffects` using the ordinary settlement validators [[playbook-captain-41](playbook-captain.md#playbook-captain-41)], and optional `report` and nonempty `presentation` text.
+The closed report shall contain `status` matching the continuation, string-array `facts`, exact nonnegative-integer `counts:{interruptions,copyPastes}`, nonempty `progressPhrase`, and nonnegative-integer `progressRounds`, with optional string `playbookId`, string-array `bossFacts`, ordinary compact control `receipt`, string `leafStateSummary`, and string `savedLine` [[playbook-captain-20](playbook-captain.md#playbook-captain-20)].
+The saved data shall be detached and token-free, restore retention updates before settlement, retain mandatory unresolved-effect and carried-changes reports, and preserve the computed status when only the closing reply is cancelled; cancellation before an action computes its outcome shall save `settle(failed)` after calls drain.
 A saved selection shall be armed only after reconciliation and shall execute only after durable turn admission, without invented Boss input [[playbook-captain-7](playbook-captain.md#playbook-captain-7)].
 
 ### recovery-20
@@ -121,23 +124,42 @@ The notice and callbacks shall identify only the current admitted attempt, never
 
 ### recovery-22
 
-When an application opens the shared host with `mode:'recover'`, its asynchronous `recover()` shall retry a recorded uncertain instruction without new input, while `recover(input)` for a settled pause shall require nonempty Boss text and route it through the ordinary Captain turn.
-If that live controller later becomes uncertain, all recovery calls shall require disposal and reopening with `mode:'recover'` explicitly before retry ([DR-068](../decisions/068-interrupted-continuation-settlement.md)).
+When an application uses the shared host, its asynchronous `recover()` on a controller opened with `mode:'recover'` shall retry a recorded uncertain instruction without new input, while `recover(input)` for a settled pause shall require nonempty Boss text and route it through the ordinary Captain turn.
+Busy or closing controllers shall reject calls with that state before inspecting uncertainty.
+If any live controller later becomes uncertain, ordinary input, retry, and recovery calls shall require disposal and reopening with `mode:'recover'` explicitly before retry ([DR-068](../decisions/068-interrupted-continuation-settlement.md)).
+
+### recovery-27
+
+When explicit uncertain retry finds ledger progress beyond a saved dispatched point or failed attempt, or progress that disallows ordinary whole-turn replay, the shared host shall settle the interrupted attempt without restoring its old workflow stack ([DR-069](../decisions/069-host-owned-interrupted-work-settlement.md)):
+
+- first reconstruct incomplete receipts and require a monotonic ledger extension; reconstruction or validation failure keeps uncertainty [[playbook-cli-23](playbook-cli.md#playbook-cli-23)];
+- preserve the saved-assessment and restoration exceptions [[recovery-18](#recovery-18)];
+- apply this rule to both chat and parked snapshots, with or without a saved point, independently of runtime implementation;
+- restore only the saved Captain conversation in chat and admit the recorded attempt before reporting a failed turn, never deliver a player request, replay an action, invent a runtime marker, or claim workflow completion;
+- project changed or appended physical boundaries and changed logical operations, in ledger order with logical chains counted once, through the ordinary bounded unresolved-effect projection [[playbook-captain-58](playbook-captain.md#playbook-captain-58)], including an empty list when all work was unchanged;
+- clear only retained generations containing a current or adopted-source runtime identity owning that changed evidence, keep every other generation unchanged, and atomically save those changes with the full authoritative ledger and report [[playbook-cli-23](playbook-cli.md#playbook-cli-23)];
+- explain that the exact stopping point was lost, files and recorded evidence remain, and Boss should check the work before starting another attempt; attribute no unknown work to a saved workflow;
+- an unchanged ledger shall use the recorded continuation or ordinary whole-turn replay, even after a prior lost-progress settlement; the presence of old recovery evidence alone shall not replace later Boss input.
 
 ## Verification
 
 ### recovery-19
 
-When an integration test interrupts Captain during preparation inside a suspended parent, it shall reopen the real store, resume preparation and verify that the parent is not restarted, uncertain discard is refused, provider hints are absent and failed recovery writes prevent tool use [[recovery-18](#recovery-18)].
+When integration tests kill preparation before it returns and separately cancel preparation with drained settlement, they shall reopen the real store, resume only the killed preparation, report the cancelled preparation without rerunning it, and verify that the parent is not restarted, discard is refused, provider hints are absent and failed point writes prevent tool use [[recovery-18](#recovery-18)].
 
 ### recovery-23
 
-When integration tests cancel or fail a turn with a saved point, they shall verify shared settlement through CLI, interactive and SDK entry points, including abort followed immediately by disposal, a failed settlement preserving both errors and a later pre-Captain failure that cannot report a prior saved result [[recovery-20](#recovery-20)] [[recovery-21](#recovery-21)].
+When integration tests cancel or fail a turn with a saved point, they shall verify shared settlement through CLI, interactive and SDK entry points, including abort followed immediately by disposal, completed status and retained-root clears surviving cancellation during closing, saved counts and carried-changes reports, a failed settlement preserving both errors and a later pre-Captain failure that cannot report a prior saved result [[recovery-20](#recovery-20)] [[recovery-21](#recovery-21)].
 
 ### recovery-24
 
 When integration tests advance past assessment, step retry and restoration into a child, they shall verify saved reporting-only recovery followed by a new instruction continuing that child, retained source ownership permitting assessment evidence, and a vanished saved action becoming a rejected turn [[recovery-18](#recovery-18)].
-Tests shall kill a real process without abort cleanup during unchanged and committed work, a whole-turn runtime retry, a repeated retry and a completed root's reply, then verify no duplicated calls or commits and an available exit [[recovery-18](#recovery-18)].
+Tests shall kill a real process without abort cleanup during unchanged and committed work, a whole-turn runtime retry, a repeated retry and a completed root's reply, then verify that reporting-only and lost-progress settlement repeat no player calls or commits, while an eligible whole-turn replay retains its stated replay behavior [[recovery-18](#recovery-18)] [[recovery-27](#recovery-27)].
+
+### recovery-28
+
+When the process-loss suite kills real hosts from chat, inside nested stacks including a bespoke runtime, before a receipt write, during a retry, and after switching to another root, it shall verify that lost-progress settlement preserves commits and evidence without player replay, starts no stale runtime, keeps unrelated retained generations, and leaves the session ready for new Boss input [[recovery-27](#recovery-27)].
+The suite shall verify that a retried continuation saves its next reporting point and that restored automatic-answer reporting preserves the exact reused instruction [[recovery-18](#recovery-18)] [[recovery-14](#recovery-14)].
 
 ### recovery-25
 
@@ -145,7 +167,7 @@ When integration tests validate saved points, they shall isolate controller, jou
 
 ### recovery-26
 
-When integration tests use SDK recovery, they shall verify rejection of new input before uncertain recovery, ordinary routing of a settled pause's answer and an explicit reopen instruction for a live controller newly left uncertain [[recovery-22](#recovery-22)].
+When integration tests use SDK recovery, they shall verify rejection of new input before uncertain recovery, ordinary routing of a settled pause's answer and a busy-controller rejection before uncertainty guidance and an explicit reopen instruction for any live controller newly left uncertain [[recovery-22](#recovery-22)].
 
 ### recovery-4
 
@@ -173,4 +195,4 @@ When the real Captain host encounters an interrupted step or pending question, t
 ### recovery-17
 
 When a nested runtime throws while preserving an exportable parked state, the integration suite shall verify that its caller remains suspended and the same leaf can continue after repair, while an ordinary pre-delivery error disposes even an otherwise exportable child [[recovery-16](#recovery-16)].
-A cancellation during a real nested player call shall preserve that child under its suspended parent with an available recovery action [[recovery-16](#recovery-16)].
+Cancellation before initial delivery shall dispose the child; cancellation during its initial and later real player calls shall preserve that child under its suspended parent with an available recovery action [[recovery-16](#recovery-16)].

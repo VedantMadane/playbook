@@ -1837,7 +1837,7 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         if (!isRecord(snapshot.retainedEffectReconciliation)) {
             throw new TypeError('runtime snapshot retainedEffectReconciliation must be an object');
         }
-        rejectUnknownKeys(snapshot.retainedEffectReconciliation, ['sourceSessionId', 'checkpoint', 'interruptedTurn'], 'runtime snapshot retainedEffectReconciliation');
+        rejectUnknownKeys(snapshot.retainedEffectReconciliation, ['sourceSessionId', 'checkpoint'], 'runtime snapshot retainedEffectReconciliation');
         const sourceSessionId = effectUuid(snapshot.retainedEffectReconciliation.sourceSessionId, 'runtime snapshot retainedEffectReconciliation.sourceSessionId');
         const checkpoint = assertPlaybookEffectLedger(snapshot.retainedEffectReconciliation.checkpoint, 'runtime snapshot retainedEffectReconciliation.checkpoint');
         if (checkpoint.boundaries.some(({ physicalReceipt }) => physicalReceipt === undefined)) {
@@ -1850,14 +1850,9 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
             retainedEffectSourceSessionId !== sourceSessionId) {
             throw new TypeError('runtime snapshot retainedEffectReconciliation.sourceSessionId must equal retainedEffectSourceSessionId');
         }
-        const interruptedTurn = snapshot.retainedEffectReconciliation.interruptedTurn;
-        if (interruptedTurn !== undefined && interruptedTurn !== true) {
-            throw new TypeError('runtime retained reconciliation interruptedTurn must be true');
-        }
         retainedEffectReconciliation = Object.freeze({
             sourceSessionId,
             checkpoint,
-            ...(interruptedTurn === true ? { interruptedTurn: true } : {}),
         });
     }
     if (typeof suspendedCall?.effectBoundaryPrefixSequence === 'number' &&
@@ -1875,18 +1870,14 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         }
         rejectUnknownKeys(snapshot.failedEffectAttempt, ['boundaryPrefix', 'attemptId'], 'runtime snapshot failedEffectAttempt');
         const boundaryPrefix = effectInteger(snapshot.failedEffectAttempt.boundaryPrefix, 'runtime snapshot failedEffectAttempt.boundaryPrefix');
-        const failureLedger = retainedEffectReconciliation?.interruptedTurn
-            ? retainedEffectReconciliation.checkpoint : effectLedger;
-        const lastBoundarySequence = failureLedger.boundaries.at(-1)?.sequence ?? 0;
+        const lastBoundarySequence = effectLedger.boundaries.at(-1)?.sequence ?? 0;
         if (boundaryPrefix > lastBoundarySequence) {
             throw new TypeError('runtime snapshot failedEffectAttempt.boundaryPrefix exceeds the effect ledger');
         }
         const attemptId = snapshot.failedEffectAttempt.attemptId === null
             ? null
             : effectUuid(snapshot.failedEffectAttempt.attemptId, 'runtime snapshot failedEffectAttempt.attemptId');
-        // A fenced old machine still describes its original attempt, not the
-        // later attempt whose acknowledged work the host is preserving.
-        const causalBoundaries = failureLedger.boundaries.filter(({ sequence }) => sequence > boundaryPrefix);
+        const causalBoundaries = effectLedger.boundaries.filter(({ sequence }) => sequence > boundaryPrefix);
         if (attemptId === null && causalBoundaries.length !== 0) {
             throw new TypeError('runtime snapshot failedEffectAttempt null attemptId requires an empty causal suffix');
         }

@@ -8,6 +8,8 @@
 Accepted.
 [DR-040](040-outcome-authority-effect-reconciliation.md) requires an adopted retained generation to preserve and reenter an unresolved reconciliation state, prevents adopted work from resuming or exposing ordinary actions until every outstanding effect boundary resolves, forbids duplicate-effect replay from an unresolved generation, and makes explicit unresolved abandonment clear the root's prior retained generation rather than preserve a dismissal candidate.
 
+Amended by [DR-068](068-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-069](069-host-owned-interrupted-work-settlement.md).
+
 ## Context
 
 Playbook authors describe only the normal procedure; GEARS sources carry no interruption states, and universal concerns are synthesized below the authored text rather than written per playbook — Boss-question suspension reaches every captain-invoking state that way per [DR-005](005-boss-reply-suspension-path.md), and a parked failure already retries from the persisted machine snapshot per [DR-034](034-durable-failure-retry-continuity.md).

@@ -46,9 +46,12 @@ export async function openSessionHost(options) {
     await installRetainedGenerationsForLaunch({ lease, shell: created.shell, ...(record === undefined ? { freshBoundary: { cwd, structuralProjection: structure, executionProjection: config, snapshot: created.snapshot } } : {}), retainedGenerations: record?.retainedGenerations ?? {}, reconcileRepositoryEffects: created.reconcileRepositoryEffects });
     record = await lease.read();
     await replay.flushStoredRecords();
-    const execute = async (input, retry, actionId, shellActionId) => {
+    const assertIdle = () => {
       if (closed || closing) throw new Error('session host is closing');
       if (active) throw new Error('session turn is already active');
+    };
+    const execute = async (input, retry, actionId, shellActionId) => {
+      assertIdle();
       let attemptId;
       const operation = (async () => {
         let prior = await lease.read();
@@ -56,7 +59,7 @@ export async function openSessionHost(options) {
           if (prior?.state !== 'uncertain') throw new Error('session has no uncertain turn to retry');
           input = prior.uncertain.input;
           if (!retryPending) throw new Error(RECOVERY_REOPEN);
-        } else if (prior?.state !== 'settled') throw new Error(prior?.uncertain?.recovery ? 'session has an interrupted step; select Retry to resume it' : 'session has an uncertain turn; select Retry or Discard');
+        } else if (prior?.state !== 'settled') throw new Error(RECOVERY_REOPEN);
         if (actionId === undefined && shellActionId === undefined && (typeof input !== 'string' || input.trim().length === 0)) throw new Error('session input must be nonempty');
         await created.reconcileRepositoryEffects();
         // The selection is made after reconciliation, so the advertised
@@ -112,7 +115,10 @@ export async function openSessionHost(options) {
       return closing;
     };
     const recover = async (input) => {
-      if ((await lease.read())?.state === 'uncertain' && !retryPending) throw new Error(RECOVERY_REOPEN);
+      assertIdle();
+      const prior = await lease.read();
+      assertIdle();
+      if (prior?.state === 'uncertain' && !retryPending) throw new Error(RECOVERY_REOPEN);
       if (retryPending) {
         if (input !== undefined) throw new Error('Resume the recorded interrupted instruction before supplying new input');
         return execute(undefined, true);

@@ -473,6 +473,11 @@ Before tagging a release, the developer/agent shall verify, in this order:
       bumped and `private` is unset (or `false`).
 - [ ] All changes are committed and pushed to `main`.
 
+#### release-35
+
+Before releasing the recovery extensions that retain existing persisted version numbers, the maintainer shall verify that every supported host sharing a store, including the CLI and Spex SDK, uses the same compatible recovery reader and writer, and that the upgrade instructions require stopping all older writers before any new writer saves recovery data [[session-storage-2](session-storage.md#session-storage-2)] ([DR-068](../decisions/068-interrupted-continuation-settlement.md)).
+A mixed 15.1.x and extended-format store shall not be a supported release configuration.
+
 ## Verification
 
 ### Install Closure Coverage
@@ -839,6 +844,10 @@ This human presentation check is conditional under [[release-10](#release-10)] a
 [[release-25](#release-25)]; the real-model functional workflows shall not be
 repeated manually — interactively or through `playbook run` — merely to
 duplicate the automatic gate.
+
+#### release-36
+
+When the recovery release gate is audited, the audit shall record the exact CLI and embedded SDK versions and their shared-store recovery checks, verify the documented coordinated upgrade, and block publication while any supported writer remains incompatible [[release-35](#release-35)].
 
 ### Hosted release workflow
 

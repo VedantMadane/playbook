@@ -387,6 +387,8 @@ Custom runtimes can provide the same recovery offer: step prompt, optional prepa
 
 Captain may answer a player from the original task when it already answers the question. It reports what it reused, respects later Boss instructions and never sends that original answer twice automatically.
 
+If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
+
 All applications sharing a session store, including Spex and the CLI, must upgrade together before using these recovery fields. Hosts from 15.1.x cannot read the extended records; see [the compatibility decision](../specs/decisions/068-interrupted-continuation-settlement.md).
 
 ### Recovering an uncertain turn
@@ -403,7 +405,7 @@ playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --discard-uncertain
 
 Retry reads no input and reuses the byte-exact recorded turn and its exact
 attempted Captain, player, and per-role model, effort, and fast-mode settings;
-current config cannot retune that attempt. A finished action gets only its closing report on Retry. If later work went beyond the saved position, Captain preserves it and offers review or abandonment instead of replay. Saved assessment or read-only restoration may use their own verified evidence. Without a point, recorded repository changes or an unresolved operation prevent whole-turn replay; repository evidence does not prove the absence of outside effects. Discard
+current config cannot retune that attempt. A finished action gets only its closing report on Retry. If later work went beyond the saved position, Captain preserves the files and evidence, ends that attempt without replay, and asks Boss to check the work before starting another attempt. Saved assessment or read-only restoration may use their own verified evidence. Without a point, recorded repository changes or an unresolved operation prevent whole-turn replay; repository evidence does not prove the absence of outside effects. Discard
 reads no input and runs no model: it restores the exact prior settled boundary,
 or deletes a never-settled fresh session, while abandoning the attempted work.
 An interrupted interactive turn that could not save a normal pause uses the same uncertain record and these headless recovery commands. Discard preserves the attempt's replay history and

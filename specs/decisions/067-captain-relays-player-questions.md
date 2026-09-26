@@ -7,6 +7,8 @@
 
 Accepted.
 
+Amended by [DR-068](068-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-069](069-host-owned-interrupted-work-settlement.md).
+
 ## Context
 
 Boss must be able to run a playbook without reading player panes.

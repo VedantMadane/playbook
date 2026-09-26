@@ -281,7 +281,7 @@ describe('headless Captain process-crash recovery (PBCLI-24)', () => {
     ).toHaveLength(2);
   }, 20_000);
 
-  it('recovers a real worktree delta but refuses replay without starting the host', async () => {
+  it('settles a real worktree delta without starting a workflow or player', async () => {
     const paths = await crashFixture();
     const exactInput = 'effectful child crash input';
     const crashing = startChild(paths, 'crash-delta', exactInput);
@@ -310,16 +310,16 @@ describe('headless Captain process-crash recovery (PBCLI-24)', () => {
       retry.child,
       (value) => value.type === 'result',
     );
-    expect(refused.result.code).toBe(1);
-    expect(refused.events).toEqual([]);
-    expect(retry.stdout()).toBe('');
-    expect(retry.stderr()).toMatch(/repository-effect|reconciliation/i);
+    expect(refused.result.code, retry.stderr()).toBe(0);
+    expect(refused.events).toEqual(['captain-runtime']);
+    expect(retry.stdout()).not.toBe('');
     await waitForExit(retry.child);
 
     const recovered = JSON.parse(await readFile(recordPath, 'utf8'));
     expect(recovered).toMatchObject({
-      state: 'uncertain',
-      uncertain: { attemptId, attemptNumber: 1, input: exactInput },
+      state: 'settled',
+      snapshot: { mode: 'chat', lastSettlementStatus: 'failed' },
+      unresolvedEffects: [{ classification: 'concurrent-or-foreign-change' }],
       effectLedger: {
         logicalOperations: [],
         boundaries: [
@@ -334,7 +334,7 @@ describe('headless Captain process-crash recovery (PBCLI-24)', () => {
         ],
       },
     });
-    expect(recovered.snapshot.effectLedger.boundaries).toEqual([]);
+    expect(recovered.snapshot.effectLedger).toEqual(recovered.effectLedger);
     expect(recovered.effectLedger.boundaries).toHaveLength(1);
   }, 20_000);
 });

@@ -18,6 +18,8 @@ Amended by [DR-049](049-portable-session-contract.md): deferred-player identity 
 Amended by [DR-062](062-pre-existing-changes-are-context.md): a governed call may absorb or alter the pre-existing changes of its baseline within its one commit, recorded as receipt evidence; only a lost pre-existing change and an unattributable delta remain ambiguity.
 Amended by [DR-063](063-failures-explain-themselves.md): a parked failure carries a structured cause beside the bounded unresolved-effect list, and advertised recovery actions carry a standing.
 
+Amended by [DR-068](068-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-069](069-host-owned-interrupted-work-settlement.md).
+
 ## Context
 
 - A player reply currently serves simultaneously as human presentation, semantic evidence for a hidden adjudicator, and proof of repository effects.

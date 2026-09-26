@@ -4176,7 +4176,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     }
   });
 
-  it('parks when any earlier attempt has a non-unchanged receipt before retry work', async () => {
+  it('settles earlier non-unchanged evidence without replay', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-effect-park-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4291,8 +4291,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       'utf8',
     );
 
-    const captainFactory = vi.fn(scriptedCaptainRuntime([]));
-    const hostFactory = vi.fn();
+    const captainFactory = vi.fn(scriptedCaptainRuntime([], { action: 'recover' }));
     const retried = await headlessHarness(
       ['run', '--session', firstId, '--retry-uncertain'],
       {
@@ -4301,29 +4300,22 @@ describe('durable Captain continuation (PBCLI-24)', () => {
         entryTransform: promoteEntry,
         createAttemptId: () => fourthId,
         createCaptainRuntime: captainFactory,
-        createHostRuntime: hostFactory,
       },
     );
-    expect(retried.result.code).toBe(1);
-    expect(retried.stdout).toBe('');
-    expect(retried.stderr).toContain(ambiguousBoundaryId);
-    expect(retried.stderr).toContain('observation-ambiguous');
-    expect(retried.stderr).toContain('remains parked for reconciliation');
-    expect(captainFactory).not.toHaveBeenCalled();
-    expect(hostFactory).not.toHaveBeenCalled();
-    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).toBe(
-      beforeBytes,
-    );
-    expect(await store.read(firstId)).toMatchObject({
-      state: 'uncertain',
-      uncertain: {
-        attemptId: beforeRetry.uncertain.attemptId,
-        attemptNumber: 2,
-      },
-    });
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainFactory).toHaveBeenCalledOnce();
+    expect(retried.events).toEqual([]);
+    const recovered = await store.read(firstId);
+    expect(recovered.state).toBe('settled');
+    expect(recovered.snapshot.mode).toBe('chat');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('failed');
+    expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
+    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
+    expect(recovered.effectLedger).toEqual(beforeRetry.effectLedger);
+    expect(recovered.unresolvedEffects[0].classification).toBe('observation-ambiguous');
   });
 
-  it('parks logical-only deferred progress without reusing the stored Boss turn', async () => {
+  it('settles logical-only progress without reusing the stored Boss turn', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-logical-park-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4436,8 +4428,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       'utf8',
     );
 
-    const captainFactory = vi.fn(scriptedCaptainRuntime([]));
-    const hostFactory = vi.fn();
+    const captainFactory = vi.fn(scriptedCaptainRuntime([], { action: 'recover' }));
     const retried = await headlessHarness(
       ['run', '--session', firstId, '--retry-uncertain'],
       {
@@ -4446,21 +4437,20 @@ describe('durable Captain continuation (PBCLI-24)', () => {
         entryTransform: promoteEntry,
         createAttemptId: () => fourthId,
         createCaptainRuntime: captainFactory,
-        createHostRuntime: hostFactory,
       },
     );
-    expect(retried.result.code).toBe(1);
-    expect(retried.stdout).toBe('');
-    expect(retried.stderr).toContain('deferred logical-operation progress');
-    expect(retried.stderr).toContain('cannot replay the Boss turn');
-    expect(captainFactory).not.toHaveBeenCalled();
-    expect(hostFactory).not.toHaveBeenCalled();
-    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).toBe(
-      beforeBytes,
-    );
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainFactory).toHaveBeenCalledOnce();
+    expect(retried.events).toEqual([]);
+    const recovered = await store.read(firstId);
+    expect(recovered.state).toBe('settled');
+    expect(recovered.snapshot.mode).toBe('chat');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('failed');
+    expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
+    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
   });
 
-  it('parks when recovery changes a boundary inside the restorable checkpoint', async () => {
+  it('settles changed evidence inside the old checkpoint without replay', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-prefix-park-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4564,8 +4554,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       'utf8',
     );
 
-    const captainFactory = vi.fn(scriptedCaptainRuntime([]));
-    const hostFactory = vi.fn();
+    const captainFactory = vi.fn(scriptedCaptainRuntime([], { action: 'recover' }));
     const retried = await headlessHarness(
       ['run', '--session', firstId, '--retry-uncertain'],
       {
@@ -4574,17 +4563,17 @@ describe('durable Captain continuation (PBCLI-24)', () => {
         entryTransform: promoteEntry,
         createAttemptId: () => fourthId,
         createCaptainRuntime: captainFactory,
-        createHostRuntime: hostFactory,
       },
     );
-    expect(retried.result.code).toBe(1);
-    expect(retried.stdout).toBe('');
-    expect(retried.stderr).toContain('cannot restore a changed pre-turn boundary');
-    expect(captainFactory).not.toHaveBeenCalled();
-    expect(hostFactory).not.toHaveBeenCalled();
-    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).toBe(
-      beforeBytes,
-    );
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainFactory).toHaveBeenCalledOnce();
+    expect(retried.events).toEqual([]);
+    const recovered = await store.read(firstId);
+    expect(recovered.state).toBe('settled');
+    expect(recovered.snapshot.mode).toBe('chat');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('failed');
+    expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
+    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
   });
 
   it('retries the exact attempted tuning instead of settled or current tuning', async () => {

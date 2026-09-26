@@ -3621,10 +3621,10 @@ async function createLease({
     await assertOwnerUnchecked();
     const prior = await readRecord(sessionId, { missing: 'undefined' });
     if (prior?.state !== 'uncertain' || prior.uncertain.abandonment) {
-      throw new Error('Preparation requires an active uncertain turn');
+      throw new Error('Saving a recovery point requires an active uncertain turn');
     }
     if (!isDeepStrictEqual(point?.snapshot?.effectLedger, prior.effectLedger)) {
-      throw new Error('Preparation recovery point must contain the current effect ledger');
+      throw new Error('Recovery point must contain the current effect ledger');
     }
     const record = validateCaptainSessionRecord(projectRecovery({
       ...prior, uncertain: { ...prior.uncertain, recovery: point },
@@ -4161,8 +4161,18 @@ function validateCanonicalCaptainSessionRecord(
           rejectUnknownOrMissingKeys(continuation, ['kind', 'actionId', ...factsKey], 'Captain recovery continuation');
           requireCanonicalNonblank(continuation.actionId, 'Captain recovery action');
         } else if (continuation.kind === 'settle') {
-          rejectUnknownOrMissingKeys(continuation, ['kind', 'status', ...factsKey], 'Captain recovery continuation');
+          rejectUnknownOrMissingKeys(continuation, ['kind', 'status', ...factsKey, ...(Object.hasOwn(continuation, 'settlement') ? ['settlement'] : [])], 'Captain recovery continuation');
           if (!['ok', 'failed', 'rejected'].includes(continuation.status)) throw new Error('Captain saved settlement status is invalid');
+          if (continuation.settlement !== undefined) {
+            const settlement = requireRecord(continuation.settlement, 'Captain saved settlement');
+            exactOptionalKeys(settlement, ['retentionUpdates', 'unresolvedEffects'], ['report', 'presentation'], 'Captain saved settlement');
+            const updates = validateRetainedGenerationUpdates(settlement.retentionUpdates);
+            validateRetainedGenerations(applyRetainedGenerationUpdates(record.retainedGenerations ?? {}, updates, structural), structural, point.snapshot.effectLedger);
+            assertPlaybookCaptainUnresolvedEffects(settlement.unresolvedEffects);
+            if (settlement.presentation !== undefined) requireCanonicalNonblank(settlement.presentation, 'Captain saved presentation');
+            if (settlement.report !== undefined) validateRecoveryReport(settlement.report, continuation.status);
+          }
+
         } else throw new Error('Captain recovery continuation must be reply, runtime or settle');
       }
       assertAcceptedInput(point.instruction);
@@ -5717,6 +5727,33 @@ function assertSnapshotMatchesStructure(
       throw new Error(
         `Captain session snapshot frame ${JSON.stringify(frame.playbookId)} effect ledger differs from its structural schema authority`,
       );
+    }
+  }
+}
+
+function validateRecoveryReport(value, status) {
+  const report = requireRecord(value, 'Captain saved report');
+  exactOptionalKeys(report, ['status', 'facts', 'counts', 'progressPhrase', 'progressRounds'], ['playbookId', 'bossFacts', 'receipt', 'leafStateSummary', 'savedLine'], 'Captain saved report');
+  if (report.status !== status) throw new Error('Captain saved report status disagrees with settlement');
+  for (const key of ['facts', 'bossFacts']) {
+    if (report[key] !== undefined && (!Array.isArray(report[key]) || report[key].some((text) => typeof text !== 'string'))) throw new Error(`Captain saved report ${key} must contain strings`);
+  }
+  for (const key of ['progressPhrase', 'playbookId', 'leafStateSummary', 'savedLine']) {
+    if (report[key] !== undefined && typeof report[key] !== 'string') throw new Error(`Captain saved report ${key} must be text`);
+  }
+  requireCanonicalNonblank(report.progressPhrase, 'Captain saved progress phrase');
+  const counts = requireRecord(report.counts, 'Captain saved counts');
+  rejectUnknownOrMissingKeys(counts, ['interruptions', 'copyPastes'], 'Captain saved counts');
+  if ([counts.interruptions, counts.copyPastes, report.progressRounds].some((n) => !Number.isSafeInteger(n) || n < 0)) throw new Error('Captain saved counts must be nonnegative integers');
+  if (report.receipt !== undefined) {
+    const receipt = requireRecord(report.receipt, 'Captain saved receipt');
+    exactOptionalKeys(receipt, ['disposition'], ['reason', 'error'], 'Captain saved receipt');
+    if (!['executed', 'failed', 'rejected'].includes(receipt.disposition)) throw new Error('Captain saved receipt disposition is invalid');
+    if (receipt.reason !== undefined && typeof receipt.reason !== 'string') throw new Error('Captain saved receipt reason must be text');
+    if (receipt.error !== undefined) {
+      const error = requireRecord(receipt.error, 'Captain saved receipt error');
+      rejectUnknownOrMissingKeys(error, ['name', 'message'], 'Captain saved receipt error');
+      if (typeof error.name !== 'string' || typeof error.message !== 'string') throw new Error('Captain saved receipt error must contain text');
     }
   }
 }

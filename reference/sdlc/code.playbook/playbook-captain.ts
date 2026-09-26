@@ -110,8 +110,15 @@ type PlayerLedgerSnapshotEntry = DeepReadonly<PlayerLedgerEntry>;
 type RecoveryContinuation = (
   | { kind: 'reply' }
   | { kind: 'runtime'; actionId: string }
-  | { kind: 'settle'; status: 'ok' | 'failed' | 'rejected' }
+  | { kind: 'settle'; status: 'ok' | 'failed' | 'rejected'; settlement?: RecoverySettlement }
 ) & { facts?: readonly string[] };
+
+interface RecoverySettlement {
+  retentionUpdates: readonly PlaybookCaptainRetentionUpdate[];
+  unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[];
+  report?: OutcomeReport;
+  presentation?: string;
+}
 
 export interface PlaybookCaptainDeps {
   /** Stop the host's active turn, including admitted tool calls, on preparation expiry. */
@@ -653,6 +660,8 @@ interface ActiveTurnSummary {
 interface ActiveTurn {
   appliedActionCount: number;
   recoveryInstruction?: string;
+  startedEngagement?: boolean;
+  settledRecoveryStatus?: 'ok' | 'failed' | 'rejected';
   hostRecoveryContinuation?: RecoveryContinuation;
   countedSummary?: ActiveTurnSummary;
   readonly hostRecovery?: true;
@@ -3281,6 +3290,225 @@ async function buildEnablements(
   };
 }
 
+type UnresolvedEnvelopeReference =
+  | { readonly kind: 'boundary'; readonly boundaryId: string }
+  | { readonly kind: 'logical-operation'; readonly operationId: string };
+
+const unresolvedEffectFromReceipt = (
+  receipt: NonNullable<
+    PlaybookEffectLedger['boundaries'][number]['physicalReceipt']
+  >,
+  baselineHead = receipt.baseline.head,
+): PlaybookCaptainUnresolvedEffect | undefined => {
+  if (receipt.classification === 'unchanged') return undefined;
+  return {
+    classification: receipt.classification,
+    baselineHead,
+    ...(receipt.after === undefined ? {} : { afterHead: receipt.after.head }),
+    ...(receipt.commitOid === undefined ? {} : { commitOid: receipt.commitOid }),
+  };
+};
+
+const cumulativeOpenLogicalEffect = (
+  operation: PlaybookEffectLedger['logicalOperations'][number],
+  boundaries: readonly PlaybookEffectLedger['boundaries'][number][],
+): PlaybookCaptainUnresolvedEffect | undefined => {
+  const original = operation.originalBaseline;
+  const latest = boundaries.at(-1)!;
+  const after = latest.after ?? operation.checkpoint;
+  const receipt = latest.physicalReceipt;
+  if (receipt === undefined) {
+    return {
+      classification: 'incomplete',
+      baselineHead: original.head,
+      ...(after === undefined ? {} : { afterHead: after.head }),
+    };
+  }
+  if (after === undefined) {
+    return unresolvedEffectFromReceipt(receipt, original.head);
+  }
+
+  // An open deferred chain has no authoritative cumulative receipt. Reuse
+  // physical ancestry only while every preceding checkpoint is one of the
+  // same-HEAD dispositions that can lawfully keep a deferred operation
+  // open. Any other history is bounded but not cumulatively attributable.
+  const checkpointChainIsSafe = boundaries
+    .slice(0, -1)
+    .every(
+      (boundary) =>
+        boundary.after?.head === original.head &&
+        (boundary.physicalReceipt?.classification === 'unchanged' ||
+          boundary.physicalReceipt?.classification ===
+            'worktree-only-change'),
+    );
+  if (!checkpointChainIsSafe || latest.baseline.head !== original.head) {
+    return {
+      classification: 'observation-ambiguous',
+      baselineHead: original.head,
+      afterHead: after.head,
+    };
+  }
+
+  if (
+    receipt.classification !== 'unchanged' &&
+    receipt.classification !== 'worktree-only-change' &&
+    receipt.classification !== 'one-descendant-commit'
+  ) {
+    return unresolvedEffectFromReceipt(receipt, original.head);
+  }
+
+  const sameProjection = isDeepStrictEqual(
+    original.projection,
+    after.projection,
+  );
+  // DR-062 §3: a pure projection never downgrades a classification the
+  // physical receipt proved. The latest receipt already accounted for every
+  // pre-existing entry of its own baseline, so when that baseline is the
+  // original one its accounting is the operation's accounting, and the
+  // projection may not demand a byte-equal after projection on top of it.
+  const receiptAccountsFromOriginal = isDeepStrictEqual(
+    receipt.baseline.projection,
+    original.projection,
+  );
+  if (after.head === original.head) {
+    if (
+      receipt.classification !== 'unchanged' &&
+      receipt.classification !== 'worktree-only-change'
+    ) {
+      return {
+        classification: 'observation-ambiguous',
+        baselineHead: original.head,
+        afterHead: after.head,
+      };
+    }
+    if (sameProjection) return undefined;
+    const preservesOriginal = Object.entries(original.projection).every(
+      ([path, entry]) =>
+        Object.hasOwn(after.projection, path) &&
+        isDeepStrictEqual(entry, after.projection[path]),
+    );
+    return {
+      classification:
+        preservesOriginal ||
+        (receipt.classification === 'worktree-only-change' &&
+          receiptAccountsFromOriginal)
+          ? 'worktree-only-change'
+          : 'observation-ambiguous',
+      baselineHead: original.head,
+      afterHead: after.head,
+    };
+  }
+
+  if (
+    receipt.classification === 'one-descendant-commit' &&
+    (sameProjection || receiptAccountsFromOriginal)
+  ) {
+    return {
+      classification: 'one-descendant-commit',
+      baselineHead: original.head,
+      afterHead: after.head,
+      commitOid: after.head,
+    };
+  }
+  return {
+    classification: 'observation-ambiguous',
+    baselineHead: original.head,
+    afterHead: after.head,
+  };
+};
+
+export const projectUnresolvedEffects = (
+  ledger: PlaybookEffectLedger,
+  references: readonly UnresolvedEnvelopeReference[],
+): readonly PlaybookCaptainUnresolvedEffect[] => {
+  const pendingReferences = [...references];
+  const projected: Array<{
+    readonly order: number;
+    readonly effect: PlaybookCaptainUnresolvedEffect;
+  }> = [];
+  const seenBoundaries = new Set<string>();
+  const seenOperations = new Set<string>();
+  for (let index = 0; index < pendingReferences.length; index += 1) {
+    const reference = pendingReferences[index]!;
+    if (reference.kind === 'boundary') {
+      if (seenBoundaries.has(reference.boundaryId)) continue;
+      seenBoundaries.add(reference.boundaryId);
+      const boundary = ledger.boundaries.find(
+        ({ boundaryId }) => boundaryId === reference.boundaryId,
+      );
+      if (boundary === undefined) {
+        throw new Error(
+          `unresolved effect boundary ${JSON.stringify(reference.boundaryId)} is absent from the authoritative ledger`,
+        );
+      }
+      if (boundary.restored !== undefined) continue;
+      if (boundary.logicalOperationId !== undefined) {
+        if (!seenOperations.has(boundary.logicalOperationId)) {
+          pendingReferences.push({
+            kind: 'logical-operation',
+            operationId: boundary.logicalOperationId,
+          });
+        }
+        continue;
+      }
+      const effect =
+        boundary.physicalReceipt === undefined
+          ? {
+              classification: 'incomplete' as const,
+              baselineHead: boundary.baseline.head,
+              ...(boundary.after === undefined
+                ? {}
+                : { afterHead: boundary.after.head }),
+            }
+          : unresolvedEffectFromReceipt(boundary.physicalReceipt);
+      if (effect !== undefined) {
+        projected.push({ order: boundary.sequence, effect });
+      }
+      continue;
+    }
+
+    if (seenOperations.has(reference.operationId)) continue;
+    seenOperations.add(reference.operationId);
+    const operation = ledger.logicalOperations.find(
+      ({ operationId }) => operationId === reference.operationId,
+    );
+    if (operation === undefined) {
+      throw new Error(
+        `unresolved logical operation ${JSON.stringify(reference.operationId)} is absent from the authoritative ledger`,
+      );
+    }
+    const boundaries = operation.boundaryIds.map((boundaryId) => {
+      const boundary = ledger.boundaries.find(
+        (candidate) => candidate.boundaryId === boundaryId,
+      );
+      if (boundary === undefined) {
+        throw new Error(
+          `unresolved logical operation ${JSON.stringify(reference.operationId)} names an absent boundary`,
+        );
+      }
+      seenBoundaries.add(boundaryId);
+      return boundary;
+    });
+    let effect: PlaybookCaptainUnresolvedEffect | undefined;
+    if (operation.logicalReceipt !== undefined) {
+      effect = unresolvedEffectFromReceipt(
+        operation.logicalReceipt,
+        operation.originalBaseline.head,
+      );
+    } else {
+      effect = cumulativeOpenLogicalEffect(operation, boundaries);
+    }
+    if (effect !== undefined) {
+      projected.push({ order: boundaries[0]!.sequence, effect });
+    }
+  }
+  return assertPlaybookCaptainUnresolvedEffects(
+    projected
+      .sort((left, right) => left.order - right.order)
+      .map(({ effect }) => effect),
+  );
+};
+
 export function createPlaybookCaptainShell(
   options: unknown,
   deps: PlaybookCaptainDeps = {},
@@ -3482,10 +3710,6 @@ export function createPlaybookCaptainShell(
   const frameLabel = (frame: EngagementFrame): string =>
     `/${frame.enablement.command}`;
 
-  type UnresolvedEnvelopeReference =
-    | { readonly kind: 'boundary'; readonly boundaryId: string }
-    | { readonly kind: 'logical-operation'; readonly operationId: string };
-
   const capturedUnresolvedEnvelopeReferences = (
     frame: EngagementFrame,
   ): readonly UnresolvedEnvelopeReference[] => {
@@ -3538,221 +3762,6 @@ export function createPlaybookCaptainShell(
       }
       throw new TypeError(`${path}.kind is not supported`);
     });
-  };
-
-  const unresolvedEffectFromReceipt = (
-    receipt: NonNullable<
-      PlaybookEffectLedger['boundaries'][number]['physicalReceipt']
-    >,
-    baselineHead = receipt.baseline.head,
-  ): PlaybookCaptainUnresolvedEffect | undefined => {
-    if (receipt.classification === 'unchanged') return undefined;
-    return {
-      classification: receipt.classification,
-      baselineHead,
-      ...(receipt.after === undefined ? {} : { afterHead: receipt.after.head }),
-      ...(receipt.commitOid === undefined ? {} : { commitOid: receipt.commitOid }),
-    };
-  };
-
-  const cumulativeOpenLogicalEffect = (
-    operation: PlaybookEffectLedger['logicalOperations'][number],
-    boundaries: readonly PlaybookEffectLedger['boundaries'][number][],
-  ): PlaybookCaptainUnresolvedEffect | undefined => {
-    const original = operation.originalBaseline;
-    const latest = boundaries.at(-1)!;
-    const after = latest.after ?? operation.checkpoint;
-    const receipt = latest.physicalReceipt;
-    if (receipt === undefined) {
-      return {
-        classification: 'incomplete',
-        baselineHead: original.head,
-        ...(after === undefined ? {} : { afterHead: after.head }),
-      };
-    }
-    if (after === undefined) {
-      return unresolvedEffectFromReceipt(receipt, original.head);
-    }
-
-    // An open deferred chain has no authoritative cumulative receipt. Reuse
-    // physical ancestry only while every preceding checkpoint is one of the
-    // same-HEAD dispositions that can lawfully keep a deferred operation
-    // open. Any other history is bounded but not cumulatively attributable.
-    const checkpointChainIsSafe = boundaries
-      .slice(0, -1)
-      .every(
-        (boundary) =>
-          boundary.after?.head === original.head &&
-          (boundary.physicalReceipt?.classification === 'unchanged' ||
-            boundary.physicalReceipt?.classification ===
-              'worktree-only-change'),
-      );
-    if (!checkpointChainIsSafe || latest.baseline.head !== original.head) {
-      return {
-        classification: 'observation-ambiguous',
-        baselineHead: original.head,
-        afterHead: after.head,
-      };
-    }
-
-    if (
-      receipt.classification !== 'unchanged' &&
-      receipt.classification !== 'worktree-only-change' &&
-      receipt.classification !== 'one-descendant-commit'
-    ) {
-      return unresolvedEffectFromReceipt(receipt, original.head);
-    }
-
-    const sameProjection = isDeepStrictEqual(
-      original.projection,
-      after.projection,
-    );
-    // DR-062 §3: a pure projection never downgrades a classification the
-    // physical receipt proved. The latest receipt already accounted for every
-    // pre-existing entry of its own baseline, so when that baseline is the
-    // original one its accounting is the operation's accounting, and the
-    // projection may not demand a byte-equal after projection on top of it.
-    const receiptAccountsFromOriginal = isDeepStrictEqual(
-      receipt.baseline.projection,
-      original.projection,
-    );
-    if (after.head === original.head) {
-      if (
-        receipt.classification !== 'unchanged' &&
-        receipt.classification !== 'worktree-only-change'
-      ) {
-        return {
-          classification: 'observation-ambiguous',
-          baselineHead: original.head,
-          afterHead: after.head,
-        };
-      }
-      if (sameProjection) return undefined;
-      const preservesOriginal = Object.entries(original.projection).every(
-        ([path, entry]) =>
-          Object.hasOwn(after.projection, path) &&
-          isDeepStrictEqual(entry, after.projection[path]),
-      );
-      return {
-        classification:
-          preservesOriginal ||
-          (receipt.classification === 'worktree-only-change' &&
-            receiptAccountsFromOriginal)
-            ? 'worktree-only-change'
-            : 'observation-ambiguous',
-        baselineHead: original.head,
-        afterHead: after.head,
-      };
-    }
-
-    if (
-      receipt.classification === 'one-descendant-commit' &&
-      (sameProjection || receiptAccountsFromOriginal)
-    ) {
-      return {
-        classification: 'one-descendant-commit',
-        baselineHead: original.head,
-        afterHead: after.head,
-        commitOid: after.head,
-      };
-    }
-    return {
-      classification: 'observation-ambiguous',
-      baselineHead: original.head,
-      afterHead: after.head,
-    };
-  };
-
-  const projectUnresolvedEffects = (
-    ledger: PlaybookEffectLedger,
-    references: readonly UnresolvedEnvelopeReference[],
-  ): readonly PlaybookCaptainUnresolvedEffect[] => {
-    const pendingReferences = [...references];
-    const projected: Array<{
-      readonly order: number;
-      readonly effect: PlaybookCaptainUnresolvedEffect;
-    }> = [];
-    const seenBoundaries = new Set<string>();
-    const seenOperations = new Set<string>();
-    for (let index = 0; index < pendingReferences.length; index += 1) {
-      const reference = pendingReferences[index]!;
-      if (reference.kind === 'boundary') {
-        if (seenBoundaries.has(reference.boundaryId)) continue;
-        seenBoundaries.add(reference.boundaryId);
-        const boundary = ledger.boundaries.find(
-          ({ boundaryId }) => boundaryId === reference.boundaryId,
-        );
-        if (boundary === undefined) {
-          throw new Error(
-            `unresolved effect boundary ${JSON.stringify(reference.boundaryId)} is absent from the authoritative ledger`,
-          );
-        }
-        if (boundary.restored !== undefined) continue;
-        if (boundary.logicalOperationId !== undefined) {
-          if (!seenOperations.has(boundary.logicalOperationId)) {
-            pendingReferences.push({
-              kind: 'logical-operation',
-              operationId: boundary.logicalOperationId,
-            });
-          }
-          continue;
-        }
-        const effect =
-          boundary.physicalReceipt === undefined
-            ? {
-                classification: 'incomplete' as const,
-                baselineHead: boundary.baseline.head,
-                ...(boundary.after === undefined
-                  ? {}
-                  : { afterHead: boundary.after.head }),
-              }
-            : unresolvedEffectFromReceipt(boundary.physicalReceipt);
-        if (effect !== undefined) {
-          projected.push({ order: boundary.sequence, effect });
-        }
-        continue;
-      }
-
-      if (seenOperations.has(reference.operationId)) continue;
-      seenOperations.add(reference.operationId);
-      const operation = ledger.logicalOperations.find(
-        ({ operationId }) => operationId === reference.operationId,
-      );
-      if (operation === undefined) {
-        throw new Error(
-          `unresolved logical operation ${JSON.stringify(reference.operationId)} is absent from the authoritative ledger`,
-        );
-      }
-      const boundaries = operation.boundaryIds.map((boundaryId) => {
-        const boundary = ledger.boundaries.find(
-          (candidate) => candidate.boundaryId === boundaryId,
-        );
-        if (boundary === undefined) {
-          throw new Error(
-            `unresolved logical operation ${JSON.stringify(reference.operationId)} names an absent boundary`,
-          );
-        }
-        seenBoundaries.add(boundaryId);
-        return boundary;
-      });
-      let effect: PlaybookCaptainUnresolvedEffect | undefined;
-      if (operation.logicalReceipt !== undefined) {
-        effect = unresolvedEffectFromReceipt(
-          operation.logicalReceipt,
-          operation.originalBaseline.head,
-        );
-      } else {
-        effect = cumulativeOpenLogicalEffect(operation, boundaries);
-      }
-      if (effect !== undefined) {
-        projected.push({ order: boundaries[0]!.sequence, effect });
-      }
-    }
-    return assertPlaybookCaptainUnresolvedEffects(
-      projected
-        .sort((left, right) => left.order - right.order)
-        .map(({ effect }) => effect),
-    );
   };
 
   const currentUnresolvedEffects =
@@ -5241,6 +5250,12 @@ export function createPlaybookCaptainShell(
     }
     // A Boss turn can drive several runtimes. Once one call returns, its
     // parked child must not inherit cancellation of a later call.
+    const summary = activeTurnSummary;
+    if (summary && frame.entry.summaryPolicy) {
+      for (let ancestor = summary.owner.parent?.frame; ancestor; ancestor = ancestor.parent?.frame) {
+        if (ancestor === frame) { summary.owner = frame; break; }
+      }
+    }
     const controller = new AbortController();
     const abort = (): void => controller.abort(signal.reason);
     const forward = (): void => {
@@ -5580,18 +5595,7 @@ export function createPlaybookCaptainShell(
       );
     }
     const unresolvedEffects = freezeTurnUnresolvedEffects();
-    if (unresolvedEffects.length === 0) {
-      if (unresolvedLeaf.runtime.exportSnapshot?.()?.retainedEffectReconciliation?.interruptedTurn !== true) {
-        throw new Error('unresolved-effect abandonment requires nonempty effect evidence');
-      }
-      // The position was lost, but no repository change needs the separate
-      // effect-settlement transaction. The ordinary turn atomically saves
-      // this dismissal; a loss before that save leaves the same safe exit.
-      await runEffect(() => disposeStack('unresolved-effect'));
-      pendingRetentionUpdates.set(root.entry.id, { kind: 'clear', rootPlaybookId: root.entry.id });
-      abandonmentSettlementUnsafe = false;
-      return;
-    }
+    if (unresolvedEffects.length === 0) throw new Error('unresolved-effect abandonment requires nonempty effect evidence');
     if (unresolvedEffectSettlement === undefined) {
       throw new Error(
         'unresolved-effect abandonment requires durable host settlement',
@@ -5689,6 +5693,7 @@ export function createPlaybookCaptainShell(
     await requestVisibility(frame);
     await setMode('engaged.driving', 'submit');
     const result = await runFrameOperation(frame, signal, (signal) => {
+      signal.throwIfAborted();
       onInputStarted?.();
       return runEffect(() => frame.runtime.handleBossInput({ text, signal }));
     });
@@ -5946,15 +5951,14 @@ export function createPlaybookCaptainShell(
       calledStatusEmitted = true;
       // The active child receives Boss cancellation directly. Do not also
       // destroy its suspended caller while the child is draining to a pause.
-      resumeCancellation = parent.pauseCancellation?.();
       const result = await driveFrame(
         child,
         request.text,
         activeContext,
         AbortSignal.any([invocationSignal, activeContext.signal]),
-        () => { childInputStarted = true; },
+        () => { resumeCancellation = parent.pauseCancellation?.(); childInputStarted = true; },
       );
-      if (result.outcome === 'terminal' || (result.outcome === 'aborted' && child.runtime.exportSnapshot?.() === undefined)) {
+      if (result.outcome === 'terminal' || (result.outcome === 'aborted' && (!childInputStarted || child.runtime.exportSnapshot?.() === undefined))) {
         const callResult = callResultFor(child, result);
         returnStatusHandled = true;
         const returned = await popChild(
@@ -6071,11 +6075,11 @@ export function createPlaybookCaptainShell(
     execute: () => Promise<T>,
   ): Promise<{ result?: T; error?: unknown; report: Omit<OutcomeReport, 'facts' | 'status'> }> => {
     const prior = activeTurn?.countedSummary;
-    const owner = frames.find((candidate) => candidate.entry.summaryPolicy !== undefined) ?? frame;
-    const policy = owner.entry.summaryPolicy;
+    const owner = prior?.owner ?? frame;
+    const counting = owner.entry.summaryPolicy !== undefined;
     const counts: TurnSummaryCounts = prior?.counts ?? { interruptions: 0, copyPastes: 0 };
     const stateCounts = prior?.stateCounts ?? new Map<string, number>();
-    activeTurnSummary = policy
+    activeTurnSummary = counting
       ? {
           owner,
           counts,
@@ -6093,6 +6097,7 @@ export function createPlaybookCaptainShell(
     } finally {
       activeTurnSummary = undefined;
     }
+    const policy = activeTurn?.countedSummary?.owner.entry.summaryPolicy;
     const progressRounds = summaryProgressRoundCount(stateCounts);
     const activity = counts.interruptions + counts.copyPastes + progressRounds;
     return {
@@ -7749,13 +7754,22 @@ export function createPlaybookCaptainShell(
     });
     await checkpointRecovery({
       snapshot, instruction,
-      ...(continuation === undefined ? {} : { continuation: { ...continuation, facts: [...turn.settlementFacts] } }),
+      ...(continuation === undefined ? {} : { continuation: { ...continuation, facts: [...turn.settlementFacts],
+        ...(continuation.kind !== 'settle' ? {} : { settlement: {
+          retentionUpdates: captureRetentionUpdates(snapshot),
+          unresolvedEffects: turn.unresolvedEffects ?? currentUnresolvedEffects(),
+          ...(turn.report === undefined ? {} : { report: { ...turn.report, status: continuation.status, facts: [...turn.settlementFacts] } }),
+          ...(turn.mandatoryPresentationSuffix === undefined ? {} : { presentation: turn.mandatoryPresentationSuffix }),
+        } }),
+      } }),
     });
     turn.recoveryInstruction = instruction;
   };
 
   const saveStoppedPoint = async (status: 'ok' | 'failed' | 'rejected'): Promise<void> => {
     if (activeTurn?.recoveryInstruction === undefined) return;
+    activeTurn.settledRecoveryStatus = status;
+    status = activeTurn.settledRecoveryStatus;
     try {
       await saveRecoveryPoint(activeTurn.recoveryInstruction, { kind: 'settle', status }, false);
     } catch { /* The durable old point and ledger still provide a safe exit. */ }
@@ -7800,7 +7814,7 @@ export function createPlaybookCaptainShell(
       // One controller action can include bounded prerequisite recovery.
       // Neither the model nor a retry manufactures an unadvertised transition.
       const attempted = new Set<string>();
-      if (turn && abortPreparation && settlement.status !== 'rejected' && !['respond', 'dismiss', 'recover'].includes(selection.action)) {
+      if (turn && abortPreparation && settlement.status !== 'rejected' && !['respond', 'dismiss', 'recover'].includes(selection.action) && !turn.hostRecovery) {
         for (let count = 0; count < 2 && !signal.aborted; count++) {
           const leaf = leafFrame();
           let view: PlaybookControlView | undefined;
@@ -7813,8 +7827,9 @@ export function createPlaybookCaptainShell(
           if (settlement.status !== 'ok') break;
         }
       }
+      const finalized = finalizeSettlement(settlement);
       await saveStoppedPoint(settlement.status);
-      return finalizeSettlement(settlement);
+      return finalized;
     } catch (error) {
       if (turn?.presentationError === error) throw error;
       const aborted = signal.aborted || activeContext?.signal.aborted === true;
@@ -7896,8 +7911,9 @@ export function createPlaybookCaptainShell(
           : { receipt: turn.report.receipt }),
         ...(summary === undefined ? {} : { leafStateSummary: summary }),
       };
+      const finalized = finalizeSettlement(settlement);
       await saveStoppedPoint(settlement.status);
-      return finalizeSettlement(settlement);
+      return finalized;
     } finally {
       runFailureFacts = undefined;
     }
@@ -7930,16 +7946,23 @@ export function createPlaybookCaptainShell(
       );
     }
     const previousAction = lastAction;
+    if (selection.action === 'start' || selection.action === 'switch') turn.startedEngagement = true;
     lastAction = selection.action;
     const facts = turn.settlementFacts;
     if (turn.hostRecoveryContinuation?.kind === 'settle') {
       turn.settled = true;
       journalAction({ action: 'recover' });
       const status = turn.hostRecoveryContinuation.status;
-      facts.push('Restored the saved result without repeating preparation or player work.');
-      journalOutcome(journalOutcomeEvidence(facts, status, undefined));
+      const saved = turn.hostRecoveryContinuation.settlement;
+      for (const update of saved?.retentionUpdates ?? []) pendingRetentionUpdates.set(update.rootPlaybookId, update);
+      if (saved) {
+        turn.unresolvedEffects = saved.unresolvedEffects;
+        settledTurnUnresolvedEffects = saved.unresolvedEffects;
+        if (saved.presentation) appendMandatoryPresentationSuffix(turn, saved.presentation);
+      }
+      turn.report = { ...emptyReport(), ...saved?.report, status, facts: [...facts] };
+      journalOutcome(journalOutcomeEvidence(facts, status, turn.report));
       lastSettlementStatus = status;
-      turn.report = { status, facts: [...facts], ...emptyReport() };
       return { status, facts: [...facts] };
     }
 
@@ -8211,7 +8234,7 @@ export function createPlaybookCaptainShell(
         const root = rootFrame();
         const task = root?.request;
         const instructions = task === undefined || root?.inputs?.includes(task) ? [] : [{ label: 'Current engagement request', instruction: task }];
-        const laterInputs = [...new Set([...(root?.inputs ?? []), ...(turn.hostRecovery || ['start', 'switch'].includes(previousAction ?? '') ? [] : [turn.bossText])])].filter((input) => input !== task);
+        const laterInputs = [...new Set([...(root?.inputs ?? []), ...(turn.startedEngagement ? [] : [turn.authoritativeText])])].filter((input) => input !== task);
         // Ordinary questions need no tools, repository claim, or recovery point.
         // The answer must be selected from existing instructions, never authored.
         try {
@@ -8330,9 +8353,9 @@ export function createPlaybookCaptainShell(
         await driveAndProcess(leaf, continuationInstruction, context, () => {
           const root = rootFrame();
           if (root) (root.inputs ??= []).push(continuationInstruction);
-          facts.push(turn.hostRecovery && turn.hostRecoveryContinuation?.facts?.length
+          facts.push(turn.hostRecovery && !recovering && turn.hostRecoveryContinuation?.kind === 'reply'
             ? `Delivered the saved instruction to ${frameLabel(leaf)}.`
-            : recovering && continuationInstruction !== turn.authoritativeText
+            : recovering && automaticRecovery
             ? `Delivered the existing task instruction to ${frameLabel(leaf)}.`
             : `Delivered the Boss text to ${frameLabel(leaf)}.`);
         });
@@ -9250,19 +9273,7 @@ export function createPlaybookCaptainShell(
     }
   };
 
-  const exportSettlement = (): PlaybookCaptainSettlement | undefined => {
-    if (!retentionSettlementReady || abandonmentSettlementUnsafe) {
-      return undefined;
-    }
-    const snapshot = exportShellSnapshot();
-    if (snapshot === undefined) return undefined;
-    let unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[];
-    try {
-      unresolvedEffects =
-        settledTurnUnresolvedEffects ?? currentUnresolvedEffects();
-    } catch {
-      return undefined;
-    }
+  const captureRetentionUpdates = (snapshot: PlaybookCaptainShellSnapshot): readonly PlaybookCaptainRetentionUpdate[] => {
     const updates = new Map(pendingRetentionUpdates);
     for (const rootPlaybookId of retainedGenerationRootClears) {
       updates.set(rootPlaybookId, { kind: 'clear', rootPlaybookId });
@@ -9291,19 +9302,33 @@ export function createPlaybookCaptainShell(
             updates.set(rootPlaybookId, update);
           }
         } catch {
-          return undefined;
+          throw new Error('Captain retention changes are not exportable');
         }
       }
     }
-    for (const update of updates.values()) {
-      applyRetentionUpdateToCatalog(update);
+    return [...updates.values()].sort((left, right) => left.rootPlaybookId.localeCompare(right.rootPlaybookId));
+  };
+
+  const exportSettlement = (): PlaybookCaptainSettlement | undefined => {
+    if (!retentionSettlementReady || abandonmentSettlementUnsafe) {
+      return undefined;
     }
+    const snapshot = exportShellSnapshot();
+    if (snapshot === undefined) return undefined;
+    let unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[];
+    try {
+      unresolvedEffects =
+        settledTurnUnresolvedEffects ?? currentUnresolvedEffects();
+    } catch {
+      return undefined;
+    }
+    let updates: readonly PlaybookCaptainRetentionUpdate[];
+    try { updates = captureRetentionUpdates(snapshot); } catch { return undefined; }
+    for (const update of updates) applyRetentionUpdateToCatalog(update);
     return snapshotJsonValue(
       {
         snapshot,
-        retentionUpdates: [...updates.values()].sort((left, right) =>
-          left.rootPlaybookId.localeCompare(right.rootPlaybookId),
-        ),
+        retentionUpdates: updates,
         unresolvedEffects,
       },
       'Captain settlement',
@@ -9872,8 +9897,20 @@ export function createPlaybookCaptainShell(
         servingCall = undefined;
         decisionCall = undefined;
         await drainHostCalls(turnHostCalls);
+        if (context.signal.aborted) {
+          // No call can still use these lanes. An unaccepted cancelled reply
+          // cannot safely advance its provider conversation; forget that
+          // local hint so the parked runtime can continue with a fresh call.
+          for (const [playerId, transaction] of playerTransactions) {
+            if (transaction.phase === 'quarantined' && transaction.turnId === activeTurn?.id && transaction.signal.aborted) {
+              const ledger = playerLedger.get(playerId);
+              if (ledger) delete ledger.resumeToken;
+              playerTransactions.delete(playerId);
+            }
+          }
+        }
         if (context.signal.aborted && activeTurn?.recoveryInstruction !== undefined) {
-          await saveStoppedPoint('failed');
+          await saveStoppedPoint(activeTurn.settledRecoveryStatus ?? 'failed');
         }
         activeTurn = undefined;
         if (activeTurnHostCalls === turnHostCalls) {

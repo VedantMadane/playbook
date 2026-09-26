@@ -6951,7 +6951,7 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     expect(failurePrompt).toContain('invalid nested visible set');
   });
 
-  it('disposes an exportable child when an ordinary error precedes input delivery', async () => {
+  it.each(['status-error', 'visibility-abort'])('disposes an exportable child before delivery: %s', async (failure) => {
     let childResult: unknown;
     const code = fakeCodeEntry(async (runtime, runtimeTurn) => {
       if (!runtime.ports) throw new Error('runtime ports missing');
@@ -6986,20 +6986,28 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     });
     const session = stubSession();
     const context = stubContext();
+    const abort = new AbortController();
+    if (failure === 'visibility-abort') {
+      context.context.signal = abort.signal;
+      context.context.setVisiblePlayers = async (ids) => {
+        if (ids.includes('docs-docs')) abort.abort(new Error('stop before child delivery'));
+      };
+    }
     const emitStatus = session.session.emitStatus;
     session.session.emitStatus = async (...args) => {
-      if (String(args[0]).includes('called by')) throw new Error('status writer failed before delivery');
+      if (failure === 'status-error' && String(args[0]).includes('called by')) throw new Error('status writer failed before delivery');
       return emitStatus(...args);
     };
 
     await shell.init!(session.session);
-    await expect(
-      shell.handleBossTurn(turn('/code open a nested child'), context.context),
-    ).resolves.toBeUndefined();
+    const running = shell.handleBossTurn(turn('/code open a nested child'), context.context);
+    if (failure === 'visibility-abort') await running.catch(() => {});
+    else await expect(running).resolves.toBeUndefined();
 
     expect(docs.runtimes[0]?.inputs).toEqual([]);
     expect(docs.runtimes[0]?.disposeCount).toBe(1);
-    expect(childResult).toMatchObject({ state: 'settled', result: { status: 'error', error: { message: 'status writer failed before delivery' } } });
+    expect(childResult).toMatchObject({ state: 'settled' });
+    if (failure === 'status-error') expect(childResult).toMatchObject({ result: { status: 'error', error: { message: 'status writer failed before delivery' } } });
     await shell.dispose!();
   });
 
