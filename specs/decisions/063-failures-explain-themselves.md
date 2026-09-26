@@ -9,6 +9,7 @@ Accepted (2026-09-17).
 Amends [DR-040](040-outcome-authority-effect-reconciliation.md) §4 in one scope: beside the bounded unresolved-effect list, a parked failure carries a structured cause, and the advertised recovery actions carry a standing.
 Amends [DR-051](051-host-selected-runtime-recovery.md) and [DR-052](052-host-selected-give-up.md) in one scope: the `{ id, label }` pairs a host reads gain `standing` and its `reason`.
 Everything else of those records stands.
+§4 amended (2026-09-25): one renderer and one report assembly state each failure once, in Boss's words, by rules that hold by construction.
 
 ## Context
 
@@ -55,7 +56,16 @@ Everything else of those records stands.
    The Captain's decision digest names each action's standing, so a model is never invited to select a no-op.
 4. **Every host sees the same report.**
    When a Boss turn settles with the leaf parked in its failure state or behind the retained-effect fence, the shell appends one deterministic Boss-visible report through the presentation seam: the cause as one sentence per code with its bounded evidence, and each advertised action with its standing and reason.
-   The report supplements the unresolved-effect report and the pre-existing-changes report; it exposes no content, prose, or internal identity.
+   The report supplements the unresolved-effect report and the pre-existing-changes report; it exposes no file content, player output, or internal identity.
+   It says each thing once, in Boss's words, by rules that hold by construction rather than by heuristics:
+   - one renderer puts every failure into words, for the Boss and for the turn's facts, as `<Subject> failed: <reason>.`, the reason being the phrase of its cause code, else the phrase of a reason the runtime mints from its own literal text — its refusal of an action it no longer advertises, the judge's, the governed settlement's, and the player and Captain calls' reasons, its own invariant reasons behind its diagnostic label, and its stand-ins for a missing player or error message, each listed with its phrase in a closed set — else any other recorded reason, a player's or script's message included, quoted where it reads as prose, else that whole reason shown once as recorded in a code span, never replaced by a sentence that hides it; prose begins with no error-class name, holds a space, begins with a capital letter, ends in a terminal mark, holds no word the reply validation's own identifier grammar tells apart from English, and passes that validation, while a reason behind an error-class name is machine text by origin, shown whole in a code span however the rest reads; and the leaf's cause restates in place the fact that already stated its failure;
+   - one report assembly composes every Boss-facing text the shell writes itself from three kinds of statement — listed facts, numbered unresolved-effect entries, and the `Failure:` line — and the kinds, not the words' length, decide what is dropped: an entry records a boundary of its own and is never dropped or merged, while a fact or the `Failure:` line is dropped where an entry, or an earlier fact, carries its reason, so of two facts the earlier stays;
+   - each statement is weighed by the reply validation on its own, outside its code spans: a code span naming a live or supplied identifier reads `an internal error`, a phrased reason whose own words fail is withheld the same way, and a failure subject or action label whose own words fail reads `The step` or `the selected action`, and no statement is ever left out, whatever words are left;
+   - after a model-composed reply the `Failure:` line stays, once, as the shell's exact record beside the model's prose, since the shell cannot tell whether that prose stated the failure faithfully.
+
+   Residuals accepted by design:
+   - two different failures with an identical reason, the same phrase or the same recorded text, are said once, since the assembly weighs reasons and not their sources;
+   - a cause fact and an evidence entry about the same boundary are two statements, cause and evidence, not a repeat, wherever the entry does not carry the cause's reason word for word.
 
 ## Consequences
 

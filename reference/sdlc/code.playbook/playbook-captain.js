@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import PQueue from 'p-queue';
 import { isAgentCallSettingsError, } from '@sublang/cligent/tmux-play';
 import { assertPlaybookFailureCause } from '@sublang/playbook/runtime';
-import { assertPlaybookRuntimeSnapshot, assertPlaybookEffectLedger, emptyPlaybookEffectLedger, hiddenControlEnvelope, isPlaybookEffectLedgerMonotonicExtension, registerPlaybookAbortCleanup, snapshotJsonValue, validatePlayerResult, } from '../../../src/xstate-runtime.js';
+import { assertPlaybookRuntimeSnapshot, assertPlaybookEffectLedger, emptyPlaybookEffectLedger, hiddenControlEnvelope, isPlaybookEffectLedgerMonotonicExtension, normalizeError, registerPlaybookAbortCleanup, snapshotJsonValue, validatePlayerResult, } from '../../../src/xstate-runtime.js';
 import createDefaultCaptainRuntime from '../captain.playbook/captain.playbook.js';
 function retainedEffectLedgerCanRebase(checkpoint, current) {
     if (checkpoint.boundaries.some(({ physicalReceipt }) => physicalReceipt === undefined)) {
@@ -390,6 +390,14 @@ function proseRejection(prose, liveSessionIds = [], liveStateIds = [], suppliedI
             return 'the reply leaked hidden control syntax or internal control vocabulary';
         }
     }
+    return identifierRejection(prose, liveSessionIds, liveStateIds, suppliedIds);
+}
+/**
+ * CAPTAIN-9's identifier duty alone: whether `prose` repeats a live session
+ * identifier, a live internal state identifier, or an identifier the shell
+ * supplied for selection only.
+ */
+function identifierRejection(prose, liveSessionIds, liveStateIds, suppliedIds) {
     const caseFoldedProse = prose.toLowerCase();
     for (const sessionId of liveSessionIds) {
         // UUID hexadecimal is case-insensitive. A model uppercasing A-F has not
@@ -482,28 +490,36 @@ function forwardedToolOptions(requested, captainAdapter) {
     return { allowedTools: requested };
 }
 const hiddenJudgeEnvelope = hiddenControlEnvelope;
+/**
+ * Each unresolved-effect classification as what the step did (CAPTAIN-58), in
+ * the words the matching failure cause uses, so the report assembly reads a
+ * cause an entry already states as said (CAPTAIN-69).
+ */
+const UNRESOLVED_EFFECT_CLAUSES = {
+    'one-descendant-commit': 'the step made one new commit',
+    'multiple-commits': 'the step made more than one commit',
+    'rewritten-or-non-descendant': 'the repository history was rewritten',
+    'worktree-only-change': 'the step left changes uncommitted',
+    'concurrent-or-foreign-change': 'the repository changed outside this step',
+    'observation-ambiguous': 'the repository could not be observed after the step',
+    incomplete: "the step's effect on the repository was not fully recorded",
+};
 function unresolvedEffectReportLines(unresolvedEffects) {
     return unresolvedEffects.map((effect, index) => {
         const merelyPossible = effect.classification === 'observation-ambiguous' ||
             effect.classification === 'incomplete';
-        return [
-            `${index + 1}. ${merelyPossible ? 'Possible repository effect; a change could not be excluded' : 'Observed repository change'} (${effect.classification})`,
-            `baseline HEAD ${effect.baselineHead}`,
-            effect.afterHead === undefined
-                ? 'after HEAD was not available'
-                : `after HEAD ${effect.afterHead}`,
-            ...(effect.commitOid === undefined
-                ? []
-                : [`proven commit OID ${effect.commitOid}`]),
-        ].join('; ') + '.';
+        const heads = effect.afterHead === undefined
+            ? `the repository stood at ${effect.baselineHead} before it; no HEAD was available after it`
+            : effect.afterHead === effect.baselineHead
+                ? `HEAD stayed at ${effect.baselineHead}`
+                : `HEAD moved from ${effect.baselineHead} to ${effect.commitOid === undefined ? '' : 'the proven commit '}${effect.afterHead}`;
+        return `${index + 1}. ${merelyPossible ? 'Possible repository effect, which could not be excluded' : 'Observed repository change'}: ${UNRESOLVED_EFFECT_CLAUSES[effect.classification]}; ${heads}.`;
     });
 }
-function unresolvedEffectBossReport(unresolvedEffects) {
-    if (unresolvedEffects.length === 0)
-        return undefined;
+function unresolvedEffectBossReport(lines) {
     return [
         'Repository-effect evidence:',
-        ...unresolvedEffectReportLines(unresolvedEffects).map((line) => `- ${line}`),
+        ...lines.map((line) => `- ${line}`),
         'This evidence does not establish workflow completion or attribute any repository change or commit to this workflow.',
     ].join('\n');
 }
@@ -565,10 +581,21 @@ function carriedPreExistingReport(carried) {
     ].join('\n'))
         .join('\n\n');
 }
+/**
+ * The carried-changes report as settlement facts, one per commit, saying all
+ * the report says so a reply that lists them need not repeat it.
+ */
 function carriedPreExistingFacts(carried) {
     return carried.map(({ commitOid, absorbed, altered }) => {
-        const paths = [...new Set([...absorbed, ...altered])].sort();
-        return `The commit ${commitOid} carries ${paths.length} changes that were uncommitted before the step: ${boundedPathList(paths)}.`;
+        const lists = [
+            ...(absorbed.length === 0
+                ? []
+                : [`absorbed as found ${boundedPathList(absorbed)}`]),
+            ...(altered.length === 0
+                ? []
+                : [`altered before committing ${boundedPathList(altered)}`]),
+        ];
+        return `The commit ${commitOid} carries changes that were uncommitted before the step: ${lists.join('; ')}.`;
     });
 }
 // DR-063 §4: the Boss-visible failure report. Every host sees the same
@@ -593,59 +620,359 @@ function causePathList(paths, truncated) {
         ? `${printed.join(', ')}, … and ${omitted} more`
         : printed.join(', ');
 }
-/** One sentence per code, with that code's bounded evidence (DR-063 §4). */
-function failureCauseSentence(cause, describePlaybook) {
+// CAPTAIN-71: one renderer puts every failure into words, for the Boss and for
+// the turn's settlement facts alike — a failure statement names what failed
+// and why — so no site composes a failure's words or quotes its message
+// itself. A cause says why in the Boss phrase of its code, and a reason the
+// runtime mints from a closed set in its own phrase (CAPTAIN-76); any other
+// recorded reason or message is quoted where it reads as prose and is
+// otherwise shown once, whole, as recorded, in a code span, never replaced by
+// a generic sentence that hides it (CAPTAIN-74).
+const REPOSITORY_EVIDENCE_SENTENCE = "the repository evidence for the step is missing or inconsistent, so the step's outcome was not accepted.";
+const RESULT_EVIDENCE_SENTENCE = "the step's reported result is incomplete or inconsistent, so its outcome was not accepted.";
+const UNDECIDED_OUTCOME_SENTENCE = "the step's outcome could not be decided.";
+const CAPTAIN_INCOMPLETE_SENTENCE = 'the Captain call did not complete.';
+const PLAYER_ERROR_SENTENCE = 'the player reported an error without a message.';
+const PLAYER_ABORTED_SENTENCE = 'the player call was aborted.';
+/**
+ * CAPTAIN-76: every reason the runtime records from its own literal text, as
+ * the Boss reads it. These are the runtime's own words for its own states — the
+ * semantic-reconciliation reasons (PBRT-77), the governed settlement's
+ * reasons, the judge's reasons, the player and Captain calls' results that
+ * carried no message or no text, its own invariant reasons behind its
+ * diagnostic label, and the stand-ins for a player result or an error that
+ * carried no message — so no recorded text of one is ever shown as a code the
+ * Boss has to decode. Anything not listed here is foreign text (CAPTAIN-74).
+ */
+const SEMANTIC_RECONCILIATION_PHRASES = {
+    'missing-repository-receipt': REPOSITORY_EVIDENCE_SENTENCE,
+    'invalid-repository-receipt': REPOSITORY_EVIDENCE_SENTENCE,
+    'repository-disposition-mismatch': REPOSITORY_EVIDENCE_SENTENCE,
+    'missing-effect-evidence': REPOSITORY_EVIDENCE_SENTENCE,
+    'missing-presentation-evidence': RESULT_EVIDENCE_SENTENCE,
+    'missing-runtime-evidence': RESULT_EVIDENCE_SENTENCE,
+    'inconsistent-runtime-evidence': RESULT_EVIDENCE_SENTENCE,
+};
+const RUNTIME_REASON_PHRASES = {
+    ...SEMANTIC_RECONCILIATION_PHRASES,
+    'deferred player result has no semantic evidence': RESULT_EVIDENCE_SENTENCE,
+    'host omitted governed semantic settlement': "the host did not settle the step's outcome.",
+    'deferred question did not receive an eligible durable binding': "the step's question could not be kept for a later reply.",
+    'judge transport failed': UNDECIDED_OUTCOME_SENTENCE,
+    'corrective judge failed': UNDECIDED_OUTCOME_SENTENCE,
+    'corrective semantic candidate is invalid': UNDECIDED_OUTCOME_SENTENCE,
+    'semantic correction budget is unavailable': UNDECIDED_OUTCOME_SENTENCE,
+    'callPlayer status "error"': PLAYER_ERROR_SENTENCE,
+    'callPlayer status "aborted"': PLAYER_ABORTED_SENTENCE,
+    'captainBridge: callPlayer status "error"': PLAYER_ERROR_SENTENCE,
+    'captainBridge: callPlayer status "aborted"': PLAYER_ABORTED_SENTENCE,
+    'captainBridge: callPlayer returned status=ok with no finalText': 'the player call returned nothing.',
+    'captainActor: callCaptain status "error"': CAPTAIN_INCOMPLETE_SENTENCE,
+    'captainActor: callCaptain status "aborted"': CAPTAIN_INCOMPLETE_SENTENCE,
+    'captainActor: callCaptain returned status=ok with no finalText': 'the Captain call returned nothing.',
+    'apply settled with outcome failed': 'the action did not complete.',
+    'apply settled with outcome aborted': 'the action was stopped.',
+    'unknown runtime defect': 'the runtime failed without saying why.',
+    'Unknown error': 'an unknown error.',
+};
+/**
+ * CAPTAIN-76: the reasons the runtime mints behind its diagnostic label —
+ * `playbook` unless a playbook names its own — as `<label> <suffix>`, the
+ * parallel cohort's naming its state id as well and the unresolved governed
+ * outcome its own reason; each matches only the whole reason.
+ */
+const LABELLED_RUNTIME_REASONS = [
+    [
+        /^.+ retained governed semantic envelope is no longer exact$/,
+        "the step's retained result no longer matches.",
+    ],
+    [/^.+ parallel state .+ cohort failed$/, 'a parallel step failed.'],
+    [
+        /^.+ governed semantic reconciliation remains unresolved$/,
+        "the step's outcome could not be reconciled.",
+    ],
+    [
+        /^.+ reconstructed governed output changed before FSM acceptance$/,
+        "the step's result changed before it was accepted.",
+    ],
+    [
+        /^.+ deferred continuation remains unresolved$/,
+        'the deferred step is still unresolved.',
+    ],
+    [
+        /^.+ deferred player returned no result$/,
+        'the deferred player returned nothing.',
+    ],
+    [
+        /^.+ governed outcome remains unresolved: .+$/,
+        "the step's outcome could not be settled.",
+    ],
+    [/^.+ actor entered error status$/, "the step's actor failed."],
+];
+/**
+ * The runtime's refusal of an action it does not advertise, which repeats the
+ * selected id as JSON (PBRT-52) and so says nothing the Boss can use but that
+ * the action is no longer offered (CAPTAIN-76).
+ */
+const NOT_ADVERTISED_REFUSAL = /^action "(?:[^"\\]|\\.)*" is not currently advertised$/;
+/** The phrase of a reason the runtime mints from a closed set (CAPTAIN-76). */
+function runtimeReasonPhrase(reason) {
+    if (Object.hasOwn(RUNTIME_REASON_PHRASES, reason)) {
+        return RUNTIME_REASON_PHRASES[reason];
+    }
+    if (NOT_ADVERTISED_REFUSAL.test(reason)) {
+        return 'that action is no longer offered.';
+    }
+    return LABELLED_RUNTIME_REASONS.find(([minted]) => minted.test(reason))?.[1];
+}
+/** A declared repository disposition, as what the step was to leave. */
+const REQUIRED_DISPOSITION_PHRASES = {
+    unchanged: 'no change',
+    'one-descendant-commit': 'one new commit',
+    deferred: 'a change deferred to a later step',
+};
+/** A receipt classification, as what the step left. */
+const OBSERVED_CLASSIFICATION_PHRASES = {
+    unchanged: 'no change',
+    'one-descendant-commit': 'one new commit',
+    'multiple-commits': 'more than one new commit',
+    'rewritten-or-non-descendant': 'rewritten history',
+    'worktree-only-change': 'uncommitted changes only',
+    'concurrent-or-foreign-change': 'a change made outside the step',
+    'observation-ambiguous': 'a state that could not be read',
+};
+/**
+ * An error-class name leading a message (CAPTAIN-74): `Error`, `Exception`,
+ * `Failure`, or `Defect`, alone or ending a CamelCase identifier, as in
+ * `TypeError: …`, followed by `: `.
+ */
+const LEADING_ERROR_CLASS = /^(?:[A-Z][A-Za-z0-9]*)?(?:Error|Exception|Failure|Defect): /;
+/**
+ * CAPTAIN-74: prose begins with no error-class name — a message behind one is
+ * machine text by origin, however what follows it reads — holds a space,
+ * begins with a capital letter, ends in a terminal mark, and holds no word
+ * CAPTAIN-9's identifier grammar tells apart from English — the same tokens
+ * and the same test the reply validation applies, so no second notion of
+ * "code-like" exists to disagree with it.
+ */
+function readsAsProse(text) {
+    return (!LEADING_ERROR_CLASS.test(text) &&
+        text.includes(' ') &&
+        /^\p{Lu}/u.test(text) &&
+        /[.!?]$/.test(text) &&
+        !(text.match(IDENTIFIER_TOKENS) ?? []).some(machineShapedIdentifier));
+}
+/**
+ * A statement's own end (CAPTAIN-69): a run of terminal marks at its very end
+ * collapses to its first, and a statement with none gains a period. A run
+ * inside it — `main..HEAD`, `../config.yaml` — is evidence and stays.
+ */
+function oneTerminalMark(text) {
+    const statement = text.trim().replace(/([.!?])[.!?]+$/, '$1');
+    return /[.!?]$/.test(statement) ? statement : `${statement}.`;
+}
+/** `text` as one Markdown code span, unchanged whatever backticks it holds. */
+function codeSpan(text) {
+    const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map(([run]) => run.length));
+    const fence = '`'.repeat(longest + 1);
+    const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
+    return `${fence}${pad}${text}${pad}${fence}`;
+}
+/**
+ * The code spans of `text` as CommonMark reads them: a backtick run opens one
+ * that the next run of the same length closes, and one space padding both of
+ * its ends is no part of what it shows.
+ */
+function codeSpans(text) {
+    const runs = [...text.matchAll(/`+/g)].map((match) => ({
+        at: match.index ?? 0,
+        length: match[0].length,
+    }));
+    const spans = [];
+    for (let index = 0; index < runs.length; index += 1) {
+        const open = runs[index];
+        const offset = runs
+            .slice(index + 1)
+            .findIndex(({ length }) => length === open.length);
+        if (offset < 0)
+            continue;
+        const close = runs[index + 1 + offset];
+        const inner = text.slice(open.at + open.length, close.at);
+        spans.push({
+            start: open.at,
+            end: close.at + close.length,
+            content: inner.length > 2 &&
+                inner.startsWith(' ') &&
+                inner.endsWith(' ') &&
+                inner.trim().length > 0
+                ? inner.slice(1, -1)
+                : inner,
+        });
+        index += 1 + offset;
+    }
+    return spans;
+}
+/** `text` with `map` applied to what stands outside its code spans. */
+function outsideCodeSpans(text, map) {
+    let mapped = '';
+    let at = 0;
+    for (const span of codeSpans(text)) {
+        mapped += map(text.slice(at, span.start)) + text.slice(span.start, span.end);
+        at = span.end;
+    }
+    return mapped + map(text.slice(at));
+}
+function sentenceCase(text) {
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+const SPEAKABLE_ANYWHERE = () => true;
+/**
+ * CAPTAIN-76/74: a recorded reason or message, its control characters spaced,
+ * its ends trimmed, and its length bounded, is said by its phrase where the
+ * runtime minted it from a closed set; otherwise it is quoted where it reads
+ * as prose — and only where the shell may say it outside a code span — and is
+ * otherwise kept whole as recorded; `undefined` where nothing is left of it.
+ */
+function recordedReason(text, speakable = SPEAKABLE_ANYWHERE) {
+    const reason = compactEvidence(text);
+    if (reason.length === 0)
+        return undefined;
+    const minted = runtimeReasonPhrase(reason);
+    if (minted !== undefined)
+        return { kind: 'phrase', text: minted };
+    return readsAsProse(reason) && speakable(reason)
+        ? { kind: 'phrase', text: oneTerminalMark(reason) }
+        : { kind: 'code', text: reason };
+}
+/**
+ * `<subject> <outcome>: <reason>` for words the Boss reads as they are,
+ * `<subject> <outcome> with the <noun> `<reason>`.` for a reason kept as
+ * recorded, and `<subject> <outcome>.` where there is none.
+ */
+function reasonedClause(subject, outcome, noun, reason) {
+    if (reason === undefined)
+        return `${subject} ${outcome}.`;
+    return reason.kind === 'phrase'
+        ? `${subject} ${outcome}: ${reason.text}`
+        : `${subject} ${outcome} with the ${noun} ${codeSpan(reason.text)}.`;
+}
+function failureClause(subject, reason) {
+    return reasonedClause(subject, 'failed', 'error', reason);
+}
+/** The Boss phrase of each cause code, with its bounded evidence (DR-063 §4). */
+function causeReason(cause, describePlaybook, speakable = SPEAKABLE_ANYWHERE) {
+    const phrase = (text) => ({ kind: 'phrase', text });
     const evidence = cause.evidence;
     const paths = evidence.paths;
     const code = cause.code;
     switch (code) {
         case 'commit-missing':
-            return (paths?.uncommitted ?? []).length === 0
+            return phrase((paths?.uncommitted ?? []).length === 0
                 ? 'the step had to commit its work and committed nothing.'
-                : `the step had to commit its work and committed nothing; these changes are uncommitted: ${causePathList(paths?.uncommitted, paths?.truncated)}.`;
+                : `the step had to commit its work and committed nothing; these changes are uncommitted: ${causePathList(paths?.uncommitted, paths?.truncated)}.`);
         case 'commit-residual': {
             const subject = evidence.commitOid === undefined
                 ? "the step's commit"
                 : `the commit ${evidence.commitOid}`;
             if ((paths?.uncommitted ?? []).length > 0) {
-                return `${subject} left changes uncommitted: ${causePathList(paths?.uncommitted, paths?.truncated)}.`;
+                return phrase(`${subject} left changes uncommitted: ${causePathList(paths?.uncommitted, paths?.truncated)}.`);
             }
             if ((paths?.altered ?? []).length > 0) {
-                return `${subject} left altered changes uncommitted: ${causePathList(paths?.altered, paths?.truncated)}.`;
+                return phrase(`${subject} left altered changes uncommitted: ${causePathList(paths?.altered, paths?.truncated)}.`);
             }
-            return `${subject} left changes uncommitted beside it.`;
+            return phrase(`${subject} left changes uncommitted beside it.`);
         }
         case 'pre-existing-lost':
-            return `uncommitted changes you had were lost: ${causePathList(paths?.lost, paths?.truncated)}.`;
+            return phrase(`uncommitted changes you had were lost: ${causePathList(paths?.lost, paths?.truncated)}.`);
         case 'commits-more-than-one':
-            return `the step made more than one commit; HEAD moved from ${evidence.baselineHead} to ${evidence.afterHead}.`;
+            return phrase(`the step made more than one commit; HEAD moved from ${evidence.baselineHead} to ${evidence.afterHead}.`);
         case 'history-rewritten':
-            return `the repository history was rewritten; HEAD moved from ${evidence.baselineHead} to ${evidence.afterHead}.`;
+            return phrase(`the repository history was rewritten; HEAD moved from ${evidence.baselineHead} to ${evidence.afterHead}.`);
         case 'foreign-change':
-            return `the repository changed outside this step: ${causePathList(paths?.changed, paths?.truncated)}.`;
+            return phrase(`the repository changed outside this step: ${causePathList(paths?.changed, paths?.truncated)}.`);
         case 'observation-unstable':
-            return `the repository could not be observed after the step; it stood at ${evidence.baselineHead} before it.`;
-        case 'attribution-ambiguous':
-            return `the repository change could not be attributed to this step; it required ${evidence.required} and observed ${evidence.observed}.`;
-        case 'receipt-missing':
-            return `a step left no complete repository receipt; the repository stood at ${evidence.baselineHead} before it.`;
-        case 'judge-failed':
-            return evidence.error === undefined
-                ? `the hidden adjudication failed: ${evidence.reason}.`
-                : `the hidden adjudication failed: ${evidence.reason} (${evidence.error.name}: ${compactEvidence(evidence.error.message)}).`;
-        case 'player-failed':
-            return `the ${evidence.roleId} call failed: ${compactEvidence(evidence.error?.message ?? 'no detail was reported')}.`;
-        case 'aborted':
-            return 'the turn was aborted before the work settled.';
-        case 'child-failed': {
-            const nested = describePlaybook(evidence.playbookId ?? 'nested playbook');
-            return evidence.cause === undefined
-                ? `the nested ${nested} run failed.`
-                : `the nested ${nested} run failed: ${failureCauseSentence(evidence.cause, describePlaybook)}`;
+            return phrase(`the repository could not be observed after the step; the repository stood at ${evidence.baselineHead} before it.`);
+        case 'attribution-ambiguous': {
+            const required = evidence.required === undefined
+                ? undefined
+                : REQUIRED_DISPOSITION_PHRASES[evidence.required];
+            const observed = evidence.observed === undefined
+                ? undefined
+                : OBSERVED_CLASSIFICATION_PHRASES[evidence.observed];
+            return phrase(required === undefined || observed === undefined
+                ? 'the repository change could not be attributed to this step.'
+                : `the repository change could not be attributed to this step: it should have left ${required} but left ${observed}.`);
         }
+        case 'receipt-missing':
+            return phrase(`the step's effect on the repository was not fully recorded; the repository stood at ${evidence.baselineHead} before it.`);
+        case 'judge-failed':
+            // The runtime's own closed reasons stay in the cause's data.
+            return phrase(UNDECIDED_OUTCOME_SENTENCE);
+        case 'player-failed':
+            // The player's message says why, as any recorded message does: by the
+            // runtime's phrase where it minted the message, else as prose or code.
+            return phrase(failureClause(`the ${evidence.roleId} call`, recordedReason(evidence.error?.message ?? '', speakable)));
+        case 'aborted':
+            return phrase('the turn was aborted before the work settled.');
+        case 'child-failed':
+            return phrase(failureClause(`the nested ${describePlaybook(evidence.playbookId ?? '')} run`, evidence.cause === undefined
+                ? undefined
+                : causeReason(evidence.cause, describePlaybook, speakable)));
         case 'runtime-defect':
-            return `the runtime could not settle the step: ${compactEvidence(evidence.reason ?? 'no reason was recorded')}.`;
+            // No more specific code: a reason the runtime minted is said by its
+            // phrase, and any other reason as it was recorded.
+            return recordedReason(evidence.reason ?? '', speakable);
     }
+}
+/**
+ * Why a recorded failure failed: the phrase of the cause it carries where the
+ * closed validator accepts one, and otherwise its recorded message.
+ */
+function failureReason(failure, describePlaybook, speakable = SPEAKABLE_ANYWHERE) {
+    if (failure === undefined)
+        return undefined;
+    if (failure.cause !== undefined) {
+        let cause;
+        try {
+            cause = assertPlaybookFailureCause(failure.cause);
+        }
+        catch {
+            // A cause the closed validator refuses is not a cause.
+        }
+        if (cause !== undefined) {
+            return causeReason(cause, describePlaybook, speakable);
+        }
+    }
+    return failure.message === undefined
+        ? undefined
+        : recordedReason(failure.message, speakable);
+}
+/**
+ * CAPTAIN-71: the one way a failure is put into words — `<Subject> failed:
+ * <reason>.` — `subject` naming what failed in the Boss's words and `failure`
+ * the error or cause the shell recorded.
+ */
+function failureStatement(subject, failure, describePlaybook = (playbookId) => playbookId, speakable = SPEAKABLE_ANYWHERE) {
+    return sentenceCase(failureClause(subject, failureReason(failure, describePlaybook, speakable)));
+}
+/** The runtime's refusal of `action`, its reason said as a failure's is. */
+function refusalStatement(action, reason) {
+    return sentenceCase(reasonedClause('the runtime', `refused ${action}`, 'reason', reason));
+}
+/**
+ * The `Failure:` line of a parked failure (CAPTAIN-67): the reason's phrase,
+ * or, for a reason kept as recorded, the step's failure statement; and the
+ * reason it states, which a statement carrying the same failure holds.
+ */
+function failureLine(reason) {
+    if (reason?.kind === 'phrase') {
+        return { sentence: reason.text, reason: reason.text };
+    }
+    const sentence = failureClause('the step', reason);
+    return {
+        sentence,
+        reason: reason === undefined ? sentence : codeSpan(reason.text),
+    };
 }
 function failureControlLine(action) {
     // DR-063 §3: an action that publishes no standing is `ready`.
@@ -654,20 +981,163 @@ function failureControlLine(action) {
         ? `- ${action.label} (ready)`
         : `- ${action.label} (${standing}: ${controlReasonPhrase(action.reason)})`;
 }
-function failureReportText(sentence, controls) {
-    return [
-        `Failure: ${sentence}`,
-        'Controls:',
-        ...(controls.length === 0 ? ['- none'] : controls),
-    ].join('\n');
-}
-function appendMandatoryPresentationSuffix(turn, suffix) {
-    const current = turn.mandatoryPresentationSuffix;
-    if (current === undefined) {
-        turn.mandatoryPresentationSuffix = suffix;
+/**
+ * Whether `container` already states `statement`: the same words, case and
+ * terminal mark aside, standing as a phrase of their own rather than inside a
+ * longer word or command.
+ */
+function alreadyStates(container, statement) {
+    const haystack = container.toLowerCase();
+    const needle = statement.toLowerCase().replace(/[.!?]+$/, '');
+    if (needle.length === 0)
+        return true;
+    for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) {
+        const before = haystack.charAt(at - 1);
+        const after = haystack.charAt(at + needle.length);
+        if (!/[\p{L}\p{N}_/-]/u.test(before) && !/[\p{L}\p{N}_-]/u.test(after)) {
+            return true;
+        }
     }
-    else if (!current.includes(suffix)) {
-        turn.mandatoryPresentationSuffix = `${current}\n\n${suffix}`;
+    return false;
+}
+/** The words a reason CAPTAIN-9 withholds is said as. */
+const WITHHELD_REASON = 'an internal error';
+/** `text` with each of its code spans read as a space. */
+function wordsOutsideCodeSpans(text) {
+    let words = '';
+    let at = 0;
+    for (const span of codeSpans(text)) {
+        words += `${text.slice(at, span.start)} `;
+        at = span.end;
+    }
+    return words + text.slice(at);
+}
+const NO_SHELL_WORDS = { subjects: [], labels: [] };
+/**
+ * CAPTAIN-69's guard on one statement the shell says, so no statement is
+ * lost for its own or another's words: a code span whose content repeats an
+ * identifier CAPTAIN-9 withholds reads, with the noun before it, `an internal
+ * error`; a reason the renderer phrased whose own words fail CAPTAIN-9 reads
+ * so too; a failure subject beginning the statement whose own words fail
+ * reads `The step`; and a quoted action label whose own words fail reads `the
+ * selected action`. Whatever is left, the statement is never left out.
+ */
+function guardedStatement(text, withholds, refuses, phrased = [], shellWords = NO_SHELL_WORDS) {
+    let guarded = '';
+    let at = 0;
+    for (const span of codeSpans(text)) {
+        const before = text.slice(at, span.start);
+        guarded += withholds(span.content)
+            ? `${before.replace(/the (?:error|reason) $/, '')}${WITHHELD_REASON}`
+            : before + text.slice(span.start, span.end);
+        at = span.end;
+    }
+    guarded += text.slice(at);
+    const fails = (statement) => {
+        const words = wordsOutsideCodeSpans(statement);
+        return words.trim().length > 0 && refuses(words);
+    };
+    for (const reason of phrased) {
+        if (!fails(reason))
+            continue;
+        guarded =
+            guarded === `Failure: ${reason}`
+                ? `Failure: the step failed with ${WITHHELD_REASON}.`
+                : guarded.split(`: ${reason}`).join(` with ${WITHHELD_REASON}.`);
+    }
+    for (const subject of shellWords.subjects) {
+        if (guarded.startsWith(`${subject} `) && fails(subject)) {
+            guarded = `The step${guarded.slice(subject.length)}`;
+        }
+    }
+    for (const label of shellWords.labels) {
+        if (fails(label)) {
+            guarded = guarded.split(label).join('the selected action');
+        }
+    }
+    return guarded;
+}
+/**
+ * CAPTAIN-69: the one way the shell assembles Boss-facing text of its own.
+ * Each statement ends in one terminal mark and passes `guard`. The kinds
+ * decide what is dropped: an unresolved-effect entry records a boundary of
+ * its own and always stays, while a fact or the `Failure:` line is dropped
+ * where an entry, or a fact before it that stays, carries its reason — for
+ * the `Failure:` line the reason it states, for a fact every reason the
+ * renderer gave that turn (`reasons`) that it holds, else the fact itself.
+ * The result is aligned with `statements`, a dropped statement `undefined`.
+ */
+function assembleStatements(statements, reasons = [], guard = (text) => text) {
+    const rendered = [...new Set(reasons)];
+    const weighed = statements.map(({ text, kind = 'fact', reason }) => {
+        const statement = oneTerminalMark(text);
+        if (reason !== undefined)
+            return { text: statement, kind, own: [reason] };
+        const held = rendered.filter((candidate) => alreadyStates(statement, candidate));
+        return { text: statement, kind, own: held.length > 0 ? held : [statement] };
+    });
+    const entries = weighed
+        .filter(({ kind }) => kind === 'entry')
+        .map(({ text }) => text);
+    const facts = [];
+    const carried = (own, containers) => containers.some((container) => own.every((reason) => alreadyStates(container, reason)));
+    const stays = weighed.map(({ text, kind, own }) => {
+        if (kind !== 'fact')
+            return true;
+        if (carried(own, entries) || carried(own, facts))
+            return false;
+        facts.push(text);
+        return true;
+    });
+    return weighed.map(({ text, kind, own }, index) => stays[index] &&
+        (kind !== 'failure' || !carried(own, [...entries, ...facts]))
+        ? oneTerminalMark(guard(text))
+        : undefined);
+}
+/** The statements of `statements` that stay, as CAPTAIN-69 assembles them. */
+function bossReport(statements, reasons = []) {
+    return assembleStatements(statements.map((statement) => typeof statement === 'string' ? { text: statement } : statement), reasons).filter((statement) => statement !== undefined);
+}
+/**
+ * The reports that accompany a reply, from the turn's assembled statements
+ * (CAPTAIN-69): a report whose facts the reply lists is not said again, the
+ * unresolved-effect report carries every entry as guarded, and the failure
+ * report's `Controls:` list always stays.
+ */
+function presentationSuffix(turn, assembled) {
+    const parts = turn.presentationReports.flatMap((report) => {
+        if (report.kind === 'stated') {
+            return report.facts.length > 0 &&
+                report.facts.every((fact) => assembled.facts.some((listed) => alreadyStates(listed, fact)))
+                ? []
+                : [report.text];
+        }
+        return assembled.effects.length === 0
+            ? []
+            : [unresolvedEffectBossReport(assembled.effects)];
+    });
+    const failure = turn.failureReport;
+    if (failure !== undefined) {
+        parts.push([
+            ...(assembled.failure === undefined ? [] : [assembled.failure]),
+            'Controls:',
+            ...(failure.controls.length === 0 ? ['- none'] : failure.controls),
+        ].join('\n'));
+    }
+    return parts.length === 0 ? undefined : parts.join('\n\n');
+}
+function appendMandatoryPresentationSuffix(turn, suffix, facts = []) {
+    if (!turn.presentationReports.some((report) => report.kind === 'stated' && report.text.includes(suffix))) {
+        turn.presentationReports.push({ kind: 'stated', text: suffix, facts });
+    }
+}
+function appendUnresolvedEffectReport(turn, unresolvedEffects) {
+    if (unresolvedEffects.length > 0 &&
+        !turn.presentationReports.some((report) => report.kind === 'effects')) {
+        turn.presentationReports.push({
+            kind: 'effects',
+            lines: unresolvedEffectReportLines(unresolvedEffects),
+        });
     }
 }
 // CAPTAIN-20: the result-phase block the shell supplies inside the closing
@@ -2210,21 +2680,46 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         if (report === undefined)
             return;
         turn.carriedPreExistingReported = true;
-        appendMandatoryPresentationSuffix(turn, report);
         const facts = carriedPreExistingFacts(carried);
-        turn.settlementFacts.push(...facts);
-        // The action's own report was assembled from the facts as they stood when
-        // it settled; the result-phase prompt reads this report, so the same facts
-        // join it here rather than only the turn's running list.
-        if (turn.report !== undefined) {
-            turn.report = {
-                ...turn.report,
-                facts: [...turn.report.facts, ...facts],
-                ...(turn.report.bossFacts === undefined
-                    ? {}
-                    : { bossFacts: [...turn.report.bossFacts, ...facts] }),
-            };
+        appendMandatoryPresentationSuffix(turn, report, facts);
+        for (const fact of facts) {
+            joinSettlementFact(turn, fact);
         }
+    };
+    /**
+     * CAPTAIN-67: one fact joins the turn once. The action's own report was
+     * assembled from the facts as they stood when it settled, and the
+     * result-phase prompt reads that report, so a later fact joins it as well as
+     * the turn's running list — which that report's `facts` often *is*, so
+     * appending to both stated the fact twice. A fact that restates one already
+     * listed for the same failure takes that fact's place.
+     */
+    const joinSettlementFact = (turn, fact, replacing, speak = (text) => text) => {
+        const placed = (list, entry, replaced) => {
+            if (list.includes(entry))
+                return list;
+            const at = replaced === undefined ? -1 : list.indexOf(replaced);
+            return at < 0
+                ? [...list, entry]
+                : list.map((listed, index) => (index === at ? entry : listed));
+        };
+        const running = placed(turn.settlementFacts, fact, replacing);
+        if (running !== turn.settlementFacts) {
+            turn.settlementFacts.splice(0, turn.settlementFacts.length, ...running);
+        }
+        const report = turn.report;
+        if (report === undefined)
+            return;
+        // The Boss-facing rendering holds the same fact as the Boss reads it.
+        turn.report = {
+            ...report,
+            facts: placed(report.facts, fact, replacing),
+            ...(report.bossFacts === undefined
+                ? {}
+                : {
+                    bossFacts: placed(report.bossFacts, speak(fact), replacing === undefined ? undefined : speak(replacing)),
+                }),
+        };
     };
     const normalizeInstalledRetainedGenerations = (value) => {
         const path = 'Captain retained generations';
@@ -2660,6 +3155,18 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             }
         }
         return { name: 'Error', message: String(value) };
+    };
+    /**
+     * CAPTAIN-71: what the shell recorded of a thrown value — its message, and
+     * the cause the runtime decided where the value carries one (DR-063 §2).
+     */
+    const failureOf = (error) => {
+        const normalized = normalizeErrorCompact(error) ?? {
+            name: 'Error',
+            message: String(error),
+        };
+        const { cause } = normalizeError(error);
+        return cause === undefined ? normalized : { ...normalized, cause };
     };
     const payloadRecord = (payload) => typeof payload === 'object' && payload !== null && !Array.isArray(payload)
         ? payload
@@ -3668,11 +4175,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             }
             else {
                 if (runFailureFacts) {
-                    const normalized = normalizeErrorCompact(error) ?? {
-                        name: 'Error',
-                        message: String(error),
-                    };
-                    runFailureFacts.push(`Cleanup while removing ${frameLabel(child)} failed: ${normalized.name}: ${compactEvidence(normalized.message)}.`);
+                    runFailureFacts.push(stateFailure(`cleanup after ${frameLabel(child)}`, failureOf(error)));
                 }
                 effectiveResult = {
                     status: context.signal.aborted ? 'aborted' : 'error',
@@ -3757,10 +4260,14 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             runFailureFacts.push(`${frameLabel(frame)} was aborted before its outcome could be confirmed; it was not repeated automatically.`);
         }
         if (result.outcome === 'failed' && runFailureFacts) {
-            runFailureFacts.push(`${frameLabel(frame)} failed` +
-                (result.error
-                    ? `: ${result.error.name}: ${compactEvidence(result.error.message)}.`
-                    : '.'));
+            const subject = frameLabel(frame);
+            const fact = stateFailure(subject, result.error);
+            runFailureFacts.push(fact);
+            activeTurn?.failureStatements.push({
+                frame,
+                fact,
+                restate: (failure) => stateFailure(subject, failure),
+            });
         }
         if (leafFrame()) {
             await setMode('engaged.parked', `turn:${result.outcome}`);
@@ -4339,7 +4846,9 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         // all of this prose. Preserve the exact attempt before crossing the
         // boundary; the uncertainty record below keeps recovery from pretending
         // delivery was confirmed while still understanding a Boss follow-up.
-        const suffix = turn?.mandatoryPresentationSuffix;
+        const suffix = turn === undefined
+            ? undefined
+            : presentationSuffix(turn, assembleTurnReport(turn, settlement.stated ?? []));
         const visibleText = suffix === undefined || settlement.text.includes(suffix)
             ? settlement.text
             : `${settlement.text.trimEnd()}\n\n${suffix}`;
@@ -4430,6 +4939,53 @@ export function createPlaybookCaptainShell(options, deps = {}) {
     // The one predicate every Boss-visible Captain reply passes, whether the
     // words came from the model or the shell's conservative failure fallback.
     const replyRejection = (prose) => proseRejection(prose, liveSessionIdentifiers(), liveStateIdentifiers(), suppliedIdentifiers());
+    // CAPTAIN-74: whether a recorded reason may be quoted outside a code span —
+    // what the renderer asks before it quotes one as prose.
+    const speakableWords = (words) => replyRejection(words) === undefined;
+    // CAPTAIN-69: the guard every statement the shell says passes on its own —
+    // CAPTAIN-9 outside its code spans, and inside one only its identifiers —
+    // with the reasons the renderer gave that turn and the shell words it may
+    // say neutrally.
+    const statementGuard = (text, turn) => guardedStatement(text, (content) => identifierRejection(content, liveSessionIdentifiers(), liveStateIdentifiers(), suppliedIdentifiers()) !== undefined, (words) => replyRejection(words) !== undefined, turn.statedReasons, turn.shellWords);
+    /** A reason the renderer gave a statement this turn, noted for the assembly. */
+    const noteReason = (reason) => {
+        if (reason !== undefined) {
+            activeTurn?.statedReasons.add(reason.kind === 'phrase' ? reason.text : codeSpan(reason.text));
+        }
+        return reason;
+    };
+    /**
+     * CAPTAIN-69: the turn's shell-said statements — the facts a reply lists,
+     * the unresolved-effect entries, and the `Failure:` line — each said once.
+     */
+    const assembleTurnReport = (turn, facts) => {
+        const effects = turn.presentationReports.flatMap((report) => report.kind === 'effects' ? report.lines : []);
+        const failure = turn.failureReport;
+        const said = assembleStatements([
+            ...facts.map((text) => ({ text, kind: 'fact' })),
+            ...effects.map((text) => ({ text, kind: 'entry' })),
+            ...(failure === undefined
+                ? []
+                : [
+                    {
+                        text: `Failure: ${failure.sentence}`,
+                        kind: 'failure',
+                        reason: failure.reason,
+                    },
+                ]),
+        ], turn.statedReasons, (text) => statementGuard(text, turn));
+        const kept = (from, to) => said
+            .slice(from, to)
+            .filter((statement) => statement !== undefined);
+        const listed = facts.length + effects.length;
+        return {
+            facts: kept(0, facts.length),
+            effects: kept(facts.length, listed),
+            ...(failure === undefined || said[listed] === undefined
+                ? {}
+                : { failure: said[listed] }),
+        };
+    };
     // -------------------------------------------------------------------------
     // The durable conversation (CAPTAIN-31, CAPTAIN-35).
     // -------------------------------------------------------------------------
@@ -4750,8 +5306,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 // Through the one presentation seam, exactly where a model-composed
                 // reply is presented, so this reply is journaled and single-attempt
                 // like every other. It needs no reply validation or corrective re-ask:
-                // `giveUpReplyText` already validated what it composed.
-                await surfaceSettlement({ context, text: giveUpReplyText() });
+                // every statement `giveUpReply` lists passed CAPTAIN-69's guard.
+                await surfaceSettlement({ context, ...giveUpReply() });
                 return { status: 'ok', finalText: 'ok' };
             }
             const outcome = await durableCall(context, compose);
@@ -4911,7 +5467,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         const summary = leafStateSummary();
         const settlement = {
             status: 'rejected',
-            facts: [`Rejected: ${reason}.`],
+            facts: [`Rejected: ${oneTerminalMark(reason)}`],
             reason,
             ...(summary === undefined ? {} : { leafStateSummary: summary }),
         };
@@ -4975,11 +5531,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         }
         catch (error) {
             // A failing dispose never resurrects the engagement (DR-029).
-            const normalized = normalizeErrorCompact(error) ?? {
-                name: 'Error',
-                message: String(error),
-            };
-            facts.push(`Dismissed the ${label} engagement; its disposal failed: ${normalized.name}: ${compactEvidence(normalized.message)}.`);
+            facts.push(stateFailure(`dismissing ${label}`, failureOf(error)));
             return true;
         }
     };
@@ -4989,11 +5541,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             frame = await runEffect(() => engage(entry));
         }
         catch (error) {
-            const normalized = normalizeErrorCompact(error) ?? {
-                name: 'Error',
-                message: String(error),
-            };
-            facts.push(`Starting /${enablementById.get(entry.id).command} failed: ${normalized.name}: ${compactEvidence(normalized.message)}.`);
+            facts.push(stateFailure(`starting /${enablementById.get(entry.id).command}`, failureOf(error)));
             return { report: emptyReport(), failed: true };
         }
         facts.push(`Started ${frameLabel(frame)} with the selected request.`);
@@ -5005,11 +5553,17 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             // composition error, never a settled Boss outcome.
             if (outcome.error instanceof VisibilityControlError)
                 throw outcome.error;
-            const normalized = normalizeErrorCompact(outcome.error) ?? {
-                name: 'Error',
-                message: String(outcome.error),
-            };
-            facts.push(`The first turn of ${frameLabel(frame)} failed: ${normalized.name}: ${compactEvidence(normalized.message)}.`);
+            const failure = failureOf(outcome.error);
+            const subject = `the first turn of ${frameLabel(frame)}`;
+            const restate = (recorded) => stateFailure(subject, recorded);
+            const fact = restate(failure);
+            facts.push(fact);
+            activeTurn?.failureStatements.push({
+                frame,
+                fact,
+                message: failure.message,
+                restate,
+            });
             return { frame, report: outcome.report, failed: true };
         }
         return { frame, report: outcome.report, failed: false };
@@ -5085,18 +5639,21 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 await requestVisibility(adoptedFrames.at(-1));
             }
             await requireSession().emitStatus(`◇ /${enablementById.get(rootPlaybookId).command} resumed`);
+            // The warning is both a settlement fact and a report the reply carries;
+            // a reply that lists the fact need not say it twice (CAPTAIN-69).
+            const warning = requiresEffectReconciliation
+                ? 'The retained work remains parked until its repository-effect evidence is reconciled; no ordinary action was resumed.'
+                : RESUMPTION_DUPLICATE_EFFECT_WARNING;
             if (activeTurn) {
                 appendMandatoryPresentationSuffix(activeTurn, requiresEffectReconciliation
                     ? 'The retained work remains parked until its repository-effect evidence is reconciled.'
-                    : RESUMPTION_DUPLICATE_EFFECT_WARNING);
+                    : RESUMPTION_DUPLICATE_EFFECT_WARNING, [warning]);
             }
             return [
                 generation.rootStateDescription === undefined
                     ? `Resumed /${enablementById.get(rootPlaybookId).command} from its retained state; no published root-state description was retained.`
                     : `Resumed /${enablementById.get(rootPlaybookId).command} from the retained state described as ${quoteEvidence(compactEvidence(generation.rootStateDescription))}.`,
-                requiresEffectReconciliation
-                    ? 'The retained work remains parked until its repository-effect evidence is reconciled; no ordinary action was resumed.'
-                    : RESUMPTION_DUPLICATE_EFFECT_WARNING,
+                warning,
             ];
         }
         catch (error) {
@@ -5232,6 +5789,14 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         const enablement = enablementById.get(playbookId);
         return enablement === undefined ? playbookId : `/${enablement.command}`;
     };
+    /**
+     * CAPTAIN-71: a failure statement naming nested playbooks by command, its
+     * subject said as `the step` where CAPTAIN-9 refuses it (CAPTAIN-69).
+     */
+    const stateFailure = (subject, failure) => {
+        activeTurn?.shellWords.subjects.add(sentenceCase(subject));
+        return sentenceCase(failureClause(subject, noteReason(failureReason(failure, describeNestedPlaybook, speakableWords))));
+    };
     // DR-063 §4: appended once, beside the unresolved-effect and pre-existing
     // change reports, whenever the turn settles with the leaf parked in its
     // failure state or behind the retained-effect fence.
@@ -5257,21 +5822,26 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         if (cause === undefined)
             return;
         turn.failureReported = true;
-        const sentence = failureCauseSentence(cause, describeNestedPlaybook);
-        appendMandatoryPresentationSuffix(turn, failureReportText(sentence, failureControlLines(view, fenced)));
-        // The result-phase prompt reads the turn's report, so the same fact joins
-        // it here rather than only the turn's running list.
-        const fact = `The workflow failed: ${sentence}`;
-        turn.settlementFacts.push(fact);
-        if (turn.report !== undefined) {
-            turn.report = {
-                ...turn.report,
-                facts: [...turn.report.facts, fact],
-                ...(turn.report.bossFacts === undefined
-                    ? {}
-                    : { bossFacts: [...turn.report.bossFacts, fact] }),
-            };
-        }
+        const failure = { cause };
+        // One failure, one fact: where a fact this turn already stated the leaf's
+        // parked failure — its failed run result, or a runtime action's failed
+        // receipt or a thrown first turn, delivery, or runtime action whose error
+        // is the one the leaf records — the cause restates that fact in its place
+        // rather than joining beside it.
+        const recorded = (view?.lastError ?? lastError)?.message;
+        const statement = turn.failureStatements.find(({ frame, message }) => frame === leaf &&
+            (message === undefined ||
+                (recorded !== undefined &&
+                    compactEvidence(message) === compactEvidence(recorded))));
+        const fact = statement === undefined
+            ? stateFailure(frameLabel(leaf), failure)
+            : statement.restate(failure);
+        const speak = statement?.speak ?? ((text) => text);
+        turn.failureReport = {
+            ...failureLine(noteReason(failureReason(failure, describeNestedPlaybook, speakableWords))),
+            controls: failureControlLines(view, fenced),
+        };
+        joinSettlementFact(turn, fact, statement?.fact, speak);
     };
     const settleSelection = async (selection, signal) => {
         const turn = activeTurn;
@@ -5279,9 +5849,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         let frozenUnresolvedEffects;
         const freezeControllerEvidence = () => {
             frozenUnresolvedEffects ??= freezeTurnUnresolvedEffects();
-            const report = unresolvedEffectBossReport(frozenUnresolvedEffects);
-            if (turn !== undefined && report !== undefined) {
-                appendMandatoryPresentationSuffix(turn, report);
+            if (turn !== undefined) {
+                appendUnresolvedEffectReport(turn, frozenUnresolvedEffects);
             }
             if (turn !== undefined)
                 reportCarriedPreExistingChanges(turn);
@@ -5307,10 +5876,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             if (turn?.presentationError === error)
                 throw error;
             const aborted = signal.aborted || activeContext?.signal.aborted === true;
-            const normalized = normalizeErrorCompact(error) ?? {
-                name: 'Error',
-                message: String(error),
-            };
+            const failure = failureOf(error);
             if (aborted) {
                 markConversationUnsynchronized();
                 if (turn?.outcomePending) {
@@ -5326,9 +5892,24 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             }
             const mayHaveApplied = selection.action !== 'respond' &&
                 containsEffectThrow(turn, error);
-            turn.settlementFacts.push(mayHaveApplied
-                ? `The ${selection.action} action failed before its complete outcome could be confirmed and may have changed the session: ${normalized.name}: ${compactEvidence(normalized.message)}. It was not repeated automatically.`
-                : `The ${selection.action} action failed before its complete outcome could be confirmed: ${normalized.name}: ${compactEvidence(normalized.message)}. It was not repeated automatically.`);
+            const subject = `the ${selection.action} action`;
+            const unconfirmed = mayHaveApplied
+                ? 'Its complete outcome could not be confirmed, and it may have changed the session. It was not repeated automatically.'
+                : 'Its complete outcome could not be confirmed. It was not repeated automatically.';
+            const restate = (recorded) => `${stateFailure(subject, recorded)} ${unconfirmed}`;
+            const fact = restate(failure);
+            turn.settlementFacts.push(fact);
+            // A delivery or runtime action acts on the leaf, so the leaf's parked
+            // failure may be this very error (CAPTAIN-67).
+            const failedLeaf = leafFrame();
+            if (failedLeaf !== undefined) {
+                turn.failureStatements.push({
+                    frame: failedLeaf,
+                    fact,
+                    message: failure.message,
+                    restate,
+                });
+            }
             if (!turn.outcomePending && !turn.outcomeRecorded) {
                 journalAction({
                     action: selection.action,
@@ -5661,11 +6242,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 .actions.find((action) => action.id === actionId);
         }
         catch (error) {
-            const normalized = normalizeErrorCompact(error) ?? {
-                name: 'Error',
-                message: String(error),
-            };
-            return rejectSelection(selection, `${frameLabel(leaf)} could not be asked which actions it offers: ${normalized.name}: ${compactEvidence(normalized.message)}`);
+            return rejectSelection(selection, stateFailure(`asking ${frameLabel(leaf)} which actions it offers`, failureOf(error)));
         }
         if (advertised === undefined) {
             // CAPPLAY-5: the chosen id is control data whether or not the leaf
@@ -5675,6 +6252,16 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             return rejectSelection(selection, `${frameLabel(leaf)} does not advertise that action`);
         }
         const actionLabel = advertised.label;
+        // The settlement facts are shell-internal strings composed for the hidden
+        // result-phase prompt: they name the action by its id, which is control
+        // data. The Boss-facing rendering of the same settlement names it by the
+        // runtime's own Boss-appropriate label (PBRT-52), for the one place these
+        // facts are spoken rather than prompted — the CAPTAIN-34 fallback.
+        // A code span is the recorded text as recorded (CAPTAIN-74), so only the
+        // words outside one are renamed.
+        const spokenLabel = `"${compactEvidence(actionLabel)}"`;
+        turn.shellWords.labels.add(spokenLabel);
+        const speak = (fact) => outsideCodeSpans(fact, (words) => words.split(`"${actionId}"`).join(spokenLabel));
         // The id the digest advertised and the reply selected by is now also the
         // id this turn's outcome-report facts carry (CAPTAIN-9): recording it here
         // keeps the closing-reply prompt's copy inside the same supplied set the
@@ -5739,9 +6326,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     turn.report = {
                         ...outcome.report,
                         facts: [...facts],
-                        bossFacts: facts.map((fact) => fact
-                            .split(`"${actionId}"`)
-                            .join(`"${compactEvidence(actionLabel)}"`)),
+                        bossFacts: facts.map(speak),
                         status: 'failed',
                         receipt: {
                             disposition: 'failed',
@@ -5761,9 +6346,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             turn.report = {
                 ...outcome.report,
                 facts: [...facts],
-                bossFacts: facts.map((fact) => fact
-                    .split(`"${actionId}"`)
-                    .join(`"${compactEvidence(actionLabel)}"`)),
+                bossFacts: facts.map(speak),
                 status: 'ok',
                 receipt: receiptEvidence,
                 ...(establishedSummary === undefined
@@ -5783,20 +6366,27 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             }
         }
         else if (receipt.disposition === 'rejected') {
-            facts.push(`The runtime refused "${actionId}": ${compactEvidence(receipt.reason)}.`);
+            facts.push(refusalStatement(`"${actionId}"`, noteReason(recordedReason(receipt.reason, speakableWords))));
         }
         else {
-            facts.push(`Applying "${actionId}" failed: ${receipt.error.name}: ${compactEvidence(receipt.error.message)}.`);
+            // A failed receipt acts on the leaf, so the leaf's parked failure may
+            // be this very error — a Retry whose re-run failed again (CAPTAIN-67).
+            const subject = `applying "${actionId}"`;
+            const restate = (failure) => stateFailure(subject, failure);
+            const fact = restate(receipt.error);
+            facts.push(fact);
+            turn.failureStatements.push({
+                frame: leaf,
+                fact,
+                message: receipt.error.message,
+                restate,
+                speak,
+            });
         }
         const runFailed = drainRunFailureFacts(facts);
         if (runFailed)
             status = 'failed';
-        // The settlement facts above are shell-internal strings composed for the
-        // hidden result-phase prompt: they name the action by its id, which is
-        // control data. The Boss-facing rendering of the same settlement names it
-        // by the runtime's own Boss-appropriate label (PBRT-52), for the one place
-        // these facts are spoken rather than prompted — the CAPTAIN-34 fallback.
-        const bossFacts = facts.map((fact) => fact.split(`"${actionId}"`).join(`"${compactEvidence(actionLabel)}"`));
+        const bossFacts = facts.map(speak);
         const summary = leafStateSummary();
         turn.report = {
             ...outcome.report,
@@ -5833,14 +6423,15 @@ export function createPlaybookCaptainShell(options, deps = {}) {
     // `settled` guard. That guard closes duplicate submissions before an effect
     // starts; it is not evidence that anything ran.
     // CAPTAIN-63: the give-up's closing reply, composed from the same settlement
-    // facts the result-phase prompt would have carried. Shell-authored Boss
-    // prose passes the validation every model reply passes (CAPTAIN-34); what it
-    // interpolates is not host-authored all the way down, so a fact set that
-    // fails validation is dropped rather than spoken and the reply still states
-    // the settlement truthfully.
-    const giveUpReplyText = () => {
-        const report = activeTurn?.report;
-        const facts = report?.bossFacts ?? report?.facts ?? [];
+    // facts the result-phase prompt would have carried. What it lists is not
+    // host-authored all the way down, so each statement passes CAPTAIN-69's
+    // guard on its own and the reply still states the settlement truthfully;
+    // no statement is ever left out.
+    const giveUpReply = () => {
+        const turn = activeTurn;
+        const report = turn?.report;
+        const stated = report?.bossFacts ?? report?.facts ?? [];
+        const facts = turn === undefined ? [] : assembleTurnReport(turn, stated).facts;
         const stopped = report?.status === 'ok';
         const opening = stopped
             ? 'Stopped that workflow. I will not resume it.'
@@ -5848,27 +6439,29 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         const closing = stopped
             ? 'Send the command again to start fresh work.'
             : 'The stop did not settle successfully; recover the session before continuing.';
-        const composed = [
-            opening,
-            ...(facts.length === 0
-                ? []
-                : ['Here is what happened:', ...facts.map((fact) => `- ${fact}`)]),
-            closing,
-        ].join('\n');
-        return replyRejection(composed) === undefined
-            ? composed
-            : [opening, closing].join('\n');
+        return {
+            text: [
+                opening,
+                ...(facts.length === 0
+                    ? []
+                    : ['Here is what happened:', ...facts.map((fact) => `- ${fact}`)]),
+                closing,
+            ].join('\n'),
+            stated,
+        };
     };
-    const failureReplyText = () => {
+    const failureReply = () => {
         const commands = [...enablementById.values()]
             .map((enablement) => `/${enablement.command} <task>`)
             .join(' or ');
         const turn = activeTurn;
         const report = turn?.report;
         if (report === undefined) {
-            return ('I could not finish deciding that turn. No action was selected or run — please send the request again' +
-                (commands ? `, or start a playbook directly with ${commands}` : '') +
-                '.');
+            return {
+                text: 'I could not finish deciding that turn. No action was selected or run — please send the request again' +
+                    (commands ? `, or start a playbook directly with ${commands}` : '') +
+                    '.',
+            };
         }
         const settledPreamble = report.status === 'ok'
             ? 'I could not finish reporting that turn, but the reported action completed — please do not send it again.'
@@ -5880,25 +6473,26 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         const closing = 'Ask me where things stand and I will report the current state.';
         // The Boss-facing rendering of the settlement, never the prompt-side one:
         // `facts` name actions by id and quote runtime-authored text nobody
-        // validated.
-        const facts = report.bossFacts ?? report.facts;
-        const composed = [
-            settledPreamble,
-            ...(facts.length === 0
-                ? []
-                : ['Here is what happened:', ...facts.map((fact) => `- ${fact}`)]),
-            closing,
-        ].join('\n');
-        // CAPTAIN-34: this reply is host-authored Boss prose and passes the same
-        // validation every model reply passes. What it interpolates is not
+        // validated. Each is said once, in Boss's words, beside the reports the
+        // reply carries (CAPTAIN-69).
+        const stated = report.bossFacts ?? report.facts;
+        const facts = assembleTurnReport(turn, stated).facts;
+        // CAPTAIN-34: this reply is host-authored Boss prose. What it lists is not
         // host-authored all the way down — a refusal reason and a normalized error
-        // message are foreign text — so a fact set that fails validation is
-        // dropped rather than spoken, and the reply still states the settlement
-        // truthfully and names the next step. It is never withheld: it is the
-        // turn's only remaining settlement.
-        return replyRejection(composed) === undefined
-            ? composed
-            : [settledPreamble, closing].join('\n');
+        // message are foreign text — so each statement passes CAPTAIN-69's guard
+        // on its own, the reply states the settlement truthfully and names the
+        // next step, and no statement is left out for its own or another's words.
+        // It is never withheld: it is the turn's only remaining settlement.
+        return {
+            text: [
+                settledPreamble,
+                ...(facts.length === 0
+                    ? []
+                    : ['Here is what happened:', ...facts.map((fact) => `- ${fact}`)]),
+                closing,
+            ].join('\n'),
+            stated,
+        };
     };
     const settleTurnFailure = async (context, error) => {
         if (context.signal.aborted)
@@ -5919,10 +6513,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         // Through the one presentation seam, so this reply is journaled like
         // every other Boss-visible Captain reply. A rejected emission propagates
         // unchanged: it is never retried and never disguised as an action failure.
-        await surfaceSettlement({
-            context,
-            text: failureReplyText(),
-        });
+        await surfaceSettlement({ context, ...failureReply() });
     };
     const enabledCatalog = () => Object.freeze(entries.map((entry) => Object.freeze({
         id: entry.id,
@@ -6789,7 +7380,11 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 ...(hostGiveUp === undefined ? {} : { hostGiveUp }),
                 settled: false,
                 presentationAttempted: false,
+                presentationReports: [],
                 settlementFacts: [],
+                failureStatements: [],
+                statedReasons: new Set(),
+                shellWords: { subjects: new Set(), labels: new Set() },
                 effectThrows: new Set(),
                 controlFailures: new Set(),
                 settingsPreflightFailures: new Set(),
@@ -6932,4 +7527,13 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             throw failure;
     }
 }
+// The Boss-facing failure renderer, report assembly, and minted-reason tables,
+// for the shell suite's direct cases; the leading underscore keeps them out of
+// the stable surface.
+export const _internal = {
+    failureStatement,
+    bossReport,
+    RUNTIME_REASON_PHRASES,
+    LABELLED_RUNTIME_REASONS,
+};
 export default createPlaybookCaptainShell;

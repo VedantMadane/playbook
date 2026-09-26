@@ -1295,6 +1295,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'validateCodeOptions',
     ],
     './playbook-captain': [
+      '_internal',
       'assertPlaybookCaptainUnresolvedEffects',
       'assertPlaybookCaptainShellSnapshot',
       'createPlaybookCaptainShell',
@@ -1624,6 +1625,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'validateCodeOptions',
     ],
     './playbook-captain': [
+      '_internal',
       'PlaybookCaptainDeps',
       'PlaybookCaptainFrameSnapshot',
       'PlaybookCaptainRegistryEntry',

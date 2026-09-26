@@ -2843,7 +2843,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
       [
         'No retained work is actionable.',
         '',
-        'Failure: the coder call failed: coder exploded.',
+        'Failure: the coder call failed with the error `coder exploded`.',
         'Controls:',
         '- Stop /code (ready)',
       ].join('\n'),
@@ -3339,8 +3339,10 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(closing).toContain(
       'Receipt error: {"name":"TypeError","message":"guard lookup exploded"}',
     );
+    // The receipt's error reads as no prose, so its fact shows it once as
+    // recorded, with no error-class name (CAPTAIN-71).
     expect(closing).toContain(
-      'Applying "retry:BOSS_TURN" failed: TypeError: guard lookup exploded.',
+      'Applying "retry:BOSS_TURN" failed with the error `guard lookup exploded`.',
     );
     expect(closing).toContain('Settlement status: failed');
     // The closing reply reaching Boss is exactly the validated scripted prose.
@@ -3382,10 +3384,15 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(harness.playerCalls).toHaveLength(1);
     expect(code.runtimes[0]?.describe?.().state.stateId).toBe('failed');
     // The failure is named in the grounding the closing prompt points at,
-    // not only in the trailing leaf-state line.
-    expect(harness.closingPrompts().at(-1)).toContain(
-      '- /code failed: Error: coder exploded.',
-    );
+    // not only in the trailing leaf-state line — once, by its cause, in the
+    // place of the failed run's own fact (CAPTAIN-67).
+    expect(
+      (harness.closingPrompts().at(-1) ?? '')
+        .split('\n')
+        .filter((line) => line.startsWith('- /code failed')),
+    ).toEqual([
+      '- /code failed: the coder call failed with the error `coder exploded`.',
+    ]);
     expect(harness.closingPrompts().at(-1)).not.toContain('failed at failed');
 
     // Turn 1, verbatim: exactly one hidden decision call on the durable
@@ -3710,7 +3717,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     const failureReport = [
       '',
       '',
-      'Failure: the coder call failed: coder exploded.',
+      'Failure: the coder call failed with the error `coder exploded`.',
       'Controls:',
       '- Retry: Coder runs the first coding phase: a direct ' +
         'implementation, a new IR, or the next task of an existing IR. (ready)',
@@ -4339,8 +4346,9 @@ describe('CAPTAIN-38 validated actions and command table', () => {
     await harness.turn('/docs write it up', 2);
 
     const closing = harness.closingPrompts().at(-1) ?? '';
-    expect(closing).toContain('its disposal failed');
-    expect(closing).toContain('code dispose exploded');
+    expect(closing).toContain(
+      'Dismissing /code failed with the error `code dispose exploded`.',
+    );
     expect(closing).toContain('Started /docs with the selected request.');
     expect(docs.runtimes[0]?.inputs).toEqual(['write it up']);
 
@@ -4486,9 +4494,12 @@ describe('CAPTAIN-38 validated actions and command table', () => {
     expect(closing).toContain(
       'Receipt error: {"name":"Error","message":"coder exploded"}',
     );
-    expect(closing).toContain(
-      '- Applying "retry:START_CODE" failed: Error: coder exploded.',
-    );
+    // The retry's re-run failed with the error the parked leaf records, so
+    // the leaf's cause restates the receipt's fact in its place rather than
+    // joining beside it: one failure, one fact (CAPTAIN-67).
+    expect(closing.split('\n').filter((line) => line.includes('failed:'))).toEqual([
+      '- Applying "retry:START_CODE" failed: the coder call failed with the error `coder exploded`.',
+    ]);
     // The effects are in the traces: the action started, ran a player, and
     // finished carrying the `failed` disposition.
     const traceTypes = harness.telemetry
@@ -4553,7 +4564,7 @@ describe('CAPTAIN-38 validated actions and command table', () => {
       [
         'Only the advertised retry is available for this run.',
         '',
-        'Failure: the coder call failed: coder exploded.',
+        'Failure: the coder call failed with the error `coder exploded`.',
         'Controls:',
         '- Retry: Coder runs the first coding phase: a direct ' +
           'implementation, a new IR, or the next task of an existing IR. (ready)',
@@ -5581,7 +5592,7 @@ describe('CAPTAIN-39 durable continuity', () => {
   // rather than prompted. The prompt-side facts name the action by its id and
   // quote runtime-authored text nobody validated; the spoken form names the
   // runtime's own label and passes the same validation every reply passes.
-  it('speaks the settlement by label and drops facts that fail validation', async () => {
+  it('speaks the settlement by label and keeps foreign text in its code span', async () => {
     const receipts: PlaybookControlReceipt[] = [
       {
         disposition: 'executed',
@@ -5639,12 +5650,20 @@ describe('CAPTAIN-39 durable continuity', () => {
     expect(executed).not.toContain('BOSS_TURN');
 
     // Leg 2: the same settlement carrying a runtime-authored error message
-    // that is control vocabulary. The facts cannot be spoken, so they are
-    // dropped — the reply still states the settlement and the next step.
+    // that names control vocabulary. The message is shown once, as recorded,
+    // inside its code span, and no fact is lost for it: CAPTAIN-9 holds for
+    // the words outside the span, and the action id still reaches no Boss.
     await harness.turn('try it once more', 3);
     const failed = harness.surfaced.at(-1)!;
-    expect(failed).not.toContain('BOSS_REPLY');
-    expect(failed).not.toContain('Here is what happened');
+    expect(failed).toContain(
+      [
+        'Here is what happened:',
+        '- Applying "Retry the failed step" failed with the error `guard lookup exploded while replaying BOSS_REPLY`.',
+        'Ask me where things stand and I will report the current state.',
+      ].join('\n'),
+    );
+    expect(failed.replace(/`[^`]*`/g, '')).not.toContain('BOSS_REPLY');
+    expect(failed).not.toContain('retry:BOSS_TURN');
     expect(failed).toContain('The action ended with a failure');
     expect(failed).toContain(
       'Ask me where things stand and I will report the current state.',
@@ -6343,6 +6362,41 @@ describe('CAPTAIN-40 injection and prose validation', () => {
     ).toEqual([]);
     expect(harness.surfaced).toEqual([text]);
     expect(JSON.stringify(harness.surfaced)).not.toContain('"action"');
+  });
+
+  // CAPTAIN-9: only exactly that envelope is prose. One carrying any other
+  // member is control JSON like every other, refused with the one re-ask.
+  it('refuses a respond envelope carrying another member', async () => {
+    const code = shellEntry('code', 'code');
+    const harness = makeShellHarness(
+      [code],
+      [
+        {
+          status: 'ok',
+          finalText: JSON.stringify({
+            action: 'respond',
+            text: 'CODE is working on the parser fix now.',
+            playbook: 'code',
+          }),
+        },
+        (prompt) => {
+          expect(prompt).toContain('[Reply rejected]');
+          expect(prompt).toContain(
+            'the reply leaked hidden control syntax or internal control vocabulary',
+          );
+          return { status: 'ok', finalText: 'Started CODE on the parser fix.' };
+        },
+      ],
+    );
+    await harness.init();
+    await harness.turn('/code fix the parser', 1);
+
+    expect(
+      harness.captainCalls.filter((call) =>
+        call.prompt.includes('[Reply rejected]'),
+      ),
+    ).toHaveLength(1);
+    expect(harness.surfaced).toEqual(['Started CODE on the parser fix.']);
   });
 
   // CAPTAIN-9's live-session-identifier duty: the rejectable set is read from
