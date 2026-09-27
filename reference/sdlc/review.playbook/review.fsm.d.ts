@@ -1,92 +1,139 @@
-type Role = 'coder' | 'reviewer';
-type JumpableStateId = 'reviewInitial';
-export type ResumableStateId = 'reviewInitial' | 'addressFindings' | 'reviewAfterCommit' | 'reviewAfterRebuttal';
+/** Canonical lowercase local ids of the source roles Coder and Reviewer. */
+export type ReviewRole = 'coder' | 'reviewer';
+/** One role-id array per parallel group; REVIEW declares no parallel group. */
+export declare const concurrentRoleSets: readonly (readonly ReviewRole[])[];
+/** Delegated-player working leaves (REVIEW-1 through REVIEW-4). */
+export type WorkingStateId = 'firstReview' | 'fixFindings' | 'reviewAfterFix' | 'reviewAfterRejection';
+/** Working leaves that may suspend for, and resume from, a Boss reply. */
+export type ResumableStateId = WorkingStateId;
+/** Root `BOSS_INTERRUPT` targets. */
+export type JumpableStateId = WorkingStateId;
+export type ReviewSourceItem = 'REVIEW-1' | 'REVIEW-2' | 'REVIEW-3' | 'REVIEW-4';
+/** Coder's accepted disposition of the latest findings. */
+export type CoderOutcome = 'committed' | 'rejectedAll';
 export interface PendingBossQuestion {
-    questionId: ResumableStateId;
-    resumeStateId: ResumableStateId;
-    sourceItem: `REVIEW-${1 | 2 | 3 | 4}`;
-    asker: {
+    readonly questionId: ResumableStateId;
+    readonly resumeStateId: ResumableStateId;
+    readonly sourceItem: ReviewSourceItem;
+    readonly asker: {
         readonly kind: 'role';
-        readonly roleId: Role;
+        readonly roleId: ReviewRole;
     };
-    question: string;
+    readonly question: string;
 }
+interface PlayerInputBase {
+    /** The source item's full final prompt, verbatim. */
+    readonly prompt: string;
+    /** This state's local result contract: guard name → description. */
+    readonly result: Readonly<Record<string, string>>;
+    /** `<caller-input>`: the caller's complete review request. */
+    readonly callerInput?: string;
+    readonly pendingBossQuestion?: PendingBossQuestion;
+    readonly bossReply?: string;
+}
+export interface FirstReviewPlayerInput extends PlayerInputBase {
+    readonly stateId: 'firstReview';
+    readonly role: 'reviewer';
+    readonly sourceItem: 'REVIEW-1';
+}
+export interface FixFindingsPlayerInput extends PlayerInputBase {
+    readonly stateId: 'fixFindings';
+    readonly role: 'coder';
+    readonly sourceItem: 'REVIEW-2';
+    /** `<reviewer-output>`: Reviewer's verbatim final text of the latest round. */
+    readonly reviewerOutput?: string;
+}
+export interface ReviewAfterFixPlayerInput extends PlayerInputBase {
+    readonly stateId: 'reviewAfterFix';
+    readonly role: 'reviewer';
+    readonly sourceItem: 'REVIEW-3';
+    /** `<latest-commit>`: the receipt-owned latest review-fix commit. */
+    readonly latestCommit?: string;
+    /** `<coder-output>`: Coder's verbatim final text of the latest fix round. */
+    readonly coderOutput?: string;
+}
+export interface ReviewAfterRejectionPlayerInput extends PlayerInputBase {
+    readonly stateId: 'reviewAfterRejection';
+    readonly role: 'reviewer';
+    readonly sourceItem: 'REVIEW-4';
+    /** `<coder-output>`: Coder's verbatim final text of the latest fix round. */
+    readonly coderOutput?: string;
+}
+export type PlayerInput = FirstReviewPlayerInput | FixFindingsPlayerInput | ReviewAfterFixPlayerInput | ReviewAfterRejectionPlayerInput;
+export type NeedsBossReplyOutput = {
+    readonly guard: 'needsBossReply';
+    readonly question: string;
+};
+/** Reviewer outcomes (REVIEW-1, REVIEW-3, REVIEW-4). */
+export type ReviewerOutput = {
+    readonly guard: 'hasFindings';
+    readonly reviewerOutput: string;
+} | {
+    readonly guard: 'noFindings';
+    /** Effect-owned: the exact revision taken from repository authority. */
+    readonly evaluatedRevision: string;
+} | NeedsBossReplyOutput;
+/** Coder outcomes (REVIEW-2). */
+export type CoderOutput = {
+    readonly guard: 'committed';
+    readonly coderOutput: string;
+    /** Effect-owned: the runtime fills it from the repository receipt. */
+    readonly latestCommit: string;
+} | {
+    readonly guard: 'rejectedAll';
+    readonly coderOutput: string;
+} | NeedsBossReplyOutput;
+export type PlayerOutput = ReviewerOutput | CoderOutput;
+export interface ErrorRecord {
+    readonly name: string;
+    readonly message: string;
+    readonly stack?: string;
+}
+/** Public output interface of the packaged builtin `review`. */
 export interface ReviewOutput {
-    noUnsettledFindings: true;
-    /**
-     * Exact receipt-derived repository revision at which the review scope was
-     * evaluated: the closing clean round's `unchanged` receipt observes it as
-     * HEAD — the last review-fix commit when one landed, or the caller-supplied
-     * scope revision when none did (DR-045).
-     */
-    evaluatedRevision: string;
+    readonly noUnsettledFindings: true;
+    readonly evaluatedRevision: string;
 }
-export type ReviewInput = Readonly<Record<string, never>>;
+/** The machine reads no input: the caller input arrives on `START_REVIEW`. */
+export type ReviewInput = Readonly<Record<never, never>>;
 export interface ReviewContext {
-    callerInput?: string;
-    reviewerOutput?: string;
-    coderOutput?: string;
-    /** Receipt-derived OID of the latest review-fix commit (never player prose). */
-    latestCommit?: string;
-    /** Observed HEAD of the closing clean round's unchanged receipt (DR-045). */
-    evaluatedRevision?: string;
-    lastError?: unknown;
-    pendingBossQuestion?: PendingBossQuestion;
-    bossReply?: string;
+    /** `<caller-input>`: the caller's intent, review scope, and context. */
+    readonly callerInput?: string;
+    /** `<reviewer-output>`: Reviewer's verbatim final text with findings. */
+    readonly reviewerOutput?: string;
+    /** `<coder-output>`: Coder's verbatim final text of the latest fix round. */
+    readonly coderOutput?: string;
+    /** `<latest-commit>`: the accepted, receipt-owned latest review-fix commit. */
+    readonly latestCommit?: string;
+    /** Coder's accepted disposition of the latest findings. */
+    readonly coderOutcome?: CoderOutcome;
+    /** Revision evaluated by the clean review round that ended REVIEW. */
+    readonly evaluatedRevision?: string;
+    readonly lastError?: ErrorRecord;
+    readonly pendingBossQuestion?: PendingBossQuestion;
+    readonly bossReply?: string;
 }
 export type ReviewEvent = {
-    type: 'START_REVIEW';
-    callerInput: string;
+    readonly type: 'START_REVIEW';
+    readonly callerInput: string;
 } | {
-    type: 'BOSS_INTERRUPT';
-    targetId: JumpableStateId;
-    bossIntent: string;
+    readonly type: 'BOSS_INTERRUPT';
+    readonly targetId: JumpableStateId;
 } | {
-    type: 'BOSS_REPLY';
-    questionId?: ResumableStateId;
-    answer: string;
-};
-export interface PlayerInput {
-    stateId: ResumableStateId;
-    sourceItem: `REVIEW-${1 | 2 | 3 | 4}`;
-    role: Role;
-    prompt: string;
-    result: Readonly<Record<string, string>>;
-    callerInput?: string;
-    reviewerOutput?: string;
-    coderOutput?: string;
-    latestCommit?: string;
-    pendingBossQuestion?: PendingBossQuestion;
-    bossReply?: string;
-}
-export type PlayerOutput = {
-    guard: 'hasFindings';
-    reviewerOutput: string;
-} | {
-    guard: 'noFindings';
-    evaluatedRevision: string;
-} | {
-    guard: 'committed';
-    coderOutput: string;
-    latestCommit: string;
-} | {
-    guard: 'rejectedAll';
-    coderOutput: string;
-} | {
-    guard: 'needsBossReply';
-    question: string;
+    readonly type: 'BOSS_REPLY';
+    readonly answer: string;
+    readonly questionId?: ResumableStateId;
 };
 export declare const reviewMachine: import("xstate").StateMachine<ReviewContext, {
-    type: "START_REVIEW";
-    callerInput: string;
+    readonly type: "START_REVIEW";
+    readonly callerInput: string;
 } | {
-    type: "BOSS_INTERRUPT";
-    targetId: JumpableStateId;
-    bossIntent: string;
+    readonly type: "BOSS_INTERRUPT";
+    readonly targetId: JumpableStateId;
 } | {
-    type: "BOSS_REPLY";
-    questionId?: ResumableStateId;
-    answer: string;
+    readonly type: "BOSS_REPLY";
+    readonly answer: string;
+    readonly questionId?: ResumableStateId;
 }, {
     [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | undefined;
 }, {
@@ -104,88 +151,75 @@ export declare const reviewMachine: import("xstate").StateMachine<ReviewContext,
     type: "rememberActorError";
     params: import("xstate").NonReducibleUnknown;
 } | {
+    type: "resetForInterrupt";
+    params: import("xstate").NonReducibleUnknown;
+} | {
     type: "rememberBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberEmptyBossReplyError";
+    type: "rememberMalformedPlayerOutput";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "copyStartInput";
+    type: "clearBossReplyContext";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "copyInterruptedInput";
+    type: "setPendingBossQuestion";
+    params: {
+        readonly resumeStateId: ResumableStateId;
+    };
+} | {
+    type: "rememberMalformedBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberReviewerOutput";
+    type: "startReview";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberCoderOutput";
+    type: "rememberFindings";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "rememberCoderDisposition";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "rememberEvaluatedRevision";
     params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "setPendingReviewInitial";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "setPendingAddressFindings";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "setPendingReviewAfterCommit";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "setPendingReviewAfterRebuttal";
-    params: import("xstate").NonReducibleUnknown;
 }, {
-    type: "needsBossReply";
-    params: unknown;
-} | {
     type: "emptyBossReply";
     params: unknown;
 } | {
-    type: "hasFindings";
+    type: "validStartReview";
     params: unknown;
 } | {
-    type: "noFindings";
+    type: "acceptHasFindings";
     params: unknown;
 } | {
-    type: "committed";
+    type: "acceptNoFindings";
     params: unknown;
 } | {
-    type: "rejectedAll";
+    type: "acceptCommitted";
     params: unknown;
 } | {
-    type: "resumeReviewInitial";
+    type: "acceptRejectedAll";
     params: unknown;
 } | {
-    type: "resumeAddressFindings";
+    type: "acceptNeedsBossReply";
     params: unknown;
-} | {
-    type: "resumeReviewAfterCommit";
-    params: unknown;
-} | {
-    type: "resumeReviewAfterRebuttal";
-    params: unknown;
-} | {
-    type: "restartInitialReview";
-    params: unknown;
-}, never, "done" | "failed" | "ready" | "awaitBossReply" | "reviewInitial" | "addressFindings" | "reviewAfterCommit" | "reviewAfterRebuttal", string, Readonly<Record<string, never>>, ReviewOutput, import("xstate").EventObject, import("xstate").MetaObject, {
+}, never, "done" | "failed" | "ready" | "awaitBossReply" | "firstReview" | "fixFindings" | "reviewAfterFix" | "reviewAfterRejection", string, Readonly<Record<never, never>>, ReviewOutput, import("xstate").EventObject, import("xstate").MetaObject, {
     id: "review";
     states: {
         readonly ready: {
             id: "ready";
         };
-        readonly reviewInitial: {
-            id: "reviewInitial";
+        readonly firstReview: {
+            id: "firstReview";
         };
-        readonly addressFindings: {
-            id: "addressFindings";
+        readonly fixFindings: {
+            id: "fixFindings";
         };
-        readonly reviewAfterCommit: {
-            id: "reviewAfterCommit";
+        readonly reviewAfterFix: {
+            id: "reviewAfterFix";
         };
-        readonly reviewAfterRebuttal: {
-            id: "reviewAfterRebuttal";
+        readonly reviewAfterRejection: {
+            id: "reviewAfterRejection";
         };
         readonly awaitBossReply: {
             id: "awaitBossReply";
@@ -198,4 +232,4 @@ export declare const reviewMachine: import("xstate").StateMachine<ReviewContext,
         };
     };
 }>;
-export {};
+export default reviewMachine;

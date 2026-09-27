@@ -1,8 +1,17 @@
 {
   "schema": "sublang.slc.pin-inputs.v1",
   "closures": {
-    "gears2fsm": ["text2gears.md", "link.md", "workflow-contracts.json"],
-    "prefix": ["prefix-prompts.mjs"],
+    "text2gears": [
+      "workflow-contracts.json"
+    ],
+    "gears2fsm": [
+      "text2gears.md",
+      "link.md",
+      "workflow-contracts.json"
+    ],
+    "prefix": [
+      "prefix-prompts.mjs"
+    ],
     "link": [
       "text2gears.md",
       "gears2fsm.md",

@@ -2372,9 +2372,8 @@ function stepEffectReconciliation(root, state) {
     );
   }
   const evidenceLine =
-    `Observed repository change (one-descendant-commit); ` +
-    `baseline HEAD ${parkedBaseline}; after HEAD ${parkedHead}; ` +
-    `proven commit OID ${parkedHead}.`;
+    'Observed repository change: the step made one new commit; ' +
+    `HEAD moved from ${parkedBaseline} to the proven commit ${parkedHead}.`;
   const unresolvedReply = [
     smokeToken,
     '',
@@ -2386,8 +2385,7 @@ function stepEffectReconciliation(root, state) {
   const parkedReply = [
     unresolvedReply,
     '',
-    'Failure: the runtime could not settle the step: Error: EFFECT governed ' +
-      'outcome remains unresolved: corrective semantic candidate is invalid.',
+    "Failure: the step's outcome could not be decided.",
     'Controls:',
     '- Retry unresolved effect reconciliation ' +
       '(no-op: nothing has changed since it failed)',

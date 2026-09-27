@@ -586,9 +586,10 @@ describe('actor stop hygiene across every runtime that builds one', () => {
   const sources = runtimeSourcesBuildingActors();
 
   it('discovers the engine and every fat artifact that builds its own actor', () => {
+    // DR-067: DECIDE links as a thin module, so the engine is the one
+    // runtime that builds an actor.
     expect(sources.map(([path]) => path)).toEqual([
       'src/xstate-playbook-runtime.ts',
-      'reference/sdlc/decide.playbook/decide.playbook.ts',
     ]);
   });
 

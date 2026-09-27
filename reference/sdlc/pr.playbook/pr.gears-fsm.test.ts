@@ -10,7 +10,7 @@ import {
   parseGearsContract,
   verbatimFieldsFromGears,
 } from '../../../scripts/check-slc-source-gears.mjs';
-import { prMachine, type PrContext } from './pr.fsm.js';
+import { concurrentRoleSets, prMachine, type PrContext } from './pr.fsm.js';
 import {
   enumerateNestedPlaybookStates,
   enumeratePlayerStates,
@@ -144,6 +144,7 @@ describe('PR Source, GEARS, and FSM agreement', () => {
     expect(gearsText).toContain('Roles:\n\n- Coder\n');
     expect(prRegistry.requiredRoleIds).toEqual(['coder']);
     expect(prRegistry.concurrentRoleSets).toEqual([]);
+    expect(concurrentRoleSets).toEqual(prRegistry.concurrentRoleSets);
     expect(prRegistry.artifactSchema).toBe(3);
     expect(prRegistry.runtimeProfile).toEqual({
       kind: 'shared-factory',
@@ -172,19 +173,28 @@ describe('PR Source, GEARS, and FSM agreement', () => {
 
   it('preserves the two semantic publication outcomes and their invariants', () => {
     for (const clause of [
-      'The result has two semantic outcomes: opened and not published.',
       "Each outcome requires affirmative support in Coder's result, and no outcome depends on a fixed presentation format of Coder's reply.",
       "Every outcome keeps the repository exact: pushing a branch and opening a pull request change neither HEAD's commit nor the working tree.",
-      "For not published, `pr` fails and reports Coder's complete result with its reason to its caller.",
     ]) {
       expect(source).toContain(clause);
       expect(gearsSection('PR-1')).toContain(clause);
     }
+    // The source's outcome set and its not-published failure attach to the
+    // item's two results rather than to a separate outcome list.
+    expect(source).toContain(
+      'The result has two semantic outcomes: opened and not published.',
+    );
+    expect(source).toContain(
+      "For not published, `pr` fails and reports Coder's complete result with its reason to its caller.",
+    );
     const item = byId.get('PR-1');
     expect(item?.results.map(({ guard }) => guard)).toEqual([
       'opened',
       'notPublished',
     ]);
+    expect(item?.results[1]?.description).toContain(
+      "the workflow fails and returns Coder's complete result with its reason to its caller.",
+    );
     // `opened` is the declared producer of the `<pull-request-url>` PR-3 reads.
     expect(item?.results[0]?.fields.map(({ name }) => name)).toEqual([
       'pullRequest',
@@ -203,7 +213,7 @@ describe('PR Source, GEARS, and FSM agreement', () => {
     ).toEqual([
       { stateId: 'waitForChecks', sourceItem: 'PR-2' },
       { stateId: 'publishFix', sourceItem: 'PR-4' },
-      { stateId: 'waitForChecksAfterFix', sourceItem: 'PR-5' },
+      { stateId: 'waitForFixChecks', sourceItem: 'PR-5' },
       { stateId: 'mergePullRequest', sourceItem: 'PR-6' },
       { stateId: 'updateLocalDefault', sourceItem: 'PR-7' },
     ]);
@@ -314,8 +324,7 @@ describe('PR Source, GEARS, and FSM agreement', () => {
     const start = gearsText.indexOf(marker);
     expect(start).toBeGreaterThan(gearsText.lastIndexOf('### PR-7'));
     expect(gearsText.indexOf(marker, start + 1)).toBe(-1);
-    // The section runs to the next `## ` heading, such as a later pass's own
-    // provenance section (slc/prefix.md), or to the end of the file.
+    // The section runs to the next `## ` heading or to the end of the file.
     const bullets = gearsText
       .slice(start + marker.length)
       .replace(/\n## [\s\S]*$/, '')
@@ -363,30 +372,33 @@ describe('PR Source, GEARS, and FSM agreement', () => {
       'When the nested `code` call fails outside that authored result contract, `pr` shall park as failed and retain the control-plane error instead of reporting an authored outcome.',
     ]) {
       expect(source).toContain(clause);
-    }
-    for (const outcome of [
-      '- `pr` makes no more than one fix attempt.',
-      '- Only after `code` succeeds does `pr` publish the fix and wait for the checks again.',
-      '- An authored `code` abort or failure, or a terminal `code` result that does not prove its success, terminates `pr` with that canonical result relayed and the pull request left open.',
-      '- Any other nested-call error parks `pr` as failed and retains the control-plane error.',
-    ]) {
-      expect(gearsSection('PR-3')).toContain(outcome);
+      // The GEARS carries each child outcome in the source's own words; the
+      // one-fix bound gains its owner (`code`) in the same sentence.
+      expect(gearsSection('PR-3')).toContain(clause.replace(/\.$/, ''));
     }
     const fixChecks = rawStates.fixChecks?.invoke;
     expect({
       success: route(armList(fixChecks?.onDone)[0]),
       insufficient: route(armList(fixChecks?.onDone)[1]),
+      malformed: route(armList(fixChecks?.onDone)[2]),
       authoredFailure: route(armList(fixChecks?.onError)[0]),
       controlFailure: route(armList(fixChecks?.onError)[1]),
     }).toEqual({
       success: { guard: 'isCodeSuccess', target: 'publishFix', actions: undefined },
       insufficient: {
-        guard: undefined,
+        guard: 'isInsufficientCodeResult',
         target: 'fixFailed',
         actions: 'completeWithInsufficientCodeResult',
       },
+      // A delivered output that is not JSON cannot be relayed as a canonical
+      // result, so it parks as a control-plane failure.
+      malformed: {
+        guard: undefined,
+        target: 'failed',
+        actions: 'rememberMalformedChildOutput',
+      },
       authoredFailure: {
-        guard: 'authoredCodeFailure',
+        guard: 'isAuthoredCodeFailure',
         target: 'fixFailed',
         actions: 'completeWithCodeFailure',
       },
@@ -425,15 +437,15 @@ describe('PR Source, GEARS, and FSM agreement', () => {
     expect(scriptRoutes).toEqual({
       'PR-2': {
         onDone: [
-          { guard: 'checksPassed', target: 'mergePullRequest' },
-          { guard: 'checksFailed', target: 'fixChecks' },
+          { guard: 'waitForChecksPassed', target: 'mergePullRequest' },
+          { guard: 'waitForChecksFailed', target: 'fixChecks' },
           { guard: undefined, target: 'failed' },
         ],
         onError: controlFailure,
       },
       'PR-4': {
         onDone: [
-          { guard: 'fixPublished', target: 'waitForChecksAfterFix' },
+          { guard: 'fixPublished', target: 'waitForFixChecks' },
           { guard: 'fixNotPublished', target: 'fixNotPublished' },
           { guard: undefined, target: 'failed' },
         ],
@@ -441,8 +453,8 @@ describe('PR Source, GEARS, and FSM agreement', () => {
       },
       'PR-5': {
         onDone: [
-          { guard: 'checksPassed', target: 'mergePullRequest' },
-          { guard: 'checksStillFailing', target: 'checksStillFailing' },
+          { guard: 'waitForFixChecksPassed', target: 'mergePullRequest' },
+          { guard: 'checksStillFailing', target: 'checksFailed' },
           { guard: undefined, target: 'failed' },
         ],
         onError: controlFailure,
@@ -450,15 +462,15 @@ describe('PR Source, GEARS, and FSM agreement', () => {
       'PR-6': {
         onDone: [
           { guard: 'merged', target: 'updateLocalDefault' },
-          { guard: 'mergeRefused', target: 'mergeRefused' },
+          { guard: 'mergeRefused', target: 'mergeUnconfirmed' },
           { guard: undefined, target: 'failed' },
         ],
         onError: controlFailure,
       },
       'PR-7': {
         onDone: [
-          { guard: 'localDefaultUpdated', target: 'merged' },
-          { guard: 'localDefaultNotUpdated', target: 'mergedLocalBehind' },
+          { guard: 'localDefaultUpdated', target: 'mergedLocalUpdated' },
+          { guard: 'localDefaultNotUpdated', target: 'mergedLocalNotUpdated' },
           { guard: undefined, target: 'failed' },
         ],
         onError: controlFailure,
@@ -472,13 +484,29 @@ describe('PR Source, GEARS, and FSM agreement', () => {
       ),
     );
     expect(targetsOfFixChecks.map(([id]) => id)).toEqual(['waitForChecks']);
-    for (const clause of [
-      'Checks still failing is an authored failure that leaves the pull request open; there is no second fix attempt.',
-      'A pull request whose repository still reports no checks after a brief wait for them to register counts as passed.',
-      'Both complete `pr`: the pull request is merged either way, and the result states whether the local default branch was fast-forwarded to the merged head.',
-    ]) {
+    // Each source outcome clause travels in its item's result descriptions.
+    for (const [id, clause, carried] of [
+      [
+        'PR-5',
+        'Checks still failing is an authored failure that leaves the pull request open; there is no second fix attempt.',
+        'an authored failure of the workflow that leaves the pull request open; there is no second fix attempt.',
+      ],
+      [
+        'PR-2',
+        'A pull request whose repository still reports no checks after a brief wait for them to register counts as passed.',
+        'a pull request whose repository still reports no checks after a brief wait for them to register counts as passed.',
+      ],
+      [
+        'PR-7',
+        'Both complete `pr`: the pull request is merged either way, and the result states whether the local default branch was fast-forwarded to the merged head.',
+        'the workflow completes, since the pull request is merged either way,',
+      ],
+    ] as const) {
       expect(source).toContain(clause);
-      expect(gearsText).toContain(`- ${clause}`);
+      expect(
+        byId.get(id)?.results.some(({ description }) => description.includes(carried)),
+        id,
+      ).toBe(true);
     }
   });
 
@@ -488,12 +516,12 @@ describe('PR Source, GEARS, and FSM agreement', () => {
       .map(([id]) => id)
       .sort();
     expect(finalIds).toEqual([
-      'checksStillFailing',
+      'checksFailed',
       'fixFailed',
       'fixNotPublished',
-      'mergeRefused',
-      'merged',
-      'mergedLocalBehind',
+      'mergeUnconfirmed',
+      'mergedLocalNotUpdated',
+      'mergedLocalUpdated',
       'notPublished',
     ]);
 
@@ -515,9 +543,11 @@ describe('PR Source, GEARS, and FSM agreement', () => {
 
     // Every arm entering a terminal state carries that state's own outcome,
     // so the description a host quotes holds however the run arrived there.
-    expect(entering.get('merged')).toEqual(['completeMerged']);
-    expect(entering.get('mergedLocalBehind')).toEqual([
-      'completeMergedLocalBehind',
+    expect(entering.get('mergedLocalUpdated')).toEqual([
+      'completeMergedLocalUpdated',
+    ]);
+    expect(entering.get('mergedLocalNotUpdated')).toEqual([
+      'completeMergedLocalNotUpdated',
     ]);
     expect(
       entering
@@ -529,26 +559,26 @@ describe('PR Source, GEARS, and FSM agreement', () => {
       'completeWithInsufficientCodeResult',
     ]);
     expect(entering.get('fixNotPublished')).toEqual(['completeFixNotPublished']);
-    expect(entering.get('checksStillFailing')).toEqual([
-      'completeChecksStillFailing',
+    expect(entering.get('checksFailed')).toEqual(['completeChecksFailed']);
+    expect(entering.get('mergeUnconfirmed')).toEqual([
+      'completeMergeUnconfirmed',
     ]);
-    expect(entering.get('mergeRefused')).toEqual(['completeMergeRefused']);
 
-    expect(rawStates.merged?.description).toContain('fast-forwarded to the merged head');
-    expect(rawStates.mergedLocalBehind?.description).toContain(
-      'could not be fast-forwarded',
+    expect(rawStates.mergedLocalUpdated?.description).toContain(
+      'was fast-forwarded to the merged head',
     );
-    expect(rawStates.notPublished?.description).toContain(
-      'no pull request is guaranteed to exist',
+    expect(rawStates.mergedLocalNotUpdated?.description).toContain(
+      'was not fast-forwarded',
     );
-    for (const id of ['fixFailed', 'fixNotPublished', 'checksStillFailing']) {
-      expect(rawStates[id]?.description, id).toContain('the pull request remains open');
+    expect(rawStates.notPublished?.description).toContain('was not published');
+    for (const id of ['fixFailed', 'fixNotPublished', 'checksFailed']) {
+      expect(rawStates[id]?.description, id).toContain('left the pull request open');
     }
-    expect(rawStates.mergeRefused?.description).toContain(
+    expect(rawStates.mergeUnconfirmed?.description).toContain(
       'the state GitHub reports',
     );
     for (const id of finalIds) {
-      if (id === 'merged' || id === 'mergedLocalBehind') continue;
+      if (id === 'mergedLocalUpdated' || id === 'mergedLocalNotUpdated') continue;
       expect(rawStates[id]?.description, id).not.toContain('is merged');
     }
   });
@@ -558,13 +588,13 @@ describe('PR Source, GEARS, and FSM agreement', () => {
     // or failure. The pull request is merged either way on both success
     // terminals; each failure leaves it in the state GitHub reports.
     const terminalKinds: Readonly<Record<string, 'success' | 'failure'>> = {
-      merged: 'success',
-      mergedLocalBehind: 'success',
+      mergedLocalUpdated: 'success',
+      mergedLocalNotUpdated: 'success',
       notPublished: 'failure',
       fixFailed: 'failure',
       fixNotPublished: 'failure',
-      checksStillFailing: 'failure',
-      mergeRefused: 'failure',
+      checksFailed: 'failure',
+      mergeUnconfirmed: 'failure',
     };
     expect(
       Object.entries(rawStates)
@@ -576,7 +606,7 @@ describe('PR Source, GEARS, and FSM agreement', () => {
       'openPullRequest',
       'waitForChecks',
       'publishFix',
-      'waitForChecksAfterFix',
+      'waitForFixChecks',
       'mergePullRequest',
       'updateLocalDefault',
     ]) {

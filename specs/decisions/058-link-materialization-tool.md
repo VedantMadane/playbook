@@ -69,3 +69,10 @@ The [accepted labelled CODE comparison](../../scripts/experiments/c10-v13-code-l
 The ordinary linked baseline `c10-v13-code-link-baseline` completed in 638,219 ms total, including 636,735 ms link compilation; the `flat-labelled-relays` materializer candidate `c10-v13-code-link-prefer-materializer` completed in 206,865 ms total, including 205,227 ms link compilation.
 The observed reduction for this one pair is 67.59% total and 67.77% link compilation, with provider calls moving from 2 to 1.
 This is one paired observation for CODE under the labelled profile; it is not a DEV result, population ratio, cold full-compilation claim, or authorization to widen descriptors, drop custom strategies, alter generated assertions, or weaken verification.
+
+## Addendum A3: Compiled parallel shape
+
+Under [DR-067](067-parallel-proposals-through-the-shared-factory.md), every profile also accepts root `type: 'parallel'` states, so a DECIDE link is the same deterministic step as every other maintained link.
+The tool derives role states from each player-invoking state, region working leaves included, by stable state id, and declares nothing new: the factory derives the regions and the cohort from the machine, and the FSM's own `concurrentRoleSets` stay its only cohort declaration.
+The factory preflight alone validates the compiled parallel shape; other compound states remain unsupported.
+This widens no measured retention claim.

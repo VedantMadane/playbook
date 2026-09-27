@@ -7,6 +7,7 @@
 
 Accepted.
 [DR-032](032-explicit-roles-session-players.md) replaces `resolvePlayerId`, alias exceptions, optional player-state metadata, and legacy compatibility with canonical required local-role metadata under artifact schema `2`; concrete player binding is host policy.
+[DR-067](067-parallel-proposals-through-the-shared-factory.md) amends §1 and §4: the factory's domain gains the parallel shape gears2fsm compiles, and DECIDE joins the factory-backed artifacts.
 
 ## Context
 

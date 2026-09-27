@@ -415,7 +415,7 @@ describe('linked CODE runtime', () => {
     expect(
       result.outcome === 'terminal' ? result.stateDescription : undefined,
     ).toBe(
-      "The coding workflow completed after every phase's REVIEW passed with no unsettled findings.",
+      "CODE completed: every phase's review passed with no unsettled findings.",
     );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'complete',
@@ -428,11 +428,14 @@ describe('linked CODE runtime', () => {
       playerId: 'coder',
       resume: false,
     });
-    expect(host.playerCalls[0]?.prompt).toContain(
-      '> Original request: Fix the bug.\n> Preserve compatibility.',
+    // DR-065: the prompt leads with its instructions; the relayed request
+    // follows the last instruction line.
+    expect(host.playerCalls[0]?.prompt).toMatch(
+      /^First determine whether the coding request starts a new coding intent/,
     );
     expect(host.playerCalls[0]?.prompt).toContain(
-      'Credit every AI that contributed to this commit: Coder GPT-5.6 Sol.',
+      'Credit every AI that contributed to this commit: Coder GPT-5.6 Sol.\n\n' +
+        '> Original request: Fix the bug.\n> Preserve compatibility.',
     );
     expect(host.playerCalls[0]?.prompt).not.toContain('`Commit: `');
     expect(host.childRequests).toHaveLength(1);
@@ -446,14 +449,14 @@ describe('linked CODE runtime', () => {
     });
     expect(host.statuses).toContain('→ directCommit');
     expect(acceptedOutcomes(host)).toContainEqual({
-      source: 'runFirstPhase',
-      target: 'reviewFirstCommit',
+      source: 'firstPhase',
+      target: 'reviewNewIntentPhase',
       acceptedOutcome: 'directCommit',
     });
     const view = runtime.describe!();
     expect(view.state.stateId).toBe('done');
     expect(view.stateDescription).toBe(
-      "The coding workflow completed after every phase's REVIEW passed with no unsettled findings.",
+      "CODE completed: every phase's review passed with no unsettled findings.",
     );
     await runtime.dispose();
   });
@@ -544,8 +547,12 @@ describe('linked CODE runtime', () => {
       outcome: 'failed',
       state: { stateId: 'failed' },
     });
+    // The complete `unchanged` receipt passes the PBRT-71 replay fence, so
+    // the root interrupt's jump back to the first phase is offered with the
+    // retry; both restart the same work.
     expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
       'retry:START_CODE',
+      'jump:firstPhase',
     ]);
     expect(runtime.unresolvedEffectEnvelopes?.()).toEqual([]);
     expect(host.childRequests).toEqual([]);
@@ -665,7 +672,7 @@ describe('linked CODE runtime', () => {
     expect(
       result.outcome === 'terminal' ? result.stateDescription : undefined,
     ).toBe(
-      "The coding workflow completed after every phase's REVIEW passed with no unsettled findings.",
+      "CODE completed: every phase's review passed with no unsettled findings.",
     );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'complete',
@@ -679,8 +686,8 @@ describe('linked CODE runtime', () => {
       'coder-question',
       'coder-2',
     ]);
-    expect(host.playerCalls[1]?.prompt).toContain(
-      '> Original request: Implement the large change.\n> IR number: 040\n\nRead the identified IR',
+    expect(host.playerCalls[1]?.prompt).toMatch(
+      /^Read the identified IR[\s\S]*Coder GPT-5\.6 Sol\.\n\n> Original request: Implement the large change\.\n> IR number: 040/,
     );
     expect(host.playerCalls[2]?.prompt).not.toContain('Which compatibility boundary should I use?');
     expect(host.playerCalls[2]?.prompt).toContain(
@@ -693,8 +700,8 @@ describe('linked CODE runtime', () => {
       expect(prompt).toContain('> Original request: Implement the large change.');
       expect(prompt).toContain('> IR number: 040');
     }
-    expect(host.playerCalls[3]?.prompt).toContain(
-      '> Original request: Implement the large change.\n> IR number: 040\n\nRead the identified IR',
+    expect(host.playerCalls[3]?.prompt).toMatch(
+      /^Read the identified IR[\s\S]*Coder GPT-5\.6 Sol\.\n\n> Original request: Implement the large change\.\n> IR number: 040/,
     );
     expect(host.childRequests.map(({ text }) => text)).toEqual([
       '> Original intent: Implement the large change.\n' +
@@ -703,32 +710,34 @@ describe('linked CODE runtime', () => {
       '> Original intent: Implement the large change.\n' +
         `> Review scope: the commit ${host.commitOids[1]} from this coding phase and its resulting repository state.\n` +
         '> Coder output: Completed task 1.\n' +
+        '\n' +
         '> Current IR task: Implement task 1.',
       '> Original intent: Implement the large change.\n' +
         `> Review scope: the commit ${host.commitOids[2]} from this coding phase and its resulting repository state.\n` +
         '> Coder output: Completed task 2.\n' +
+        '\n' +
         '> Current IR task: Implement task 2.',
     ]);
     expect(host.commitOids).toHaveLength(3);
     expect(acceptedOutcomes(host)).toEqual([
       {
-        source: 'runFirstPhase',
-        target: 'reviewFirstCommit',
+        source: 'firstPhase',
+        target: 'reviewNewIntentPhase',
         acceptedOutcome: 'irCommit',
       },
       {
-        source: 'runIrTask',
+        source: 'irTaskPhase',
         target: 'awaitBossReply',
         acceptedOutcome: 'needsBossReply',
       },
       {
-        source: 'runIrTask',
-        target: 'reviewIrTask',
+        source: 'irTaskPhase',
+        target: 'reviewIrTaskPhase',
         acceptedOutcome: 'moreTasks',
       },
       {
-        source: 'runIrTask',
-        target: 'reviewIrTask',
+        source: 'irTaskPhase',
+        target: 'reviewIrTaskPhase',
         acceptedOutcome: 'finalTask',
       },
     ]);
@@ -794,7 +803,7 @@ describe('linked CODE runtime', () => {
     expect(
       result.outcome === 'terminal' ? result.stateDescription : undefined,
     ).toBe(
-      'The coding workflow reported a REVIEW failure and the last code-owned commit.',
+      'CODE stopped because review did not pass a phase and reports the failure with its last code-owned commit.',
     );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'review-failed',
@@ -805,9 +814,9 @@ describe('linked CODE runtime', () => {
     // A host with no access to the run output quotes this published meaning to
     // report the outcome, so it must not read as an approval.
     const view = runtime.describe!();
-    expect(view.state.stateId).toBe('reportedReviewFailure');
+    expect(view.state.stateId).toBe('reviewFailed');
     expect(view.stateDescription).toBe(
-      'The coding workflow reported a REVIEW failure and the last code-owned commit.',
+      'CODE stopped because review did not pass a phase and reports the failure with its last code-owned commit.',
     );
     await runtime.dispose();
   });
@@ -835,7 +844,10 @@ describe('linked CODE runtime', () => {
       name: 'Error',
       message: 'nested REVIEW bridge failed',
     });
-    expect(view.context).toEqual({ phase: 'direct' });
+    expect(view.context).toEqual({
+      phaseOutcome: 'directCommit',
+      codeCommit: host.commitOids[0],
+    });
     await runtime.dispose();
   });
 
@@ -992,7 +1004,7 @@ describe('linked CODE runtime', () => {
         expect(result.output).toMatchObject({
           status: 'review-failed',
           lastCodeCommit: host.commitOids[0],
-          error: { name: 'ReviewContractError' },
+          error: { name: 'ReviewNotPassed' },
         });
       }
       expect(host.playerCalls).toHaveLength(1);
@@ -1083,13 +1095,13 @@ describe('linked CODE runtime', () => {
     );
     expect(acceptedOutcomes(host)).toEqual([
       {
-        source: 'runFirstPhase',
+        source: 'firstPhase',
         target: 'awaitBossReply',
         acceptedOutcome: 'needsBossReply',
       },
       {
-        source: 'runFirstPhase',
-        target: 'reviewFirstCommit',
+        source: 'firstPhase',
+        target: 'reviewNewIntentPhase',
         acceptedOutcome: 'directCommit',
       },
     ]);

@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   devMachine,
-  renderDiscussionContext,
+  renderDiscussionExchange,
   type DevContext,
   type PlayerInput,
 } from './dev.fsm.js';
@@ -29,10 +29,7 @@ const BOSS_QUESTION_RULE = [
 const ACTUAL_CONTEXT: DevContext = {
   runResults: 'tests passed',
   developmentRequest: 'Plan the request.',
-  discussionExchanges: [
-    { question: 'Narrow or broad?', answer: 'Narrow.' },
-  ],
-  deliveryViaPullRequest: false,
+  discussionContext: renderDiscussionExchange('Narrow or broad?', 'Narrow.'),
 };
 
 function planInput(overrides: Partial<PlayerInput> = {}): PlayerInput {
@@ -41,11 +38,11 @@ function planInput(overrides: Partial<PlayerInput> = {}): PlayerInput {
     role: 'analyst',
     sourceItem: 'DEV-1',
     prompt: [
+      'Plan which playbooks run for this request.',
+      '',
       '> Original request: <development-request>',
       '> Prior discussion: <discussion-context>',
       '> Run results: <run-results>',
-      '',
-      'Plan which playbooks run for this request.',
     ].join('\n'),
     result: { code: 'done' },
     developmentRequest: 'line one\nline two',
@@ -115,14 +112,14 @@ describe('DEV player prompt composition', () => {
   it('keeps every line of relayed values inside Markdown quotes', () => {
     expect(composePlayerPrompt(planInput())).toBe(
       [
+        'Plan which playbooks run for this request.',
+        '',
         '> Original request: line one',
         '> line two',
         '> Prior discussion: Analyst question: Which?',
         '> Boss reply: The first.',
         '> Run results: test one',
         '> test two',
-        '',
-        'Plan which playbooks run for this request.',
       ].join('\n'),
     );
   });
@@ -134,18 +131,40 @@ describe('DEV player prompt composition', () => {
     expect(prompt).not.toContain('<discussion-context>');
     expect(prompt).not.toContain('<run-results>');
     expect(prompt).not.toContain('\n> \n');
-    expect(prompt).toContain('> Original request: line one\n> line two\n\nPlan');
+    expect(prompt).toContain(
+      'Plan which playbooks run for this request.\n\n> Original request: line one\n> line two',
+    );
   });
 
   it('feeds the machine-tracked discussion context into the relay', () => {
     const state = enumeratePlayerStates(devMachine)[0]!;
     const input = state.getInput(ACTUAL_CONTEXT);
-    expect(input.discussionContext).toBe(
-      renderDiscussionContext(ACTUAL_CONTEXT.discussionExchanges),
-    );
-    expect(composePlayerPrompt(input)).toContain(
-      '> Prior discussion: Analyst question: Narrow or broad?\n> Boss reply: Narrow.',
-    );
+    expect(input.discussionContext).toBe(ACTUAL_CONTEXT.discussionContext);
+    // The composed prompt is exactly the authored DEV-1 body (equal to its
+    // GEARS item, per the gears-fsm suite) in its prefix layout (DR-065):
+    // every instruction line first, then the three quoted relays, each
+    // placeholder bound to its own field and every continuation line of a
+    // multiline value kept inside the quote.
+    const values: Record<string, string> = {
+      '<development-request>': 'Plan the request.',
+      '<discussion-context>': 'Analyst question: Narrow or broad?\nBoss reply: Narrow.',
+      '<run-results>': 'tests passed',
+    };
+    const expected = input.prompt
+      .split('\n')
+      .map((line) =>
+        line.replace(/<[a-z-]+>/g, (token) =>
+          values[token]!.replaceAll('\n', '\n> '),
+        ),
+      )
+      .join('\n');
+    expect(composePlayerPrompt(input)).toBe(expected);
+    expect(expected.endsWith(
+      '\n\n> Original request: Plan the request.\n> Prior discussion: Analyst question: Narrow or broad?\n> Boss reply: Narrow.\n> Run results: tests passed',
+    )).toBe(true);
+    expect(expected.startsWith(
+      'Plan which playbooks run for this request; the playbooks do the work.\n',
+    )).toBe(true);
   });
 
   it('prepends the universal continuation before authored content', () => {
@@ -162,7 +181,7 @@ describe('DEV player prompt composition', () => {
       }),
     );
     expect(prompt).toMatch(
-      /^Continue the same task[\s\S]*Your previous question:\nWhich scope\?\n\nBoss reply:\nUse the narrow scope\.\n\n> Original request: line one/,
+      /^Continue the same task[\s\S]*Your previous question:\nWhich scope\?\n\nBoss reply:\nUse the narrow scope\.\n\nPlan which playbooks run for this request\.\n\n> Original request: line one/,
     );
   });
 });

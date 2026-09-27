@@ -83,14 +83,17 @@ meta.md       The spec of specs
 | [DR-055](decisions/055-public-workflow-contracts.md) | 055-public-workflow-contracts.md | Public builtin output interfaces as separately packaged compiler inputs, without maintained implementation artifacts |
 | [DR-056](decisions/056-shared-child-result-validation.md) | 056-shared-child-result-validation.md | Reuse the existing pure child-result validator in FSMs without runner binding |
 | [DR-057](decisions/057-public-linked-option-validator.md) | 057-public-linked-option-validator.md | Pure public artifact option validation for deterministic entries without engine changes |
-| [DR-058](decisions/058-link-materialization-tool.md) | 058-link-materialization-tool.md | Optional thin-module materializer retained for measured flat quoted-relay linking and one accepted labelled CODE comparison |
+| [DR-058](decisions/058-link-materialization-tool.md) | 058-link-materialization-tool.md | Optional thin-module materializer retained for measured flat quoted-relay linking and one accepted labelled CODE comparison, extended to the compiled parallel shape |
 | [DR-059](decisions/059-helper-backed-compact-link.md) | 059-helper-backed-compact-link.md | Rejected helper-backed compact recipe: no measured speed improvement |
 | [DR-060](decisions/060-compact-link-definition.md) | 060-compact-link-definition.md | Rejected compact link-definition experiment: no demonstrated successful compilation improvement |
 | [DR-061](decisions/061-dev-analyst-plans-the-path.md) | 061-dev-analyst-plans-the-path.md | DEV's Analyst plans the path: a bounded planning note, a route-changing Boss question only, and analysis, design, and implementation left to the called playbooks |
 | [DR-062](decisions/062-pre-existing-changes-are-context.md) | 062-pre-existing-changes-are-context.md | Pre-existing changes are the Boss's context: absorbed or altered entries carried by a call's one commit prove `one-descendant-commit` with `preExisting` receipt evidence, the Coder is told what pre-exists, the Boss is told what was carried; only lost entries stay ambiguous |
 | [DR-063](decisions/063-failures-explain-themselves.md) | 063-failures-explain-themselves.md | Failures explain themselves: a closed `{ code, evidence }` cause attached where each failure is decided, `standing` on every advertised action, and one deterministic Boss-visible failure report for every host |
 | [DR-064](decisions/064-the-config-directory-is-named-config.md) | 064-the-config-directory-is-named-config.md | The config directory is named config: `${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml`, the former `playbook/` location relocated ahead of the XDG one, the emptied former directory removed |
-| [DR-065](decisions/065-prompt-prefix-pass.md) | 065-prompt-prefix-pass.md | The prompt-prefix pass: a second GEARS pass moves each prompt's relayed runtime values after its instructions so repeated runs share a cacheable prefix, realized by a deterministic tool and accepted by the fidelity checker through its provenance section |
+| [DR-065](decisions/065-prompt-prefix-pass.md) | 065-prompt-prefix-pass.md | The prompt-prefix pass: a second GEARS pass moves each prompt's relayed runtime values after its instructions so repeated runs share a cacheable prefix, realized by a deterministic tool, recording nothing beside the prompts, and accepted by the fidelity checker from each prompt's layout |
+| [DR-066](decisions/066-compiled-builtins-keep-their-public-interface.md) | 066-compiled-builtins-keep-their-public-interface.md | A builtin compiled under one of the catalog's ids keeps the catalog's output interface — result properties named by it, the terminal output exactly it — and a result declares only consumed properties; `text2gears` reads the catalog |
+| [DR-067](decisions/067-parallel-proposals-through-the-shared-factory.md) | 067-parallel-proposals-through-the-shared-factory.md | The shared factory interprets the compiled parallel proposal shape — one all-`unchanged` cohort, keyed pending questions, per-call aborts — so DECIDE links as a thin module and no maintained artifact keeps bespoke machinery; the engine's semantics replace the bespoke runtime's drift |
+| [DR-068](decisions/068-labelled-section-placeholders.md) | 068-labelled-section-placeholders.md | A Source may define a placeholder as a labelled section of a relayed text, bounded by the labels it names: `text2gears` keeps the definition and declares no producer, and each compiled FSM derives the section deterministically where it stores the text, reading away the caller's quote layer and falling back to the whole text |
 
 ## Packages
 
@@ -99,8 +102,8 @@ meta.md       The spec of specs
 | [captain-playbook.md](packages/captain-playbook.md) | Compiled session Captain behavior, controller contract, compilation, and verification |
 | [cross-references.md](packages/cross-references.md) | Relative Markdown link and GitHub-anchor resolution plus repository checks |
 | [compiler-optimization.md](packages/compiler-optimization.md) | Exact environmental predicate and resource-location preservation in mechanical optimization |
-| [compiler-prompt-prefix.md](packages/compiler-prompt-prefix.md) | Prefix-first prompt layout: relayed values after instructions, the deterministic tool, provenance, and fidelity acceptance |
-| [compiler-prompt-relays.md](packages/compiler-prompt-relays.md) | Source-authored runtime relays through prompt placeholders and typed actor inputs |
+| [compiler-prompt-prefix.md](packages/compiler-prompt-prefix.md) | Prefix-first prompt layout: relayed values after instructions, the deterministic tool, legacy-section removal, and layout-based fidelity acceptance |
+| [compiler-prompt-relays.md](packages/compiler-prompt-relays.md) | Source-authored runtime relays through prompt placeholders and typed actor inputs, including placeholders derived from a labelled section of a relayed text |
 | [compiler-results.md](packages/compiler-results.md) | GEARS acting-result boundaries, terminal return obligations, authored Boss-question fields, and unambiguous output guidance |
 | [compiler-nested-tags.md](packages/compiler-nested-tags.md) | Nested-playbook call tagging aligned with runtime busy and suspended settlement |
 | [compiler-nested-calls.md](packages/compiler-nested-calls.md) | Nested-playbook call syntax and child-output routing duties |
@@ -113,7 +116,7 @@ meta.md       The spec of specs
 | [git.md](packages/git.md) | Commit preparation, message format, and AI co-authorship |
 | [licensing.md](packages/licensing.md) | SPDX header scope, requirements, and repository checks |
 | [link-experiments.md](packages/link-experiments.md) | Isolated matched Playbook 13.2 compiler-definition experiments and frozen input identity |
-| [link-materialization.md](packages/link-materialization.md) | Optional link materialization, supported labelled/nested CODE profile, strict descriptor, atomic emission, and semantic closure |
+| [link-materialization.md](packages/link-materialization.md) | Optional link materialization, supported labelled/nested CODE profile, compiled parallel shape, strict descriptor, atomic emission, and semantic closure |
 | [playbook.md](packages/playbook.md) | CODE, REVIEW, DECIDE, DEV, BRANCH, and PR source, GEARS, FSM, prompt, transition, nesting, script-state, and terminal conformance |
 | [playbook-captain.md](packages/playbook-captain.md) | Registry, routing, explicit role binding, Captain-session player continuity, engagement stack, and host lifecycle |
 | [playbook-cli.md](packages/playbook-cli.md) | Interactive and headless launch, player config, durable session reopening, provisioning, persistence, the shared session store, replay stream, and worktree host-capabilities facade, and checks |

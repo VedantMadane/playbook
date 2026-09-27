@@ -23,8 +23,24 @@ The terminal-return requirement shall remain non-acting semantics outside prompt
 
 ### compiler-results-5
 
-When Source gives a direct-Captain or delegated-player acting result that asks Boss a question and waits for the answer before the same behavior resumes, text2gears shall preserve the authored prompt, guard name, wait, and answer-dependent continuation [[playbook-runtime-11](playbook-runtime.md#playbook-runtime-11)] while declaring the result's `question` output property in the annotated `question: <verbatim final text>` form [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)] [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)].
-The result name or prose alone shall not satisfy the field declaration, and text2gears shall not emit the framework-owned `needsBossReply` result added by [gears2fsm's Boss-reply suspension](../../slc/gears2fsm.md#boss-reply-suspension).
+When Source gives a direct-Captain or delegated-player behavior a Boss question that waits for the answer before the same behavior resumes, text2gears shall preserve the authored prompt, the wait, and the answer-dependent continuation on the originating item [[playbook-runtime-11](playbook-runtime.md#playbook-runtime-11)] and shall declare no result for that question outside the decide-call-observe routing contract: the question is the framework-owned `needsBossReply` outcome that [gears2fsm's Boss-reply suspension](../../slc/gears2fsm.md#boss-reply-suspension) adds to every such state [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], and a second guard for the same wait would give the adjudicator two equivalent outcomes.
+Where the behavior is Captain's routing decision under that contract, whose `question` and `followUpQuestion` results are fixed compiler vocabulary, text2gears shall declare the routing question's `question` output property in the annotated `question: <verbatim final text>` form [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], and the result name or prose alone shall not satisfy that declaration.
+
+### compiler-results-9
+
+When declaring a result's output properties, text2gears shall declare a property only where a consumer requires its value — a later item's placeholder, the workflow's terminal return [[compiler-results-3](#compiler-results-3)], or the workflow's declared public interface [[compiler-workflow-contracts-6](compiler-workflow-contracts.md#compiler-workflow-contracts-6)] — and shall carry a detail the acting agent reports only within its final text, such as a reason, a summary, or a list, in that result's verbatim final-text property rather than as a separate judge-authored property ([DR-066](../decisions/066-compiled-builtins-keep-their-public-interface.md)).
+
+### compiler-results-11
+
+Where a later prompt reads the commit an earlier call itself created through a Source-named placeholder, text2gears shall declare that producer's property as `latestCommit`, the effect-owned name every linked runtime fills from the repository receipt [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], and gears2fsm shall bind the placeholder to a typed context field assigned from that accepted `latestCommit`, so the Source keeps its own placeholder while one effect-owned name serves every workflow ([DR-066](../decisions/066-compiled-builtins-keep-their-public-interface.md)).
+
+### compiler-results-13
+
+When Source qualifies an outcome's evidence — what affirmatively supports it, or what supports no outcome — text2gears shall carry that qualification in the outcome's result description, which the hidden adjudicator reads when it selects the guard [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], rather than in the item's prose, which reaches no judge; a behavior with one qualified outcome therefore carries exactly one `Results:` bullet naming it, with an output property only where a consumer requires one.
+
+### compiler-results-15
+
+When gears2fsm compiles an accepted `onDone` arm of an artifact-schema-3 governed delegated-player state, it shall place first among the arm's actions the root-machine `playbook.acceptedOutcome` action with exact plain params `{ source, target, acceptedOutcome }` naming that state, the state the next public snapshot shows for the arm — the arm's own target, or the parallel parent's `onDone` target where the arm's target is a region's final leaf that completes that parent, an arm that completes the join only when every sibling region is already final being split into two arms guarded on that condition — and the accepted guard, and shall declare the action in the machine setup as a no-op typing those params, so the linked runtime confirms and publishes the accepted outcome [[playbook-runtime-81](playbook-runtime.md#playbook-runtime-81)]; the malformed-output fallback carries none.
 
 ### compiler-results-7
 
@@ -55,5 +71,21 @@ This representation check shall not claim to detect a model's omission of a term
 
 ### compiler-results-6
 
-When the integration suite parses an authored Boss-wait result through the supplied SLC installation, it shall verify that the annotated `question: <verbatim final text>` field is represented as runtime-supplied whole-final-text metadata when the runtime contract is given an explicit `question` presentation-owned outcome-authority mapping, while the prompt, guard name, and wait semantics remain unchanged [[compiler-results-5](#compiler-results-5)].
+When the integration suite parses an authored routing-question result through the supplied SLC installation, it shall verify that the annotated `question: <verbatim final text>` field is represented as runtime-supplied whole-final-text metadata when the runtime contract is given an explicit `question` presentation-owned outcome-authority mapping, while the prompt, guard name, and wait semantics remain unchanged, and when it reads the shipped text2gears definition, it shall verify that a delegated player's authored Boss question declares no result beside the framework-owned `needsBossReply` [[compiler-results-5](#compiler-results-5)].
 It shall also verify that a separate unannotated typed extracted field remains judge-owned through the explicit semantic outcome-authority mapping, and shall not claim that representation proves automatic inference from annotation, detection of semantic omissions, or model success [[compiler-results-5](#compiler-results-5)].
+
+### compiler-results-10
+
+When the integration suite reads the shipped text2gears definition, it shall verify that its result-contract rules confine output properties to consumed values — a later placeholder, the terminal return, or the declared public interface — and name the verbatim final-text property as the carrier of detail the acting agent reports only in its final text [[compiler-results-9](#compiler-results-9)].
+
+### compiler-results-12
+
+When the integration suite reads the shipped definitions and the maintained CODE and DECIDE GEARS, it shall verify that text2gears states the `latestCommit` exception with gears2fsm's binding, that gears2fsm states the binding, and that each committing result of CODE and DECIDE declares `latestCommit` while the review call relays `<code-commit>` or `<decide-commit>` [[compiler-results-11](#compiler-results-11)].
+
+### compiler-results-14
+
+When the integration suite reads the shipped text2gears definition, it shall verify that it directs an outcome's evidence qualification into the result description and names item prose as text the adjudicator never reads [[compiler-results-13](#compiler-results-13)].
+
+### compiler-results-16
+
+When the integration suite reads the shipped gears2fsm definition and each maintained workflow FSM, it shall verify that the definition requires the accepted-outcome marker on every accepted governed arm and that each maintained FSM with a governed delegated-player state declares the `playbook.acceptedOutcome` action and carries it on its accepted arms, an arm that completes a parallel parent naming the join's target [[compiler-results-15](#compiler-results-15)].

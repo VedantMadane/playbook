@@ -761,9 +761,10 @@ describe('canonical Captain compiler bundle (CAPPLAY-11)', () => {
 
 describe('artifact schema cutover (RELEASE-15)', () => {
   it('keeps every shipped runtime and registry sibling on schema 3', () => {
-    const schemaDeclaration = /artifactSchema:\s*3/;
+    // A materialized module declares its spec as JSON, with the key quoted.
+    const schemaDeclaration = /"?artifactSchema"?:\s*3/;
     const legacyDeclaration =
-      /artifactSchema:\s*2|SchemaV2|RegistryEntryV2/;
+      /"?artifactSchema"?:\s*2|SchemaV2|RegistryEntryV2/;
 
     for (const id of BUNDLED_WORKFLOW_IDS) {
       const base = `reference/sdlc/${id}.playbook/`;
@@ -783,29 +784,19 @@ describe('artifact schema cutover (RELEASE-15)', () => {
         ['TypeScript', runtimeSource],
         ['JavaScript', runtimeJavaScript],
       ] as const) {
-        const currentSchemaContract =
-          id === 'decide'
-            ? /authority\.artifactSchema !== 3/
-            : schemaDeclaration;
         expect(
           contents,
           `${id} ${kind} runtime omits its artifact-schema-3 contract`,
-        ).toMatch(currentSchemaContract);
+        ).toMatch(schemaDeclaration);
         expect(
           contents,
           `${id} ${kind} runtime retains artifact schema 2`,
         ).not.toMatch(legacyDeclaration);
       }
       expect(runtimeDeclaration).not.toMatch(legacyDeclaration);
-      if (id !== 'decide') {
-        expect(runtimeDeclaration).toMatch(
-          /XStatePlaybookRuntimeFactory<[\s\S]*, 3>;/,
-        );
-      } else {
-        expect(runtimeDeclaration).toContain(
-          'PlaybookRuntimeFactory<DecidePlaybookRuntimeConstruction>',
-        );
-      }
+      expect(runtimeDeclaration).toMatch(
+        /XStatePlaybookRuntimeFactory<[\s\S]*, 3>;/,
+      );
 
       for (const extension of ['ts', 'js', 'd.ts'] as const) {
         const registry = readFileSync(
@@ -1293,7 +1284,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'waitForPlaybookQuiescence',
     ],
     './captain/playbook': ['_internal', 'createPlaybookRuntime', 'default'],
-    './code/playbook': ['_internal', 'default'],
+    './code/playbook': ['_internal', 'default', 'validateOptions'],
     './code/registry': [
       'codeCopyPasteGuardNames',
       'codePlaybookRegistryEntry',
@@ -1304,6 +1295,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'validateCodeOptions',
     ],
     './playbook-captain': [
+      '_internal',
       'assertPlaybookCaptainUnresolvedEffects',
       'assertPlaybookCaptainShellSnapshot',
       'createPlaybookCaptainShell',
@@ -1330,7 +1322,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'createWorktreeHostCapabilities',
       'observeGitRepository',
     ],
-    './review/playbook': ['_internal', 'default'],
+    './review/playbook': ['_internal', 'default', 'validateOptions'],
     './review/registry': [
       'default',
       'reviewCopyPasteGuardNames',
@@ -1340,7 +1332,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'reviewSummaryPolicy',
       'validateReviewOptions',
     ],
-    './decide/playbook': ['_internal', 'createPlaybookRuntime', 'default'],
+    './decide/playbook': ['_internal', 'default', 'validateOptions'],
     './decide/registry': [
       'decideCopyPasteGuardNames',
       'decidePlaybookRegistryEntry',
@@ -1350,7 +1342,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'default',
       'validateDecideOptions',
     ],
-    './dev/playbook': ['_internal', 'default'],
+    './dev/playbook': ['_internal', 'default', 'validateOptions'],
     './dev/registry': [
       'default',
       'devCopyPasteGuardNames',
@@ -1360,7 +1352,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'devSummaryPolicy',
       'validateDevOptions',
     ],
-    './branch/playbook': ['_internal', 'default'],
+    './branch/playbook': ['_internal', 'default', 'validateOptions'],
     './branch/registry': [
       'branchCopyPasteGuardNames',
       'branchPlaybookRegistryEntry',
@@ -1370,7 +1362,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'default',
       'validateBranchOptions',
     ],
-    './pr/playbook': ['_internal', 'default'],
+    './pr/playbook': ['_internal', 'default', 'validateOptions'],
     './pr/registry': [
       'default',
       'prCopyPasteGuardNames',
@@ -1593,8 +1585,6 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
     './code/playbook': [
       'CaptainCallOptions',
       'CaptainResult',
-      'CodePlaybookHostCapabilities',
-      'CodePlaybookOptions',
       'JsonValue',
       'NormalizedError',
       'PlaybookCallRequest',
@@ -1602,11 +1592,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1618,6 +1610,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerSessionStore',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './code/registry': [
       'CodeOptions',
@@ -1632,6 +1625,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'validateCodeOptions',
     ],
     './playbook-captain': [
+      '_internal',
       'PlaybookCaptainDeps',
       'PlaybookCaptainFrameSnapshot',
       'PlaybookCaptainRegistryEntry',
@@ -1738,50 +1732,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
-      'PlaybookPendingCall',
-      'PlaybookPorts',
-      'PlaybookRunResult',
-      'PlaybookRuntime',
-      'PlaybookRuntimeFactory',
-      'PlaybookRuntimeSnapshot',
-      'PlaybookSession',
-      'PlaybookState',
-      'PlaybookStateValue',
-      'PlaybookTraceEvent',
-      'PlaybookTraceType',
-      'PlayerCallOptions',
-      'PlayerResult',
-      'PlayerSessionStore',
-      'ReviewPlaybookHostCapabilities',
-      'ReviewPlaybookOptions',
-      '_internal',
-      'default',
-    ],
-    './review/registry': [
-      'PlaybookSummaryPolicy',
-      'ReviewOptions',
-      'ReviewPlaybookRegistryEntry',
-      'default',
-      'reviewCopyPasteGuardNames',
-      'reviewPlaybookRegistryEntry',
-      'reviewSavedCountsLine',
-      'reviewStateCountLabels',
-      'reviewSummaryPolicy',
-      'validateReviewOptions',
-    ],
-    './decide/playbook': [
-      'CaptainCallOptions',
-      'CaptainResult',
-      'DecidePlaybookHostCapabilities',
-      'DecidePlaybookRuntimeConstruction',
-      'JsonValue',
-      'NormalizedError',
-      'PlaybookCallRequest',
-      'PlaybookCallResult',
-      'PlaybookCallStart',
-      'PlaybookControlAction',
-      'PlaybookControlReceipt',
-      'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
@@ -1798,8 +1749,50 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerResult',
       'PlayerSessionStore',
       '_internal',
-      'createPlaybookRuntime',
       'default',
+      'validateOptions',
+    ],
+    './review/registry': [
+      'PlaybookSummaryPolicy',
+      'ReviewOptions',
+      'ReviewPlaybookRegistryEntry',
+      'default',
+      'reviewCopyPasteGuardNames',
+      'reviewPlaybookRegistryEntry',
+      'reviewSavedCountsLine',
+      'reviewStateCountLabels',
+      'reviewSummaryPolicy',
+      'validateReviewOptions',
+    ],
+    './decide/playbook': [
+      'CaptainCallOptions',
+      'CaptainResult',
+      'JsonValue',
+      'NormalizedError',
+      'PlaybookCallRequest',
+      'PlaybookCallResult',
+      'PlaybookCallStart',
+      'PlaybookControlReceipt',
+      'PlaybookControlView',
+      'PlaybookHostCapabilities',
+      'PlaybookPendingCall',
+      'PlaybookPorts',
+      'PlaybookRunResult',
+      'PlaybookRuntime',
+      'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
+      'PlaybookRuntimeSnapshot',
+      'PlaybookSession',
+      'PlaybookState',
+      'PlaybookStateValue',
+      'PlaybookTraceEvent',
+      'PlaybookTraceType',
+      'PlayerCallOptions',
+      'PlayerResult',
+      'PlayerSessionStore',
+      '_internal',
+      'default',
+      'validateOptions',
     ],
     './decide/registry': [
       'DecideOptions',
@@ -1816,8 +1809,6 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
     './dev/playbook': [
       'CaptainCallOptions',
       'CaptainResult',
-      'DevPlaybookHostCapabilities',
-      'DevPlaybookOptions',
       'JsonValue',
       'NormalizedError',
       'PlaybookCallRequest',
@@ -1825,11 +1816,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1841,6 +1834,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerSessionStore',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './dev/registry': [
       'DevOptions',
@@ -1855,8 +1849,6 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'validateDevOptions',
     ],
     './branch/playbook': [
-      'BranchPlaybookHostCapabilities',
-      'BranchPlaybookOptions',
       'CaptainCallOptions',
       'CaptainResult',
       'JsonValue',
@@ -1866,11 +1858,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1882,6 +1876,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerSessionStore',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './branch/registry': [
       'BranchOptions',
@@ -1905,11 +1900,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1919,10 +1916,9 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerCallOptions',
       'PlayerResult',
       'PlayerSessionStore',
-      'PrPlaybookHostCapabilities',
-      'PrPlaybookOptions',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './pr/registry': [
       'PlaybookSummaryPolicy',
@@ -2446,20 +2442,19 @@ import type {
   PlaybookPorts,
 } from '@sublang/playbook/runtime';
 import { codePlaybookRegistryEntry } from '@sublang/playbook/code/registry';
-import type { CodePlaybookHostCapabilities } from '@sublang/playbook/code/playbook';
+import type { PlaybookHostCapabilities as CodePlaybookHostCapabilities } from '@sublang/playbook/code/playbook';
 import { reviewPlaybookRegistryEntry } from '@sublang/playbook/review/registry';
-import type { ReviewPlaybookHostCapabilities } from '@sublang/playbook/review/playbook';
+import type { PlaybookHostCapabilities as ReviewPlaybookHostCapabilities } from '@sublang/playbook/review/playbook';
 import { decidePlaybookRegistryEntry } from '@sublang/playbook/decide/registry';
-import type {
-  DecidePlaybookHostCapabilities,
-  DecidePlaybookRuntimeConstruction,
-} from '@sublang/playbook/decide/playbook';
+import type { PlaybookHostCapabilities as DecideModuleHostCapabilities } from '@sublang/playbook/decide/playbook';
+type DecidePlaybookHostCapabilities = PlaybookHostConstructionCapabilities &
+  DecideModuleHostCapabilities;
 import { devPlaybookRegistryEntry } from '@sublang/playbook/dev/registry';
-import type { DevPlaybookHostCapabilities } from '@sublang/playbook/dev/playbook';
+import type { PlaybookHostCapabilities as DevPlaybookHostCapabilities } from '@sublang/playbook/dev/playbook';
 import { branchPlaybookRegistryEntry } from '@sublang/playbook/branch/registry';
-import type { BranchPlaybookHostCapabilities } from '@sublang/playbook/branch/playbook';
+import type { PlaybookHostCapabilities as BranchPlaybookHostCapabilities } from '@sublang/playbook/branch/playbook';
 import { prPlaybookRegistryEntry } from '@sublang/playbook/pr/registry';
-import type { PrPlaybookHostCapabilities } from '@sublang/playbook/pr/playbook';
+import type { PlaybookHostCapabilities as PrPlaybookHostCapabilities } from '@sublang/playbook/pr/playbook';
 import type {
   HostCapabilities as FacadeHostCapabilities,
   WorktreeHostCapabilities,
@@ -2531,12 +2526,20 @@ void wrongV3;
 
 declare const configuredOptions: unknown;
 declare const hostCapabilities: PlaybookHostConstructionCapabilities;
-declare const codeHostCapabilities: CodePlaybookHostCapabilities;
-declare const reviewHostCapabilities: ReviewPlaybookHostCapabilities;
 declare const decideHostCapabilities: DecidePlaybookHostCapabilities;
-declare const devHostCapabilities: DevPlaybookHostCapabilities;
-declare const branchHostCapabilities: BranchPlaybookHostCapabilities;
-declare const prHostCapabilities: PrPlaybookHostCapabilities;
+// The materialized modules type authority as opaque; each registry entry takes
+// the Captain's construction capabilities alongside it (CODE, REVIEW, DEV,
+// and BRANCH for the governed worktree, PR for the script working directory).
+declare const codeHostCapabilities: PlaybookHostConstructionCapabilities &
+  CodePlaybookHostCapabilities;
+declare const reviewHostCapabilities: PlaybookHostConstructionCapabilities &
+  ReviewPlaybookHostCapabilities;
+declare const devHostCapabilities: PlaybookHostConstructionCapabilities &
+  DevPlaybookHostCapabilities;
+declare const branchHostCapabilities: PlaybookHostConstructionCapabilities &
+  BranchPlaybookHostCapabilities;
+declare const prHostCapabilities: PlaybookHostConstructionCapabilities &
+  PrPlaybookHostCapabilities;
 declare const ports: PlaybookPorts;
 declare const v3Entry: PlaybookCaptainRegistryEntryV3;
 // @ts-expect-error live construction capabilities are not runtime ports
@@ -2563,14 +2566,7 @@ const decideSchema: 3 = decidePlaybookRegistryEntry.artifactSchema;
 const decideProfile: PlaybookCaptainRuntimeProfile = decidePlaybookRegistryEntry.runtimeProfile;
 const decideEntry: PlaybookCaptainRegistryEntryV3 = decidePlaybookRegistryEntry;
 const decideCapabilities: PlaybookHostConstructionCapabilities = decideHostCapabilities;
-const decideConstruction: DecidePlaybookRuntimeConstruction = {
-  configuredOptions: {},
-  hostCapabilities: decideHostCapabilities,
-};
-decidePlaybookRegistryEntry.createRuntime(
-  decideConstruction.configuredOptions,
-  decideConstruction.hostCapabilities,
-);
+decidePlaybookRegistryEntry.createRuntime({}, decideHostCapabilities);
 // @ts-expect-error DECIDE is schema 3 and requires current-host capabilities
 decidePlaybookRegistryEntry.createRuntime({});
 const devSchema: 3 = devPlaybookRegistryEntry.artifactSchema;
@@ -2609,7 +2605,6 @@ void decideSchema;
 void decideProfile;
 void decideEntry;
 void decideCapabilities;
-void decideConstruction;
 void devSchema;
 void devProfile;
 void devEntry;
@@ -2648,10 +2643,17 @@ void prCapabilities;
     '%s visibly re-exports PlayerSessionStore from the shared contract',
     (id) => {
       const dts = declarationSourceOf(`./${id}/playbook`);
-      const imported = dts.match(
-        /import type \{([\s\S]*?)\} from '@sublang\/playbook\/runtime';/,
+      // A materialized module re-exports straight from the shared contract
+      // in one `export type { … } from` statement.
+      const direct = dts.match(
+        /^export type \{([^}]*)\} from '@sublang\/playbook\/runtime';$/m,
       );
-      const reexported = dts.match(/^export type \{([\s\S]*?)\};$/m);
+      const imported =
+        direct ??
+        dts.match(
+          /import type \{([\s\S]*?)\} from '@sublang\/playbook\/runtime';/,
+        );
+      const reexported = direct ?? dts.match(/^export type \{([\s\S]*?)\};$/m);
       const names = (body: string | undefined): string[] =>
         (body ?? '')
           .split(',')

@@ -1,4 +1,5 @@
-import { type DecidePlaybookHostCapabilities, type PlaybookRuntime } from './decide.playbook.js';
+import { type PlaybookHostCapabilities, type PlaybookRuntime } from './decide.playbook.js';
+import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
 export interface PlaybookSummaryPolicy {
     stateCountLabels: Readonly<Record<string, string>>;
     copyPasteGuardNames: readonly string[];
@@ -14,14 +15,17 @@ export interface DecidePlaybookRegistryEntry {
     intent: string;
     artifactSchema: 3;
     runtimeProfile: {
-        readonly kind: 'bespoke';
-        readonly artifactSchema: 3;
+        readonly kind: 'shared-factory';
+        readonly compat: {
+            readonly artifactSchema: 3;
+            readonly runtimeAbi: number;
+        };
     };
     requiredRoleIds: readonly ['coder', 'reviewer'];
     concurrentRoleSets: readonly [readonly ['coder', 'reviewer']];
     summaryPolicy: PlaybookSummaryPolicy;
     validateOptions(optionSlice: unknown): DecideOptions;
-    createRuntime(options: DecideOptions, hostCapabilities: DecidePlaybookHostCapabilities): PlaybookRuntime;
+    createRuntime(options: DecideOptions, hostCapabilities: PlaybookHostConstructionCapabilities & PlaybookHostCapabilities): PlaybookRuntime;
 }
 export declare const decideStateCountLabels: {
     readonly independentProposals: "proposal round";

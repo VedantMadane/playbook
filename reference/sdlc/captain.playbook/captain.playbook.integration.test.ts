@@ -57,8 +57,8 @@ import createPlaybookRuntime, {
 } from './captain.playbook.js';
 import { captainMachine } from './captain.fsm.js';
 // The shipped registry entries the A-29 rows drive for real (IR-036 task 4):
-// the linked CODE artifact over the shared factory, and the bespoke DECIDE
-// runtime that ships without the control-surface pair.
+// the linked CODE and DECIDE artifacts over the shared factory, DECIDE
+// through its parallel profile (DR-067).
 import codeRegistryEntry from '../code.playbook/code.registry.js';
 import decideRegistryEntry from '../decide.playbook/decide.registry.js';
 import reviewRegistryEntry from '../review.playbook/review.registry.js';
@@ -2197,8 +2197,20 @@ function advertisedActionIds(prompt: string): string[] {
 const CLASSIFIER_MARKER = 'Classify the following Boss message';
 const ADJUDICATION_MARKER = 'Pick exactly one outcome by `guard`';
 const GOVERNED_ADJUDICATION_MARKER = 'Pick exactly one declared `guard`';
-const DECIDE_ADJUDICATION_MARKER =
-  'You are the guard adjudicator for a playbook state machine.';
+
+/**
+ * The DECIDE source item a governed adjudication prompt adjudicates, read
+ * from the acting role and the declared outcomes the engine's prompt names.
+ */
+function decideSourceItemOf(
+  prompt: string,
+): 'DECIDE-1' | 'DECIDE-2' | 'DECIDE-3' | undefined {
+  if (!prompt.includes(GOVERNED_ADJUDICATION_MARKER)) return undefined;
+  if (prompt.includes('\n- `committed` — ')) return 'DECIDE-3';
+  if (prompt.includes('\n- `proposed` — Reviewer ')) return 'DECIDE-2';
+  if (prompt.includes('\n- `proposed` — Coder ')) return 'DECIDE-1';
+  return undefined;
+}
 
 function makeShellHarness(
   entries: readonly RegisteredEntry[],
@@ -2470,8 +2482,7 @@ function realArtifactHarness(
       }
       if (
         prompt.includes(ADJUDICATION_MARKER) ||
-        prompt.includes(GOVERNED_ADJUDICATION_MARKER) ||
-        prompt.includes(DECIDE_ADJUDICATION_MARKER)
+        prompt.includes(GOVERNED_ADJUDICATION_MARKER)
       ) {
         return okReply(
           JSON.stringify(
@@ -2727,7 +2738,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     });
     const parked = retainedGeneration(source);
     expect(parked).toMatchObject({
-      rootStateDescription: 'Waiting for Boss to answer Coder.',
+      rootStateDescription: "Waiting for Boss to answer the acting agent's question.",
       frames: [
         {
           playbookId: 'code',
@@ -2832,7 +2843,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
       [
         'No retained work is actionable.',
         '',
-        'Failure: the coder call failed: coder exploded.',
+        'Failure: the coder call failed with the error `coder exploded`.',
         'Controls:',
         '- Stop /code (ready)',
       ].join('\n'),
@@ -2886,7 +2897,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
       {
         playbookId: 'code',
         runtime: {
-          state: { stateId: 'reviewFirstCommit' },
+          state: { stateId: 'reviewNewIntentPhase' },
           suspendedCall: {
             playbookId: 'review',
             childSessionId: generation.frames[1]?.sessionId,
@@ -3053,7 +3064,7 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await target.shell.dispose?.();
   });
 
-  it('retains the real pre-terminal stack across CODE reportedReviewFailure', async () => {
+  it('retains the real pre-terminal stack across CODE reviewFailed', async () => {
     let breakReview = false;
     const sourceCode = realEntry(codeRegistryEntry);
     const sourceReview = realEntry(reviewRegistryEntry);
@@ -3112,13 +3123,13 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
         .some(
           ({ payload }) =>
             (payload as { state?: PlaybookState }).state?.stateId ===
-            'reportedReviewFailure',
+            'reviewFailed',
         ),
     ).toBe(true);
     const retainedAfterTerminal = retainedGeneration(source);
     expect(retainedAfterTerminal).toEqual(preTerminal);
     expect(retainedAfterTerminal.frames[0]?.runtime.state.stateId).toBe(
-      'reviewFirstCommit',
+      'reviewNewIntentPhase',
     );
     expect(retainedAfterTerminal.frames[1]?.runtime.state.stateId).toBe(
       'awaitBossReply',
@@ -3161,10 +3172,10 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
 
   it('treats the real non-adoptable DECIDE artifact as fresh behavior', async () => {
     const decideQuestions = (prompt: string): unknown => {
-      if (prompt.includes('source item DECIDE-1')) {
+      if (decideSourceItemOf(prompt) === 'DECIDE-1') {
         return { guard: 'needsBossReply' };
       }
-      if (prompt.includes('source item DECIDE-2')) {
+      if (decideSourceItemOf(prompt) === 'DECIDE-2') {
         return { guard: 'needsBossReply' };
       }
       throw new Error(`unexpected DECIDE adjudication prompt: ${prompt}`);
@@ -3196,10 +3207,13 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await source.turn('/decide compare the retained designs', 1);
 
     expect(sourceDecide.runtimes).toHaveLength(1);
+    // DR-067 §2: the shared factory omits `adopt` for a machine that
+    // declares a parallel state; its terminal classification alone grants no
+    // retained generation, so the root still clears.
     expect(sourceDecide.runtimes[0]?.adopt).toBeUndefined();
     expect(
       sourceDecide.runtimes[0]?.retainedGenerationMetadata,
-    ).toBeUndefined();
+    ).toEqual({ unfinishedFinalStateIds: ['reportedReviewFailure'] });
     expect(source.shell.exportSnapshot()).toMatchObject({
       mode: 'engaged.parked',
       pendingBossQuestions: expect.arrayContaining([
@@ -3245,8 +3259,8 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
 // ---------------------------------------------------------------------------
 // A-29 / A-28 rows over the real Playbook Captain shell (IR-036 task 4):
 // CAPTAIN-37…-40 and the amended CAPTAIN-21. Rows whose asserts read genuine
-// engine state run on the shipped registry entries — the linked CODE
-// artifact over the shared factory and the bespoke DECIDE runtime — with
+// engine state run on the shipped registry entries — the linked CODE and
+// DECIDE artifacts over the shared factory — with
 // per-call scripted players, the `acceptance-fixtures/incident-boss-turns.ts`
 // fixture, and a scripted model that reads its answer out of the prompt the
 // shell composed. FakeRuntime entries carry the rows that need injected
@@ -3325,8 +3339,10 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(closing).toContain(
       'Receipt error: {"name":"TypeError","message":"guard lookup exploded"}',
     );
+    // The receipt's error reads as no prose, so its fact shows it once as
+    // recorded, with no error-class name (CAPTAIN-71).
     expect(closing).toContain(
-      'Applying "retry:BOSS_TURN" failed: TypeError: guard lookup exploded.',
+      'Applying "retry:BOSS_TURN" failed with the error `guard lookup exploded`.',
     );
     expect(closing).toContain('Settlement status: failed');
     // The closing reply reaching Boss is exactly the validated scripted prose.
@@ -3360,7 +3376,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     await harness.turn('/code continue IR-036 task 4', 1);
     expect(harness.statuses).toContain('START_CODE');
     expect(harness.statuses).toContain(
-      '⤷ coder: Coder is running the first coding phase: a direct implementation, a new intent record, or an existing intent-record task.',
+      '⤷ coder: Coder runs the first coding phase: a direct implementation, a new IR, or the next task of an existing IR.',
     );
     expect(harness.statuses).toContain(
       '◆ workflow failed; awaiting Boss recovery.',
@@ -3368,10 +3384,15 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(harness.playerCalls).toHaveLength(1);
     expect(code.runtimes[0]?.describe?.().state.stateId).toBe('failed');
     // The failure is named in the grounding the closing prompt points at,
-    // not only in the trailing leaf-state line.
-    expect(harness.closingPrompts().at(-1)).toContain(
-      '- /code failed: Error: coder exploded.',
-    );
+    // not only in the trailing leaf-state line — once, by its cause, in the
+    // place of the failed run's own fact (CAPTAIN-67).
+    expect(
+      (harness.closingPrompts().at(-1) ?? '')
+        .split('\n')
+        .filter((line) => line.startsWith('- /code failed')),
+    ).toEqual([
+      '- /code failed: the coder call failed with the error `coder exploded`.',
+    ]);
     expect(harness.closingPrompts().at(-1)).not.toContain('failed at failed');
 
     // Turn 1, verbatim: exactly one hidden decision call on the durable
@@ -3395,7 +3416,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // status answer reflects, and an id is not Boss-appropriate text
     // (CAPPLAY-5). The retired `state value <id>` form appears nowhere.
     expect(decision!.prompt).toContain(
-      'Leaf /code: state: The coding workflow failed and is waiting for a new coding intent.; tags playbook.parked; quiescent; status active',
+      'Leaf /code: state: CODE parked after a control-plane failure and waits for Boss to restart or resume it.; tags playbook.parked; quiescent; status active',
     );
     expect(decision!.prompt).not.toContain('state value');
     // PBRT-52 / CAPTAIN-9: the context block is CODE's declared projection,
@@ -3403,9 +3424,9 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // JSON document. Every member CODE does not export — the resolved
     // roster, the option value, and the player-authored text — stays out of
     // the durable conversation entirely.
-    // The only declared projection, `phase`, is unset at this first-phase
-    // failure, so the shell omits the context block instead of exposing the
-    // rest of `CodeContext`.
+    // CODE's declared projection (`phaseOutcome`, `irNumber`, `codeCommit`,
+    // `evaluatedRevision`) is unset at this first-phase failure, so the shell
+    // omits the context block instead of exposing the rest of `CodeContext`.
     expect(decision!.prompt).not.toContain('Leaf context:');
     for (const excluded of [
       'irNumber',
@@ -3423,7 +3444,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       'Last error: {"name":"Error","message":"coder exploded"}',
     );
     expect(decision!.prompt).toContain(
-      '- retry:START_CODE: Retry: Coder is running the first coding phase: a direct implementation, a new intent record, or an existing intent-record task.',
+      '- retry:START_CODE: Retry: Coder runs the first coding phase: a direct implementation, a new IR, or the next task of an existing IR.',
     );
     // The healthy path carries no journal-derived recap.
     expect(decision!.prompt).not.toContain('[Conversation recap]');
@@ -3437,7 +3458,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(closing).toContain('- Applied "retry:START_CODE" on /code.');
     // The settled leaf reaches the result phase by its meaning too.
     expect(closing).toContain(
-      'state: Waiting for Boss to answer Coder.',
+      "state: Waiting for Boss to answer the acting agent's question.",
     );
     expect(closing).not.toContain('awaitBossReply');
     expect(harness.surfaced.at(-1)).toBe(
@@ -3456,7 +3477,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       // Grounded in the state's meaning, and carrying no raw state id — the
       // reply reflects what the digest gave it, and the digest gave it prose.
       expect(reply).toContain(
-        'state: Waiting for Boss to answer Coder.',
+        "state: Waiting for Boss to answer the acting agent's question.",
       );
       expect(reply).not.toContain('awaitBossReply');
     }
@@ -3533,7 +3554,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // the same label, as the process that reached the failure.
     const decision = continued.decisionPrompts().at(-1) ?? '';
     expect(decision).toContain(
-      '- retry:START_CODE: Retry: Coder is running the first coding phase: a direct implementation, a new intent record, or an existing intent-record task.',
+      '- retry:START_CODE: Retry: Coder runs the first coding phase: a direct implementation, a new IR, or the next task of an existing IR.',
     );
     // And it was applied for real: the coder ran again in this process, once.
     expect(continued.playerCalls).toHaveLength(1);
@@ -3578,13 +3599,13 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // then the rider-less suspension marker (DR-007 path).
     expect(harness.statuses).toContain(`coder asks: ${CODE_PENDING_QUESTION}`);
     expect(harness.statuses).toContain(
-      '◆ awaiting Boss reply · runFirstPhase · coder · CODE-1',
+      '◆ awaiting Boss reply · firstPhase · coder · CODE-1',
     );
     const statusTail = harness.statuses.slice(-3);
     expect(statusTail).toEqual([
       '→ needsBossReply',
       `coder asks: ${CODE_PENDING_QUESTION}`,
-      '◆ awaiting Boss reply · runFirstPhase · coder · CODE-1',
+      '◆ awaiting Boss reply · firstPhase · coder · CODE-1',
     ]);
     const parked = code.runtimes[0]!.describe!();
     expect(parked.state.stateId).toBe('awaitBossReply');
@@ -3651,7 +3672,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     // description CODE's source publishes, so that is what a grounded answer
     // can say.
     expect(harness.surfaced.at(-1)).toContain(
-      'state: Waiting for Boss to answer Coder.',
+      "state: Waiting for Boss to answer the acting agent's question.",
     );
     expect(harness.surfaced.at(-1)).not.toContain('awaitBossReply');
     expect(harness.surfaced.at(-1)).toContain(CODE_PENDING_QUESTION);
@@ -3696,11 +3717,12 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     const failureReport = [
       '',
       '',
-      'Failure: the coder call failed: coder exploded.',
+      'Failure: the coder call failed with the error `coder exploded`.',
       'Controls:',
-      '- Retry: Coder is running the first coding phase: a direct ' +
-        'implementation, a new intent record, or an existing intent-record ' +
-        'task. (ready)',
+      '- Retry: Coder runs the first coding phase: a direct ' +
+        'implementation, a new IR, or the next task of an existing IR. (ready)',
+      '- Resume from: Coder runs the first coding phase: a direct ' +
+        'implementation, a new IR, or the next task of an existing IR. (ready)',
       '- Stop /code (ready)',
     ].join('\n');
     expect(harness.surfaced.slice(-2)).toEqual([
@@ -3711,19 +3733,20 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(JSON.stringify(runtime.describe!())).toBe(before);
   });
 
-  // A29-19: the real compiled DECIDE artifact exposes only unresolved-effect
-  // actions. Its ordinary failed view has no action, which bounds machine
-  // verbs against that leaf without bounding the conversation.
+  // A29-19: the real compiled DECIDE artifact advertises only what its leaf
+  // offers — on the ordinary failed view, the shared engine's retry of the
+  // recorded topic (DR-067) — which bounds machine verbs against that leaf
+  // without bounding the conversation.
   it('bounds machine verbs on an ordinary failed DECIDE leaf', async () => {
     const decide = realEntry(decideRegistryEntry);
     const harness = realArtifactHarness([decide], {
       players: () => ({ status: 'error', error: 'proposal agent stopped' }),
-      decide: (prompt, advertised) =>
-        advertised.length > 0
+      decide: (prompt, advertised, boss) =>
+        /retry/i.test(boss) && advertised.length > 0
           ? { action: 'runtime', actionId: advertised[0] }
           : {
               action: 'respond',
-              text: `No machine action is offered; ${
+              text: `No machine action was requested; ${
                 /\nLeaf state: (.*)\n/.exec(prompt)?.[1] ?? 'unknown'
               }`,
             },
@@ -3731,26 +3754,36 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     await harness.init();
     await harness.turn('/decide the retry policy', 1);
 
-    // The DR-022 gate sees the pair, while the ordinary failure state offers
-    // no unresolved-effect action.
+    // The DR-022 gate sees the pair, and the ordinary failure state offers
+    // exactly its retry.
     const runtime = decide.runtimes[0]!;
     expect(runtime.describe).toBeTypeOf('function');
     expect(runtime.apply).toBeTypeOf('function');
     expect(runtime.describe!()).toMatchObject({
-      stateDescription: 'DECIDE failed and is waiting for a new topic.',
-      actions: [],
+      stateDescription:
+        'DECIDE parked after a control-plane failure and waits for Boss to restart or resume it.',
+      actions: [
+        {
+          id: 'retry:START_DECIDE',
+          label:
+            'Retry: Coder and Reviewer independently propose designs for the topic in parallel.',
+          standing: 'ready',
+        },
+      ],
     });
 
     const before = harness.playerCalls.length;
     await harness.turn('Where are we right now?', 2);
 
     const digest = harness.decisionPrompts().at(-1) ?? '';
-    expect(digest).toContain('DECIDE failed and is waiting for a new topic.');
-    expect(digest).toContain('Advertised actions: none.');
+    expect(digest).toContain(
+      'DECIDE parked after a control-plane failure and waits for Boss to restart or resume it.',
+    );
+    expect(advertisedActionIds(digest)).toEqual(['retry:START_DECIDE']);
     // The status question settled `respond` on the published control view:
     // no delivery, no FSM event, no apply.
     expect(harness.playerCalls.length).toBe(before);
-    expect(harness.surfaced.at(-1)).toContain('No machine action is offered');
+    expect(harness.surfaced.at(-1)).toContain('No machine action was requested');
     expect(
       harness.telemetry.filter(
         (event) =>
@@ -3764,14 +3797,15 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
 
   // CAPTAIN-37 / DR-037: DECIDE's terminal result remains the runtime-owned
   // channel that carries the exact meaning of the final state into the root
-  // completion fact; its unresolved-only control pair supplies no substitute
-  // outcome authority.
+  // completion fact; its control pair supplies no substitute outcome
+  // authority.
   it.each([
     {
       label: 'approval-backed completion',
       reviewResult: 'approved' as const,
       terminalId: 'done',
-      meaning: 'DECIDE completed with an approved commit.',
+      meaning:
+        'DECIDE completed: review established no unsettled findings for the decide-owned commit at the reported evaluated revision.',
       hiddenOutputKeys: [
         'decideCommit',
         'evaluatedRevision',
@@ -3782,7 +3816,8 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
       label: 'REVIEW failure report',
       reviewResult: 'aborted' as const,
       terminalId: 'reportedReviewFailure',
-      meaning: 'DECIDE reports REVIEW’s failure and its last commit.',
+      meaning:
+        "DECIDE reported review's abort, failure, or unestablished result to its caller with the last decide-owned commit.",
       hiddenOutputKeys: [
         'lastDecideCommit',
         'noUnsettledFindings',
@@ -3835,12 +3870,12 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
         'one-descendant-commit',
       ],
       adjudicate: (prompt) => {
-        if (prompt.includes('source item DECIDE-3')) {
+        if (decideSourceItemOf(prompt) === 'DECIDE-3') {
           return { guard: 'committed' };
         }
         if (
-          prompt.includes('source item DECIDE-1') ||
-          prompt.includes('source item DECIDE-2')
+          decideSourceItemOf(prompt) === 'DECIDE-1' ||
+          decideSourceItemOf(prompt) === 'DECIDE-2'
         ) {
           return { guard: 'proposed' };
         }
@@ -3862,8 +3897,8 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     );
     expect(commitPlayerPrompt).toBeDefined();
     expect(commitPlayerPrompt).not.toContain('Commit:');
-    const commitAdjudicationPrompt = harness.captainCalls.find(({ prompt }) =>
-      prompt.includes('source item DECIDE-3'),
+    const commitAdjudicationPrompt = harness.captainCalls.find(
+      ({ prompt }) => decideSourceItemOf(prompt) === 'DECIDE-3',
     )?.prompt;
     expect(commitAdjudicationPrompt).toContain(
       'The spec-design change is committed.',
@@ -4311,8 +4346,9 @@ describe('CAPTAIN-38 validated actions and command table', () => {
     await harness.turn('/docs write it up', 2);
 
     const closing = harness.closingPrompts().at(-1) ?? '';
-    expect(closing).toContain('its disposal failed');
-    expect(closing).toContain('code dispose exploded');
+    expect(closing).toContain(
+      'Dismissing /code failed with the error `code dispose exploded`.',
+    );
     expect(closing).toContain('Started /docs with the selected request.');
     expect(docs.runtimes[0]?.inputs).toEqual(['write it up']);
 
@@ -4458,9 +4494,12 @@ describe('CAPTAIN-38 validated actions and command table', () => {
     expect(closing).toContain(
       'Receipt error: {"name":"Error","message":"coder exploded"}',
     );
-    expect(closing).toContain(
-      '- Applying "retry:START_CODE" failed: Error: coder exploded.',
-    );
+    // The retry's re-run failed with the error the parked leaf records, so
+    // the leaf's cause restates the receipt's fact in its place rather than
+    // joining beside it: one failure, one fact (CAPTAIN-67).
+    expect(closing.split('\n').filter((line) => line.includes('failed:'))).toEqual([
+      '- Applying "retry:START_CODE" failed: the coder call failed with the error `coder exploded`.',
+    ]);
     // The effects are in the traces: the action started, ran a player, and
     // finished carrying the `failed` disposition.
     const traceTypes = harness.telemetry
@@ -4480,9 +4519,10 @@ describe('CAPTAIN-38 validated actions and command table', () => {
     expect(harness.playerCalls).toHaveLength(2);
   });
 
-  // The current CODE machine exposes no BOSS_INTERRUPT jump target. A named
-  // state therefore cannot become a machine action unless the runtime
-  // advertises it; the session Captain keeps the failed run untouched.
+  // CODE's IR-task jump target is guarded on an identified IR, which this
+  // first-phase failure lacks. A named state therefore cannot become a machine
+  // action unless the runtime advertises it; the session Captain keeps the
+  // failed run untouched.
   it('does not invent a jump action for an unadvertised state', async () => {
     const code = realEntry(codeRegistryEntry);
     const harness = realArtifactHarness([code], {
@@ -4509,24 +4549,27 @@ describe('CAPTAIN-38 validated actions and command table', () => {
         (event.payload as { type?: unknown }).type === 'apply.started',
     ).length;
 
-    await harness.turn('resume from runFirstPhase', 2);
+    await harness.turn('resume from irTaskPhase', 2);
 
-    // The digest carries only the retry derived from the recorded entry
-    // event, so the prompt-reading controller selects `respond`.
+    // The digest carries the retry derived from the recorded entry event and
+    // the live first-phase jump, but no jump into the unadvertised IR-task
+    // phase, so the prompt-reading controller selects `respond`.
     const digest = harness.decisionPrompts().at(-1) ?? '';
     expect(digest).toContain(
-      '- retry:START_CODE: Retry: Coder is running the first coding phase: a direct implementation, a new intent record, or an existing intent-record task.',
+      '- retry:START_CODE: Retry: Coder runs the first coding phase: a direct implementation, a new IR, or the next task of an existing IR.',
     );
-    expect(digest).not.toContain('jump:');
+    expect(digest).toContain('- jump:firstPhase: ');
+    expect(digest).not.toContain('jump:irTaskPhase');
     expect(harness.surfaced.at(-1)).toBe(
       [
         'Only the advertised retry is available for this run.',
         '',
-        'Failure: the coder call failed: coder exploded.',
+        'Failure: the coder call failed with the error `coder exploded`.',
         'Controls:',
-        '- Retry: Coder is running the first coding phase: a direct ' +
-          'implementation, a new intent record, or an existing intent-record ' +
-          'task. (ready)',
+        '- Retry: Coder runs the first coding phase: a direct ' +
+          'implementation, a new IR, or the next task of an existing IR. (ready)',
+        '- Resume from: Coder runs the first coding phase: a direct ' +
+          'implementation, a new IR, or the next task of an existing IR. (ready)',
         '- Stop /code (ready)',
       ].join('\n'),
     );
@@ -5549,7 +5592,7 @@ describe('CAPTAIN-39 durable continuity', () => {
   // rather than prompted. The prompt-side facts name the action by its id and
   // quote runtime-authored text nobody validated; the spoken form names the
   // runtime's own label and passes the same validation every reply passes.
-  it('speaks the settlement by label and drops facts that fail validation', async () => {
+  it('speaks the settlement by label and keeps foreign text in its code span', async () => {
     const receipts: PlaybookControlReceipt[] = [
       {
         disposition: 'executed',
@@ -5607,12 +5650,20 @@ describe('CAPTAIN-39 durable continuity', () => {
     expect(executed).not.toContain('BOSS_TURN');
 
     // Leg 2: the same settlement carrying a runtime-authored error message
-    // that is control vocabulary. The facts cannot be spoken, so they are
-    // dropped — the reply still states the settlement and the next step.
+    // that names control vocabulary. The message is shown once, as recorded,
+    // inside its code span, and no fact is lost for it: CAPTAIN-9 holds for
+    // the words outside the span, and the action id still reaches no Boss.
     await harness.turn('try it once more', 3);
     const failed = harness.surfaced.at(-1)!;
-    expect(failed).not.toContain('BOSS_REPLY');
-    expect(failed).not.toContain('Here is what happened');
+    expect(failed).toContain(
+      [
+        'Here is what happened:',
+        '- Applying "Retry the failed step" failed with the error `guard lookup exploded while replaying BOSS_REPLY`.',
+        'Ask me where things stand and I will report the current state.',
+      ].join('\n'),
+    );
+    expect(failed.replace(/`[^`]*`/g, '')).not.toContain('BOSS_REPLY');
+    expect(failed).not.toContain('retry:BOSS_TURN');
     expect(failed).toContain('The action ended with a failure');
     expect(failed).toContain(
       'Ask me where things stand and I will report the current state.',
@@ -6281,6 +6332,71 @@ describe('CAPTAIN-40 injection and prose validation', () => {
       'Handing the request to the coding run now.',
     ]);
     expect(JSON.stringify(harness.surfaced)).not.toContain('"action"');
+  });
+
+  // CAPTAIN-9: prose returned in the `respond` routing shape is prose. A live
+  // closing reply answered as that envelope twice, spending the one re-ask and
+  // then the whole reply, so the shell reads exactly that shape as its `text`
+  // and the first call's words reach the Boss.
+  it('surfaces a closing reply given as the respond envelope as its text', async () => {
+    const text = 'CODE is working on the parser fix now.';
+    const code = shellEntry('code', 'code');
+    const harness = makeShellHarness(
+      [code],
+      [
+        {
+          status: 'ok',
+          finalText: `\n  ${JSON.stringify({ action: 'respond', text })}  \n`,
+        },
+      ],
+    );
+    await harness.init();
+    await harness.turn('/code fix the parser', 1);
+
+    expect(harness.captainCalls).toHaveLength(1);
+    expect(harness.closingPrompts()).toHaveLength(1);
+    expect(
+      harness.captainCalls.filter((call) =>
+        call.prompt.includes('[Reply rejected]'),
+      ),
+    ).toEqual([]);
+    expect(harness.surfaced).toEqual([text]);
+    expect(JSON.stringify(harness.surfaced)).not.toContain('"action"');
+  });
+
+  // CAPTAIN-9: only exactly that envelope is prose. One carrying any other
+  // member is control JSON like every other, refused with the one re-ask.
+  it('refuses a respond envelope carrying another member', async () => {
+    const code = shellEntry('code', 'code');
+    const harness = makeShellHarness(
+      [code],
+      [
+        {
+          status: 'ok',
+          finalText: JSON.stringify({
+            action: 'respond',
+            text: 'CODE is working on the parser fix now.',
+            playbook: 'code',
+          }),
+        },
+        (prompt) => {
+          expect(prompt).toContain('[Reply rejected]');
+          expect(prompt).toContain(
+            'the reply leaked hidden control syntax or internal control vocabulary',
+          );
+          return { status: 'ok', finalText: 'Started CODE on the parser fix.' };
+        },
+      ],
+    );
+    await harness.init();
+    await harness.turn('/code fix the parser', 1);
+
+    expect(
+      harness.captainCalls.filter((call) =>
+        call.prompt.includes('[Reply rejected]'),
+      ),
+    ).toHaveLength(1);
+    expect(harness.surfaced).toEqual(['Started CODE on the parser fix.']);
   });
 
   // CAPTAIN-9's live-session-identifier duty: the rejectable set is read from

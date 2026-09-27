@@ -10,7 +10,11 @@ import {
   parseGearsContract,
   verbatimFieldsFromGears,
 } from '../../../scripts/check-slc-source-gears.mjs';
-import { devMachine, type DevContext } from './dev.fsm.js';
+import {
+  concurrentRoleSets,
+  devMachine,
+  type DevContext,
+} from './dev.fsm.js';
 import {
   enumerateNestedPlaybookStates,
   enumeratePlayerStates,
@@ -32,7 +36,7 @@ const byId = new Map(gears.map((item) => [item.id, item]));
 interface RawTransition {
   guard?: string;
   target?: string;
-  actions?: string;
+  actions?: unknown;
 }
 
 interface RawChildState {
@@ -52,9 +56,14 @@ const NESTED_ITEM_IDS: readonly NestedItemId[] = [
   'DEV-6',
 ];
 
-const CHILD_FAILURE_OUTCOMES = [
-  '- Any other nested-call error parks `dev` as failed and retains the control-plane error.',
-];
+// Each nested item carries the source's control-plane rule for its own child.
+const NESTED_CHILD: Readonly<Record<NestedItemId, string>> = {
+  'DEV-2': 'code',
+  'DEV-3': 'decide',
+  'DEV-4': 'code',
+  'DEV-5': 'branch',
+  'DEV-6': 'pr',
+};
 
 // The DEV-2, DEV-3, and DEV-4 blockquotes as the pre-DR-050 artifact
 // compiled them: DR-050 keeps the plain paths' prompts and templates
@@ -81,6 +90,23 @@ function arms(value: unknown): readonly RawTransition[] {
   return (Array.isArray(value) ? value : [value]) as RawTransition[];
 }
 
+// An action list rendered as its names, each parameterized action with the
+// playbook id its params name, so an arm's outcome reads at a glance.
+function actionLabels(actions: unknown): string {
+  const list = actions === undefined ? [] : Array.isArray(actions) ? actions : [actions];
+  return list
+    .map((action) => {
+      if (typeof action === 'string') return action;
+      const { type, params } = action as {
+        type: string;
+        params?: { playbookId?: string; childPlaybookId?: string };
+      };
+      const id = params?.playbookId ?? params?.childPlaybookId;
+      return id === undefined ? type : `${type}(${id})`;
+    })
+    .join(',');
+}
+
 function route(transition: RawTransition | undefined) {
   return {
     guard: transition?.guard,
@@ -92,11 +118,10 @@ function route(transition: RawTransition | undefined) {
 const CONTEXT: DevContext = {
   runResults: '',
   developmentRequest: 'Plan the request.',
-  discussionExchanges: [],
+  discussionContext: '',
   planningResult: 'Proceed with code.',
   decideCommit: 'abc123',
   evaluatedRevision: 'def456',
-  deliveryViaPullRequest: false,
 };
 
 describe('DEV Source, GEARS, and FSM agreement', () => {
@@ -126,6 +151,8 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
     expect(gearsText).toContain('Roles:\n\n- Analyst\n');
     expect(devRegistry.requiredRoleIds).toEqual(['analyst']);
     expect(devRegistry.concurrentRoleSets).toEqual([]);
+    // playbook-1: the FSM export and the manifest declare the same sets.
+    expect(concurrentRoleSets).toEqual(devRegistry.concurrentRoleSets);
     expect(devRegistry.artifactSchema).toBe(3);
     expect(devRegistry.runtimeProfile).toEqual({
       kind: 'shared-factory',
@@ -160,6 +187,22 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
       'Discussion complete is available only after a Boss reply, when that reply settles that no repository work should follow.',
     ]) {
       expect(source).toContain(clause);
+    }
+    // playbook-1: DEV-1 carries each authored outcome, the last attached to
+    // its own `discussionComplete` result.
+    const planning = gearsText.slice(
+      gearsText.indexOf('### DEV-1'),
+      gearsText.indexOf('### DEV-2'),
+    );
+    for (const clause of [
+      'The planning result has six semantic outcomes: needs Boss reply, discussion complete, code, decide then code, code via pull request, and decide then code via pull request.',
+      "Each outcome requires affirmative support in Analyst's result; absence of a reason to choose another outcome is not support.",
+      "No outcome depends on a fixed presentation format of Analyst's reply.",
+      '`dev` shall act on the accepted outcome itself and shall not return to the session Captain for another routing decision.',
+      "For needs Boss reply, `dev` shall use the standard Boss-question suspension with Analyst's complete response;",
+      '- `discussionComplete`: After a Boss reply that settles that no repository work should follow, Analyst concluded the discussion; dev completes without a child call or repository change.',
+    ]) {
+      expect(planning).toContain(clause);
     }
     const item = byId.get('DEV-1');
     expect(item?.results.map(({ guard }) => guard)).toEqual([
@@ -259,39 +302,39 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
       config: { states: Record<string, RawChildState> };
     }).config.states;
     const planning = arms(states.planAnalysis?.invoke?.onDone);
-    expect(planning.find((arm) => arm.guard === 'isCodePath')?.target).toBe(
+    expect(planning.find((arm) => arm.guard === 'codePlanned')?.target).toBe(
       'callCode',
     );
     expect(
-      planning.find((arm) => arm.guard === 'isDecideThenCode')?.target,
+      planning.find((arm) => arm.guard === 'decideThenCodePlanned')?.target,
     ).toBe('callDecide');
+    const plainCodeSuccess = {
+      guard: 'codeSucceededOnPlainPath',
+      target: 'done',
+      actions: {
+        type: 'completeWithChildSuccess',
+        params: { childPlaybookId: 'code' },
+      },
+    };
     expect(
       arms(states.callCode?.invoke?.onDone).find(
-        (arm) => arm.guard === 'isPlainCodeSuccess',
+        (arm) => arm.guard === 'codeSucceededOnPlainPath',
       ),
-    ).toEqual({
-      guard: 'isPlainCodeSuccess',
-      target: 'done',
-      actions: 'completeWithChildSuccess',
-    });
+    ).toEqual(plainCodeSuccess);
     expect(
       arms(states.callDecide?.invoke?.onDone).find(
-        (arm) => arm.guard === 'isDecideSuccess',
+        (arm) => arm.guard === 'decideSucceeded',
       ),
     ).toEqual({
-      guard: 'isDecideSuccess',
+      guard: 'decideSucceeded',
       target: 'callCodeAfterDecide',
       actions: 'rememberDecideResult',
     });
     expect(
       arms(states.callCodeAfterDecide?.invoke?.onDone).find(
-        (arm) => arm.guard === 'isPlainCodeSuccess',
+        (arm) => arm.guard === 'codeSucceededOnPlainPath',
       ),
-    ).toEqual({
-      guard: 'isPlainCodeSuccess',
-      target: 'done',
-      actions: 'completeWithChildSuccess',
-    });
+    ).toEqual(plainCodeSuccess);
   });
 
   it('pins every authored child outcome to its compiled route', () => {
@@ -310,27 +353,51 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
     ]) {
       expect(source).toContain(clause);
     }
+    // Each nested item states the source's relay and park rules for its own
+    // child, and the identity rule where its child supplies identities.
     for (const id of NESTED_ITEM_IDS) {
-      for (const outcome of CHILD_FAILURE_OUTCOMES) {
-        expect(gearsSection(id), id).toContain(outcome);
-      }
+      const child = NESTED_CHILD[id];
+      expect(gearsSection(id), id).toContain(
+        `If \`${child}\` returns an authored abort or failure, or a terminal result that does not prove the success required for the selected path, \`dev\` shall`,
+      );
+      expect(gearsSection(id), id).toContain(
+        `If the \`${child}\` call fails outside its authored result contract, \`dev\` shall park as failed and retain the control-plane error.`,
+      );
+      expect(gearsSection(id), id).toContain(
+        "`dev` shall consume commit, revision, branch, and pull-request identities only from each child's canonical structured result, never from player prose.",
+      );
+    }
+    for (const id of ['DEV-2', 'DEV-3', 'DEV-4', 'DEV-5'] as const) {
+      expect(gearsSection(id), id).toContain('`dev` shall start no later child');
+    }
+    for (const id of ['DEV-3', 'DEV-4'] as const) {
+      expect(gearsSection(id), id).toContain(
+        '`dev` shall not separately call `review` for the design scope already reviewed by `decide`.',
+      );
     }
     expect(gearsSection('DEV-3')).toContain(
-      '- `dev` does not separately call `review` for the design scope already reviewed by `decide`.',
+      "Only after `decide` succeeds shall `dev` call playbook `code` with the `decide`-owned commit and exact evaluated repository revision from `decide`'s canonical structured result.",
     );
-    for (const id of ['DEV-2', 'DEV-4'] as const) {
-      expect(gearsSection(id)).toContain(
-        '- On a plain path, `code` success completes `dev` with the successful `code` result.',
-      );
-      expect(gearsSection(id)).toContain(
-        "- On a pull-request path, `code` success provides the exact last `code`-owned commit and the exact final evaluated repository revision from `code`'s canonical structured result and continues with the `pr` call.",
-      );
-    }
+    expect(gearsSection('DEV-2')).toContain(
+      'On the code path, `code` success completes `dev` with that successful `code` result; a plain request calls neither `branch` nor `pr`.',
+    );
+    expect(gearsSection('DEV-2')).toContain(
+      'On the code via pull request path, only after `code` succeeds shall `dev` call playbook `pr`.',
+    );
+    expect(gearsSection('DEV-4')).toContain(
+      'On the decide then code path, `code` success completes `dev` with that successful `code` result; a plain request calls neither `branch` nor `pr`.',
+    );
+    expect(gearsSection('DEV-4')).toContain(
+      'On the decide then code via pull request path, only after `code` succeeds shall `dev` call playbook `pr`.',
+    );
     expect(gearsSection('DEV-5')).toContain(
-      '- A plain request calls neither `branch` nor `pr`.',
+      'Only after `branch` succeeds shall `dev` continue with the `code` call for code via pull request, or the `decide` call and then the `code` call for decide then code via pull request, each with the same input as its plain path.',
     );
     expect(gearsSection('DEV-6')).toContain(
-      '- `pr` success completes `dev` with the successful `pr` result.',
+      "The branch and base revision come from `branch`'s canonical structured result, and the last `code`-owned commit and exact final evaluated repository revision come from the successful `code` call's canonical structured result.",
+    );
+    expect(gearsSection('DEV-6')).toContain(
+      '`pr` success completes `dev` with that successful `pr` result.',
     );
 
     const states = (devMachine as unknown as {
@@ -366,24 +433,30 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
       prControlFailure: route(arms(openPullRequest?.onError)[1]),
     }).toEqual({
       branchForCode: {
-        guard: 'isBranchSuccessForCode',
+        guard: 'branchSucceededForCode',
         target: 'callCode',
         actions: 'rememberBranchResult',
       },
       branchForDecide: {
-        guard: 'isBranchSuccessForDecide',
+        guard: 'branchSucceededForDecide',
         target: 'callDecide',
         actions: 'rememberBranchResult',
       },
       branchInsufficient: {
         guard: undefined,
         target: 'reportedChildFailure',
-        actions: 'completeWithInsufficientBranchResult',
+        actions: {
+          type: 'completeWithInsufficientResult',
+          params: { playbookId: 'branch' },
+        },
       },
       branchAuthoredFailure: {
-        guard: 'authoredBranchFailure',
+        guard: 'authoredBranchResult',
         target: 'reportedChildFailure',
-        actions: 'completeWithBranchFailure',
+        actions: {
+          type: 'completeWithAuthoredChildResult',
+          params: { playbookId: 'branch' },
+        },
       },
       branchControlFailure: {
         guard: undefined,
@@ -391,24 +464,33 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
         actions: 'rememberActorError',
       },
       codeSuccessViaPullRequest: {
-        guard: 'isCodeSuccessViaPullRequest',
+        guard: 'codeSucceededOnPullRequestPath',
         target: 'openPullRequest',
         actions: 'rememberCodeResult',
       },
       codeSuccess: {
-        guard: 'isPlainCodeSuccess',
+        guard: 'codeSucceededOnPlainPath',
         target: 'done',
-        actions: 'completeWithChildSuccess',
+        actions: {
+          type: 'completeWithChildSuccess',
+          params: { childPlaybookId: 'code' },
+        },
       },
       codeInsufficient: {
         guard: undefined,
         target: 'reportedChildFailure',
-        actions: 'completeWithInsufficientCodeResult',
+        actions: {
+          type: 'completeWithInsufficientResult',
+          params: { playbookId: 'code' },
+        },
       },
       codeAuthoredFailure: {
-        guard: 'authoredCodeFailure',
+        guard: 'authoredCodeResult',
         target: 'reportedChildFailure',
-        actions: 'completeWithCodeFailure',
+        actions: {
+          type: 'completeWithAuthoredChildResult',
+          params: { playbookId: 'code' },
+        },
       },
       codeControlFailure: {
         guard: undefined,
@@ -416,19 +498,25 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
         actions: 'rememberActorError',
       },
       decideSuccess: {
-        guard: 'isDecideSuccess',
+        guard: 'decideSucceeded',
         target: 'callCodeAfterDecide',
         actions: 'rememberDecideResult',
       },
       decideInsufficient: {
         guard: undefined,
         target: 'reportedChildFailure',
-        actions: 'completeWithInsufficientDecideResult',
+        actions: {
+          type: 'completeWithInsufficientResult',
+          params: { playbookId: 'decide' },
+        },
       },
       decideAuthoredFailure: {
-        guard: 'authoredDecideFailure',
+        guard: 'authoredDecideResult',
         target: 'reportedChildFailure',
-        actions: 'completeWithDecideFailure',
+        actions: {
+          type: 'completeWithAuthoredChildResult',
+          params: { playbookId: 'decide' },
+        },
       },
       decideControlFailure: {
         guard: undefined,
@@ -436,24 +524,33 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
         actions: 'rememberActorError',
       },
       finalSuccessViaPullRequest: {
-        guard: 'isCodeSuccessViaPullRequest',
+        guard: 'codeSucceededOnPullRequestPath',
         target: 'openPullRequest',
         actions: 'rememberCodeResult',
       },
       finalSuccess: {
-        guard: 'isPlainCodeSuccess',
+        guard: 'codeSucceededOnPlainPath',
         target: 'done',
-        actions: 'completeWithChildSuccess',
+        actions: {
+          type: 'completeWithChildSuccess',
+          params: { childPlaybookId: 'code' },
+        },
       },
       finalInsufficient: {
         guard: undefined,
         target: 'reportedChildFailure',
-        actions: 'completeWithInsufficientCodeResult',
+        actions: {
+          type: 'completeWithInsufficientResult',
+          params: { playbookId: 'code' },
+        },
       },
       finalAuthoredFailure: {
-        guard: 'authoredCodeFailure',
+        guard: 'authoredCodeResult',
         target: 'reportedChildFailure',
-        actions: 'completeWithCodeFailure',
+        actions: {
+          type: 'completeWithAuthoredChildResult',
+          params: { playbookId: 'code' },
+        },
       },
       finalControlFailure: {
         guard: undefined,
@@ -463,12 +560,18 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
       prSuccess: {
         guard: undefined,
         target: 'done',
-        actions: 'completeWithChildSuccess',
+        actions: {
+          type: 'completeWithChildSuccess',
+          params: { childPlaybookId: 'pr' },
+        },
       },
       prAuthoredFailure: {
-        guard: 'authoredPrFailure',
+        guard: 'authoredPrResult',
         target: 'reportedChildFailure',
-        actions: 'completeWithPrFailure',
+        actions: {
+          type: 'completeWithAuthoredChildResult',
+          params: { playbookId: 'pr' },
+        },
       },
       prControlFailure: {
         guard: undefined,
@@ -511,7 +614,7 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
         }
         entering.set(arm.target, [
           ...(entering.get(arm.target) ?? []),
-          String(arm.actions),
+          actionLabels(arm.actions),
         ]);
       }
     }
@@ -519,9 +622,9 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
     // Every arm entering a terminal state carries that state's own outcome,
     // so the description a host quotes holds however the run arrived there.
     expect(entering.get('done')).toEqual([
-      'completeWithChildSuccess',
-      'completeWithChildSuccess',
-      'completeWithChildSuccess',
+      'completeWithChildSuccess(code)',
+      'completeWithChildSuccess(code)',
+      'completeWithChildSuccess(pr)',
     ]);
     expect(
       entering
@@ -529,21 +632,21 @@ describe('DEV Source, GEARS, and FSM agreement', () => {
         ?.map((actions) => actions.includes('completeDiscussion')),
     ).toEqual([true]);
     expect(entering.get('reportedChildFailure')?.sort()).toEqual([
-      'completeWithBranchFailure',
-      'completeWithCodeFailure',
-      'completeWithCodeFailure',
-      'completeWithDecideFailure',
-      'completeWithInsufficientBranchResult',
-      'completeWithInsufficientCodeResult',
-      'completeWithInsufficientCodeResult',
-      'completeWithInsufficientDecideResult',
-      'completeWithPrFailure',
+      'completeWithAuthoredChildResult(branch)',
+      'completeWithAuthoredChildResult(code)',
+      'completeWithAuthoredChildResult(code)',
+      'completeWithAuthoredChildResult(decide)',
+      'completeWithAuthoredChildResult(pr)',
+      'completeWithInsufficientResult(branch)',
+      'completeWithInsufficientResult(code)',
+      'completeWithInsufficientResult(code)',
+      'completeWithInsufficientResult(decide)',
     ]);
     expect(states.discussionComplete?.description).toContain(
-      'no repository work',
+      'no child call or repository change',
     );
     expect(states.done?.description).toContain('successful result');
-    expect(states.reportedChildFailure?.description).toContain('relayed');
+    expect(states.reportedChildFailure?.description).toContain('relaying');
     expect(states.reportedChildFailure?.description).not.toContain(
       'successful result',
     );

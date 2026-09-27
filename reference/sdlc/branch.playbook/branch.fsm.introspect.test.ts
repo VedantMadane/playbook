@@ -37,7 +37,7 @@ describe('BRANCH FSM introspection', () => {
     ]);
   });
 
-  it('exposes one entry, empty-reply failure, and one resume arm', () => {
+  it('exposes one entry, one resume arm, and the malformed-reply failure', () => {
     expect(enumerateRootEvents(branchMachine)).toEqual({
       startBranch: { target: 'createBranch' },
     });
@@ -45,6 +45,6 @@ describe('BRANCH FSM introspection', () => {
       enumerateAwaitBossReply(branchMachine).bossReplyTransitions.map(
         ({ target }) => target,
       ),
-    ).toEqual(['failed', 'createBranch']);
+    ).toEqual(['createBranch', 'failed']);
   });
 });

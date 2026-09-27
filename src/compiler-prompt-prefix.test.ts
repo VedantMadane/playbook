@@ -19,12 +19,12 @@ const definition = readFileSync(new URL('../slc/prefix.md', import.meta.url), 'u
 const SECTION = '## Prefixed prompts';
 
 const workflows = [
-  { id: 'code', prefixed: ['CODE-1', 'CODE-3'] },
-  { id: 'review', prefixed: ['REVIEW-1', 'REVIEW-2', 'REVIEW-3', 'REVIEW-4'] },
-  { id: 'decide', prefixed: ['DECIDE-1', 'DECIDE-2'] },
-  { id: 'dev', prefixed: ['DEV-1'] },
-  { id: 'branch', prefixed: ['BRANCH-1'] },
-  { id: 'pr', prefixed: ['PR-1'] },
+  { id: 'code', prefixed: ['CODE-1', 'CODE-3'], nested: ['CODE-2', 'CODE-4'] },
+  { id: 'review', prefixed: ['REVIEW-1', 'REVIEW-2', 'REVIEW-3', 'REVIEW-4'], nested: [] },
+  { id: 'decide', prefixed: ['DECIDE-1', 'DECIDE-2'], nested: ['DECIDE-4'] },
+  { id: 'dev', prefixed: ['DEV-1'], nested: ['DEV-2', 'DEV-3', 'DEV-4', 'DEV-5', 'DEV-6'] },
+  { id: 'branch', prefixed: ['BRANCH-1'], nested: [] },
+  { id: 'pr', prefixed: ['PR-1'], nested: ['PR-3'] },
 ] as const;
 
 function reference(id: string): { source: string; gears: string } {
@@ -53,6 +53,37 @@ function prefix(
   return { text: readFileSync(target, 'utf8'), stdout };
 }
 
+/**
+ * A relay-first pre-image of a GEARS the pass already rewrote: the trailing
+ * relay block of each named item's prompt moves back to the head of its
+ * blockquote. For REVIEW-2 this is exactly its Source order, and the shipped
+ * tool rewrites the result back to the maintained GEARS byte for byte.
+ */
+function relayFirst(gears: string, ids: readonly string[]): string {
+  const lines = gears.split('\n');
+  const out: string[] = [];
+  let item: string | undefined;
+  for (let index = 0; index < lines.length; ) {
+    if (/^#{1,3}\s/.test(lines[index])) item = /^###\s+(\S+)\s*$/.exec(lines[index])?.[1];
+    if (!lines[index].startsWith('>') || item === undefined || !ids.includes(item)) {
+      out.push(lines[index++]);
+      continue;
+    }
+    let end = index;
+    while (end < lines.length && lines[end].startsWith('>')) end++;
+    const quote = lines.slice(index, end);
+    let relay = quote.length;
+    while (relay > 0 && quote[relay - 1].startsWith('> > ')) relay--;
+    out.push(
+      ...(relay > 1 && relay < quote.length && quote[relay - 1] === '>'
+        ? [...quote.slice(relay), '>', ...quote.slice(0, relay - 1)]
+        : quote),
+    );
+    index = end;
+  }
+  return out.join('\n');
+}
+
 /** Prompt lines of each item, keyed by item id. */
 function prompts(gears: string): Map<string, readonly string[]> {
   return new Map(parseGearsContract(gears).map((item) => [item.id, item.prompt]));
@@ -67,13 +98,17 @@ function relaysTrail(prompt: readonly string[]): boolean {
   return prompt.every((line, index) => !line.startsWith('>') || index > lastInstruction);
 }
 
-/** Section text from `marker` to the next `## ` heading or the end, trailing blank lines dropped. */
-function section(gears: string, marker: string): string | undefined {
-  const start = gears.indexOf(`${marker}\n`);
-  if (start === -1) return undefined;
-  const rest = gears.slice(start + marker.length + 1);
-  const next = rest.search(/^## /m);
-  return (next === -1 ? rest : rest.slice(0, next)).replace(/\n+$/, '\n');
+/** A legacy provenance section as the pass wrote it before DR-065's revision. */
+function legacySection(ids: readonly string[]): string {
+  return `${SECTION}\n\n${ids.map((id) => `- ${id}: relays → tail`).join('\n')}\n`;
+}
+
+/** IDs of the items whose acting clause calls a nested playbook. */
+function nestedCallItems(gears: string): string[] {
+  return gears
+    .split(/^(?=### )/m)
+    .filter((part) => /\bCaptain shall call playbook\b/.test(part))
+    .map((part) => /^###\s+(\S+)/.exec(part)![1]);
 }
 
 /** A Source of fenced instructions and its faithful raw GEARS, one item per instruction. */
@@ -142,54 +177,43 @@ describe('prompt-prefix pass tool (compiler-prompt-prefix-6)', () => {
 
   it.each(workflows)('$id: rewrites exactly the relay-first items', ({ id, prefixed }) => {
     const { gears } = reference(id);
-    const { text, stdout } = prefix(dir, gears);
+    // The recompiled bundle carries the pass's output and nothing beside it:
+    // every relay trails its instructions, so nothing is eligible again.
+    expect(gears).not.toContain(SECTION);
+    for (const [itemId, prompt] of prompts(gears)) {
+      expect(relaysTrail(prompt), itemId).toBe(true);
+    }
+    const again = prefix(dir, gears);
+    expect(again.stdout).toBe('no eligible item; target equals source\n');
+    expect(again.text).toBe(gears);
+
+    // A relay-first pre-image rewrites back byte for byte: exactly the
+    // relay-first items are rewritten, and every other item, the metadata,
+    // and an `## Optimizations` section are untouched.
+    const before = relayFirst(gears, prefixed);
+    for (const [itemId, prompt] of prompts(before)) {
+      expect(relaysTrail(prompt), itemId).toBe(!prefixed.includes(itemId as never));
+    }
+    const { text, stdout } = prefix(dir, before);
     expect(stdout.trim().split('\n')).toEqual([...prefixed]);
+    expect(text).toBe(gears);
 
-    const before = prompts(gears);
-    const after = prompts(text);
-    expect([...after.keys()]).toEqual([...before.keys()]);
-    for (const [itemId, prompt] of before) {
-      const rewritten = after.get(itemId)!;
-      if (prefixed.includes(itemId as never)) {
-        expect(relaysTrail(prompt)).toBe(false);
-        expect(relaysTrail(rewritten)).toBe(true);
-        // Every line survives byte-for-byte; only relay lines move.
-        expect([...rewritten].filter((line) => line !== '').sort()).toEqual(
-          [...prompt].filter((line) => line !== '').sort(),
-        );
-        expect(rewritten.filter((line) => !line.startsWith('>') && line !== '')).toEqual(
-          prompt.filter((line) => !line.startsWith('>') && line !== ''),
-        );
-        expect(rewritten.filter((line) => line.startsWith('>'))).toEqual(
-          prompt.filter((line) => line.startsWith('>')),
-        );
-      } else {
-        expect(rewritten).toEqual(prompt);
-      }
-    }
-
-    // Everything outside the rewritten blockquotes — the other items, the
-    // metadata, and an `## Optimizations` section — is byte-identical.
-    const strip = (input: string) =>
-      input.replace(/^>.*\n/gm, '').replace(new RegExp(`\\n${SECTION}\\n[\\s\\S]*$`), '');
-    expect(strip(text)).toBe(strip(gears));
-    expect(section(text, '## Optimizations')).toBe(section(gears, '## Optimizations'));
-    expect(section(text, SECTION)).toBe(
-      `\n${prefixed.map((itemId) => `- ${itemId}: relays → tail`).join('\n')}\n`,
-    );
-    expect(text.indexOf(SECTION)).toBeGreaterThan(text.lastIndexOf('\n### '));
+    // A legacy provenance section is removed, alone or beside a rewrite.
+    const legacy = `${gears}\n${legacySection(prefixed)}`;
+    const removed = prefix(dir, legacy);
+    expect(removed.stdout).toBe('no eligible item; legacy ## Prefixed prompts section removed\n');
+    expect(removed.text).toBe(gears);
+    expect(prefix(dir, `${before}\n${legacySection(prefixed)}`).text).toBe(gears);
     if (id === 'pr') {
-      expect(text.indexOf(SECTION)).toBeGreaterThan(text.indexOf('## Optimizations'));
+      const inner = gears.replace('\n## Optimizations\n', `\n${legacySection(prefixed)}\n## Optimizations\n`);
+      expect(inner).not.toBe(gears);
+      expect(prefix(dir, inner).text).toBe(gears);
     }
-
-    // The rewrite is idempotent: nothing is eligible the second time.
-    const again = prefix(dir, text);
-    expect(again.text).toBe(text);
-    expect(again.stdout).toContain('no eligible item');
   });
 
   it('skips a kept item and leaves an ineligible package untouched', () => {
-    const { gears } = reference('review');
+    const review = workflows.find(({ id }) => id === 'review')!;
+    const gears = relayFirst(reference('review').gears, review.prefixed);
     const { text, stdout } = prefix(dir, gears, ['REVIEW-2']);
     expect(stdout.trim().split('\n')).toEqual(['REVIEW-1', 'REVIEW-3', 'REVIEW-4']);
     expect(prompts(text).get('REVIEW-2')).toEqual(prompts(gears).get('REVIEW-2'));
@@ -277,11 +301,9 @@ describe('prompt-prefix pass tool (compiler-prompt-prefix-6)', () => {
       '',
       '> Request: <caller-input>',
     ]);
+    // Nothing lists the rewrite: the checker reads it from the layout.
+    expect(text).not.toContain(SECTION);
     expect(checkSourceGearsContract(source, text)).toEqual([]);
-    const unlisted = text.slice(0, text.indexOf(`\n${SECTION}`) + 1);
-    expect(checkSourceGearsContract(source, unlisted)).toEqual([
-      'source instruction fragment at line 9 was dropped or changed',
-    ]);
   });
 
   it('preserves CRLF line endings', () => {
@@ -298,15 +320,17 @@ describe('prompt-prefix pass tool (compiler-prompt-prefix-6)', () => {
     const [before, after] = examples;
     const { text, stdout } = prefix(dir, before);
     expect(stdout.trim()).toBe('REVIEW-2');
-    expect(text).toBe(`${after}\n${SECTION}\n\n- REVIEW-2: relays → tail\n`);
+    expect(text).toBe(after);
   });
 
-  it('merges a later application into one provenance section', () => {
-    const { gears } = reference('review');
+  it('rewrites a kept item on a later application to the text of one run', () => {
+    const review = workflows.find(({ id }) => id === 'review')!;
+    const gears = relayFirst(reference('review').gears, review.prefixed);
     const again = prefix(dir, prefix(dir, gears, ['REVIEW-2']).text);
     expect(again.stdout.trim()).toBe('REVIEW-2');
     expect(again.text).toBe(prefix(dir, gears).text);
-    expect(again.text.match(/^## Prefixed prompts$/gm)).toHaveLength(1);
+    expect(again.text).toBe(reference('review').gears);
+    expect(again.text).not.toContain(SECTION);
   });
 });
 
@@ -314,11 +338,12 @@ describe('prefix-first prompts share their instructions as a cache prefix (compi
   it('composes REVIEW-2 with two requests sharing the whole instruction block', () => {
     const dir = mkdtempSync(join(tmpdir(), 'playbook-prefix-'));
     try {
-      const { gears } = reference('review');
+      const review = workflows.find(({ id }) => id === 'review')!;
+      const gears = relayFirst(reference('review').gears, review.prefixed);
       const { text } = prefix(dir, gears);
       const compose = (prompt: readonly string[], callerInput: string) =>
         defaultComposePlayerPrompt({
-          stateId: 'addressFindings',
+          stateId: 'fixFindings',
           role: 'coder',
           sourceItem: 'REVIEW-2',
           prompt: prompt.join('\n'),
@@ -346,47 +371,162 @@ describe('prefix-first prompts share their instructions as a cache prefix (compi
   });
 });
 
-describe('fidelity checker accepts prefixed items only with provenance (compiler-prompt-prefix-8)', () => {
+describe('fidelity checker reads the prefix-first layout from each prompt (compiler-prompt-prefix-8)', () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'playbook-prefix-'));
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it.each(workflows)('$id: zero findings for the tool output', ({ id }) => {
+  it.each(workflows)('$id: zero findings for the tool output, legacy sections ignored', ({ id, prefixed, nested }) => {
     const { source, gears } = reference(id);
-    expect(checkSourceGearsContract(source, prefix(dir, gears).text)).toEqual([]);
+    const rewritten = prefix(dir, gears).text;
+    expect(rewritten).not.toContain(SECTION);
+    expect(checkSourceGearsContract(source, rewritten)).toEqual([]);
+    // Two legacy sections listing the rewritten items, every nested-call
+    // item, an unknown ID, and a malformed entry carry no meaning.
+    expect(nestedCallItems(gears)).toEqual([...nested]);
+    const unknown = `${id.toUpperCase()}-99`;
+    const legacy = [
+      rewritten,
+      `${legacySection([...prefixed, ...nested, unknown])}- ${prefixed[0]} moved\n`,
+      legacySection(prefixed),
+    ].join('\n');
+    expect(checkSourceGearsContract(source, legacy)).toEqual([]);
   });
 
   it('reports the mutants', () => {
     const { source, gears } = reference('code');
+    // No section lists CODE-1 or CODE-3, yet both pass in the prefix-first
+    // layout.
     const prefixed = prefix(dir, gears).text;
-    const withoutSection = prefixed.slice(0, prefixed.indexOf(`\n${SECTION}`) + 1);
-    expect(checkSourceGearsContract(source, withoutSection)).toEqual([
-      'CODE-1: authored prompt fragments are out of Source order',
-      'CODE-3: authored prompt fragments are out of Source order',
-    ]);
-    expect(checkSourceGearsContract(source, `${prefixed}- CODE-2: relays → tail\n`)).toEqual([
-      'CODE-2: listed as prefixed but its prompt is in Source order',
-    ]);
-    expect(
-      checkSourceGearsContract(source, `${prefixed}- CODE-9: relays → tail\n- CODE-1 moved\n`),
-    ).toEqual([
-      'Prefixed prompts: malformed entry: "- CODE-1 moved"',
-      'Prefixed prompts: CODE-9 is not an item',
-    ]);
+    expect(checkSourceGearsContract(source, prefixed)).toEqual([]);
     const dropped = prefixed.replace('> > Run results: <run-results>\n', '');
-    expect(checkSourceGearsContract(source, dropped)).toContain(
+    expect(checkSourceGearsContract(source, dropped)).toEqual([
       'source relay fragment at line 28 was dropped or changed',
-    );
-    expect(
-      checkSourceGearsContract(source, `${gears}\n${SECTION}\n\n- CODE-1: relays → tail\n`),
-    ).toEqual(['CODE-1: listed as prefixed but a relay precedes an instruction']);
-    const twice = `${prefixed}\n${SECTION}\n\n- CODE-2: relays → tail\n`;
-    expect(checkSourceGearsContract(source, twice)).toEqual([
-      `Prefixed prompts: duplicate section at line ${twice.split('\n').lastIndexOf(SECTION) + 1}`,
-      'CODE-2: listed as prefixed but its prompt is in Source order',
     ]);
+    // Moving CODE-1's trailing relays back before its first instruction
+    // restores the Source-order layout, which still passes.
+    const relays = '>\n> > Original request: <caller-input>\n> > Run results: <run-results>\n';
+    const relayFirst = prefixed
+      .replace(relays, '')
+      .replace(
+        '> First determine whether',
+        `${relays.slice(2)}>\n> First determine whether`,
+      );
+    expect(relayFirst).not.toBe(prefixed);
+    expect(checkSourceGearsContract(source, relayFirst)).toEqual([]);
+    // Moving them between two instruction paragraphs matches neither layout.
+    const inside = prefixed
+      .replace(relays, '')
+      .replace('>\n> For a new coding intent', `${relays}>\n> For a new coding intent`);
+    expect(inside).not.toBe(prefixed);
+    expect(checkSourceGearsContract(source, inside)).toEqual([
+      'source instruction fragment at line 31 was dropped or changed',
+    ]);
+  });
+
+  it('reports a relay moved before an instruction the Source put it after', () => {
+    const source = [
+      ...FLOW_HEAD,
+      'When step 1 starts, Captain shall give Coder this instruction:',
+      '', '```markdown', 'Act on the request below.', '```', '',
+      'and then relay the request in quotes (`>`):',
+      '', '> Request: <caller-input>', '',
+    ].join('\n');
+    const authored = oneItem(['Act on the request below.', '', '> Request: <caller-input>']);
+    expect(checkSourceGearsContract(source, authored)).toEqual([]);
+    expect(prefix(dir, authored).stdout).toBe('no eligible item; target equals source\n');
+    const moved = oneItem(['> Request: <caller-input>', '', 'Act on the request below.']);
+    expect(checkSourceGearsContract(source, moved)).toEqual([
+      'FLOW-1: authored prompt fragments are out of Source order',
+    ]);
+  });
+
+  it('reports a relay block kept before the last instruction while another trails', () => {
+    const source = [
+      ...FLOW_HEAD,
+      'When step 1 starts, Captain shall relay the request in quotes (`>`):',
+      '', '> Request: <caller-input>', '',
+      'and then give Coder this instruction:',
+      '', '```markdown', 'Do X.', '```', '',
+      'then relay the context in quotes (`>`):',
+      '', '> Context: <context>', '',
+      'and give Coder this one:',
+      '', '```markdown', 'Do Y.', '```', '',
+    ].join('\n');
+    const request = '> Request: <caller-input>';
+    const context = '> Context: <context>';
+    const authored = oneItem([request, '', 'Do X.', '', context, '', 'Do Y.']);
+    expect(checkSourceGearsContract(source, authored)).toEqual([]);
+    // The tool moves both standalone relay blocks after the last instruction.
+    const { text } = prefix(dir, authored);
+    expect(prompts(text).get('FLOW-1')).toEqual(['Do X.', '', 'Do Y.', '', request, '', context]);
+    expect(checkSourceGearsContract(source, text)).toEqual([]);
+    // Fragments in Source order would tile a prompt that trails only the
+    // request and keeps the context in place, but a standalone relay block
+    // before an instruction line is not the pass's layout.
+    const partly = oneItem(['Do X.', '', context, '', 'Do Y.', '', request]);
+    expect(checkSourceGearsContract(source, partly)).toEqual([
+      'FLOW-1: authored prompt fragments are out of Source order',
+    ]);
+  });
+
+  it('orders every occurrence, so a relay block repeated after a later fragment fails', () => {
+    // DECIDE-3's trailing block relays the topic and then the proposal, so a
+    // repeated block puts a topic after the proposal; CODE-4's first block
+    // repeated after its last stands after the IR-task relay.
+    const cases = [
+      {
+        id: 'decide',
+        item: 'DECIDE-3',
+        after: "> > Original topic: <caller-topic>\n> > Reviewer's independent proposal: <reviewer-proposal>\n",
+        block: "> > Original topic: <caller-topic>\n> > Reviewer's independent proposal: <reviewer-proposal>\n",
+      },
+      {
+        id: 'code',
+        item: 'CODE-4',
+        after: '> > Current IR task: <ir-task>\n',
+        block: [
+          '> > Original intent: <caller-input>',
+          '> > Review scope: the commit <code-commit> from this coding phase and its resulting repository state.',
+          '> > Coder output: <coder-output>',
+          '',
+        ].join('\n'),
+      },
+    ];
+    for (const { id, item, after, block } of cases) {
+      const { source, gears } = reference(id);
+      expect(gears.split(after), item).toHaveLength(2);
+      const doubled = gears.replace(after, `${after}>\n${block}`);
+      expect(prompts(doubled).get(item)!.length, item).toBe(prompts(gears).get(item)!.length + block.split('\n').length);
+      expect(checkSourceGearsContract(source, doubled), item).toEqual([
+        `${item}: authored prompt fragments are out of Source order`,
+      ]);
+    }
+  });
+
+  it('holds a script item to Source order where a prompted item may take the prefix-first layout', () => {
+    const source = [
+      ...FLOW_HEAD,
+      'When step 1 starts, Captain shall relay the request in quotes (`>`):',
+      '', '> Request: <caller-input>', '',
+      'and then act on this instruction:',
+      '', '```markdown', 'Act on the request.', '```', '',
+    ].join('\n');
+    const acting = (clause: string, prompt: readonly string[]) =>
+      oneItem(prompt).replace('Captain shall prompt Coder:', clause);
+    const authored = ['> Request: <caller-input>', '', 'Act on the request.'];
+    const prefixFirst = ['Act on the request.', '', '> Request: <caller-input>'];
+    // The script item stands in Source order, but not in the layout the
+    // pass leaves a prompted item, which a player or Captain item may take.
+    expect(checkSourceGearsContract(source, acting('Captain shall run:', authored))).toEqual([]);
+    expect(checkSourceGearsContract(source, acting('Captain shall run:', prefixFirst))).toEqual([
+      'FLOW-1: authored prompt fragments are out of Source order',
+    ]);
+    for (const clause of ['Captain shall prompt Coder:', 'Captain shall decide how to act:']) {
+      expect(checkSourceGearsContract(source, acting(clause, prefixFirst)), clause).toEqual([]);
+    }
   });
 });
 
@@ -436,15 +576,19 @@ describe('prefix units keep ownership, multiplicity, and blank lines (compiler-p
       checkSourceGearsContract(repeated.source, both.replace('> > Request: <caller-input>\n>\n', '')),
     ).toEqual([
       'source instruction fragment at line 9 was dropped or changed',
-      'FLOW-1: authored prompt fragments are out of Source order',
     ]);
+    // FLOW-2 already trails its relay, which it shares with FLOW-1's
+    // fragment: that relay unit alone never stands for FLOW-1's fragment.
     const masked = flow([
       ['> Request: <caller-input>', '', 'Implement the request.'],
       ['Test the change.', '', '> Request: <caller-input>'],
     ]);
-    expect(
-      checkSourceGearsContract(masked.source, `${prefix(dir, masked.gears).text}- FLOW-2: relays → tail\n`),
-    ).toEqual(['FLOW-2: listed as prefixed but its prompt is in Source order']);
+    const maskedText = prefix(dir, masked.gears).text;
+    expect(checkSourceGearsContract(masked.source, maskedText)).toEqual([]);
+    const firstItem = maskedText.slice(maskedText.indexOf('### FLOW-1'), maskedText.indexOf('### FLOW-2'));
+    expect(checkSourceGearsContract(masked.source, maskedText.replace(firstItem, ''))).toEqual([
+      'source instruction fragment at line 9 was dropped or changed',
+    ]);
   });
 
   it('accepts a boundary of more than one blank line that the Source put between fragments', () => {
@@ -572,7 +716,7 @@ describe('prefix units keep ownership, multiplicity, and blank lines (compiler-p
       const changed = text.replace('> > Second: <second>\n>\n>\n> Execute.', `> > Second: <second>\n${'>\n'.repeat(blanks)}> Execute.`);
       expect(changed).not.toBe(text);
       expect(checkSourceGearsContract(source, changed)).toContain(
-        'FLOW-1: authored prompt fragments are out of Source order',
+        'source instruction fragment at line 15 was dropped or changed',
       );
     }
   });
@@ -598,9 +742,9 @@ describe('prefix units keep ownership, multiplicity, and blank lines (compiler-p
     for (const blanks of [1, 3]) {
       const changed = text.replace('> Prepare.\n>\n>\n> > First: <first>', `> Prepare.\n${'>\n'.repeat(blanks)}> > First: <first>`);
       expect(changed).not.toBe(text);
-      expect(checkSourceGearsContract(source, changed)).toContain(
-        'FLOW-1: authored prompt fragments are out of Source order',
-      );
+      expect(checkSourceGearsContract(source, changed)).toEqual([
+        'source instruction fragment at line 9 was dropped or changed',
+      ]);
     }
   });
 
@@ -611,8 +755,8 @@ describe('prefix units keep ownership, multiplicity, and blank lines (compiler-p
     expect(sevenRewritten.stdout.trim().split('\n')).toHaveLength(7);
     expect(checkSourceGearsContract(seven.source, sevenRewritten.text)).toEqual([]);
     // Deleting one of the seven leaves six occurrences for seven fragments.
-    const seventh = sevenRewritten.text.slice(sevenRewritten.text.indexOf('### FLOW-7'), sevenRewritten.text.indexOf('## Prefixed prompts'));
-    const dropped = checkSourceGearsContract(seven.source, sevenRewritten.text.replace(seventh, '').replace('- FLOW-7: relays → tail\n', ''));
+    const seventh = sevenRewritten.text.slice(sevenRewritten.text.indexOf('### FLOW-7'));
+    const dropped = checkSourceGearsContract(seven.source, sevenRewritten.text.replace(seventh, ''));
     expect(dropped).toHaveLength(1);
     expect(dropped[0]).toMatch(/^source instruction fragment at line \d+ was dropped or changed$/);
     const many = flow(Array.from({ length: 65 }, () => same));

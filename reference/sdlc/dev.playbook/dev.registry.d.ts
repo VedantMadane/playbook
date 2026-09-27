@@ -1,4 +1,5 @@
-import { type DevPlaybookHostCapabilities, type PlaybookRuntime } from './dev.playbook.js';
+import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
+import { type PlaybookHostCapabilities, type PlaybookRuntime } from './dev.playbook.js';
 export interface PlaybookSummaryPolicy {
     stateCountLabels: Readonly<Record<string, string>>;
     copyPasteGuardNames: readonly string[];
@@ -24,7 +25,7 @@ export interface DevPlaybookRegistryEntry {
     concurrentRoleSets: readonly [];
     summaryPolicy: PlaybookSummaryPolicy;
     validateOptions(optionSlice: unknown): DevOptions;
-    createRuntime(options: DevOptions, hostCapabilities: DevPlaybookHostCapabilities): PlaybookRuntime;
+    createRuntime(options: DevOptions, hostCapabilities: PlaybookHostConstructionCapabilities & PlaybookHostCapabilities): PlaybookRuntime;
 }
 export declare const devStateCountLabels: {
     readonly planAnalysis: "planning round";

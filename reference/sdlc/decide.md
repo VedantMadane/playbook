@@ -56,6 +56,7 @@ After Coder commits, Captain shall call playbook `review` with the following inp
 
 > Original intent: \<caller-topic\>
 > Review scope: the `decide`-owned commit \<decide-commit\> and its resulting repository state.
+> Coder's independent proposal: \<coder-proposal\>
 > Coder output: \<coder-output\>
 
 `decide` is complete only when `review` returns a result that applies to the supplied review scope, gives the exact evaluated repository revision, and affirmatively establishes that no unsettled findings remain.

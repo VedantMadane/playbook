@@ -1,41 +1,46 @@
+import type { PlaybookCallResult } from '@sublang/playbook/runtime';
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
 };
-export type DevStateId = 'planAnalysis' | 'createBranch' | 'callCode' | 'callDecide' | 'callCodeAfterDecide' | 'openPullRequest';
-export type DevSourceItem = 'DEV-1' | 'DEV-2' | 'DEV-3' | 'DEV-4' | 'DEV-5' | 'DEV-6';
+/** DEV declares no parallel group. */
+export declare const concurrentRoleSets: readonly (readonly string[])[];
+export type DevRole = 'analyst';
 export type DevChildPlaybookId = 'code' | 'decide' | 'branch' | 'pr';
+export type DevCallStateId = 'callCode' | 'callDecide' | 'callCodeAfterDecide' | 'createBranch' | 'openPullRequest';
+export type DevCallSourceItem = 'DEV-2' | 'DEV-3' | 'DEV-4' | 'DEV-5' | 'DEV-6';
+type ResumableStateId = 'planAnalysis';
 /**
- * DR-050: the development path a pull-request planning outcome selected. It
- * routes the `branch` success into `callCode` or `callDecide`, so the plain
- * `code` and `decide then code` paths keep their items, prompts, and edges.
+ * The development path a pull-request planning outcome selected. It routes
+ * the `branch` success into the `code` call (DEV-2) or the `decide` call
+ * (DEV-3); its absence means a plain path that calls neither `branch` nor `pr`.
  */
 export type DevPullRequestPath = 'code' | 'decide-then-code';
-export type PendingBossQuestion = {
-    readonly questionId: 'planAnalysis';
-    readonly resumeStateId: 'planAnalysis';
+export interface PendingBossQuestion {
+    readonly questionId: ResumableStateId;
+    readonly resumeStateId: ResumableStateId;
     readonly sourceItem: 'DEV-1';
     readonly asker: {
         readonly kind: 'role';
-        readonly roleId: 'analyst';
+        readonly roleId: DevRole;
     };
     readonly question: string;
-};
-export type DiscussionExchange = {
-    readonly question: string;
-    readonly answer: string;
-};
-export type PlayerInput = {
-    readonly stateId: 'planAnalysis';
-    readonly role: 'analyst';
+}
+type PendingBossQuestionParams = Omit<PendingBossQuestion, 'questionId' | 'question'>;
+export interface PlayerInput {
+    readonly stateId: ResumableStateId;
+    readonly role: DevRole;
     readonly sourceItem: 'DEV-1';
     readonly prompt: string;
     readonly result: Readonly<Record<string, string>>;
+    /** Substitutes `<development-request>`. */
     readonly developmentRequest: string;
+    /** Substitutes `<discussion-context>`. */
     readonly discussionContext: string;
+    /** Substitutes `<run-results>`. */
     readonly runResults: string;
     readonly pendingBossQuestion?: PendingBossQuestion;
     readonly bossReply?: string;
-};
+}
 export type PlayerOutput = {
     readonly guard: 'discussionComplete';
 } | {
@@ -54,50 +59,25 @@ export type PlayerOutput = {
     readonly guard: 'needsBossReply';
     readonly question: string;
 };
-export type PlaybookInput = {
-    readonly stateId: 'createBranch' | 'callCode' | 'callDecide' | 'callCodeAfterDecide' | 'openPullRequest';
-    readonly sourceItem: 'DEV-2' | 'DEV-3' | 'DEV-4' | 'DEV-5' | 'DEV-6';
+export interface PlaybookInput {
+    readonly stateId: DevCallStateId;
+    readonly sourceItem: DevCallSourceItem;
     readonly playbookId: DevChildPlaybookId;
     readonly text: string;
-};
-/**
- * The affirmative success proof DEV requires from `decide`'s canonical
- * structured terminal output before starting the dependent `code` call:
- * the `decide`-owned commit, the exact evaluated repository revision, and
- * the affirmative no-unsettled-findings fact. Additional members belong to
- * DECIDE's own contract and do not disprove success.
- */
-export type DecideSuccessOutput = {
-    readonly decideCommit: string;
-    readonly evaluatedRevision: string;
-    readonly noUnsettledFindings: true;
-};
-/**
- * The fields DEV consumes from `branch`'s canonical structured terminal
- * output before continuing a pull-request path: the exact branch name, the
- * exact base revision, and the issue summary. Additional members belong to
- * BRANCH's own contract and do not disprove success; a missing member is an
- * insufficient result, never an empty default.
- */
-export type BranchSuccessOutput = {
-    readonly branch: string;
-    readonly baseRevision: string;
-    readonly issueSummary: string;
-};
-/**
- * The fields DEV consumes from `code`'s canonical structured terminal output
- * before starting the dependent `pr` call: the exact last `code`-owned commit
- * and the exact final evaluated repository revision.
- */
-export type CodeSuccessOutput = {
-    readonly lastCodeCommit: string;
-    readonly finalEvaluatedRevision: string;
-};
-export type CompactError = {
+}
+/** The child's JSON-safe machine output itself, delivered on `onDone`. */
+export type PlaybookOutput = JsonValue | undefined;
+export interface CompactError {
     readonly name: string;
     readonly message: string;
-};
-/** Sanitized canonical child result relayed as DEV's own failure outcome. */
+}
+/** A control-plane error retained for inspection while DEV is parked. */
+export interface ControlError {
+    readonly name: string;
+    readonly message: string;
+    readonly stack?: string;
+}
+/** Sanitized canonical child result that DEV relays as its own outcome. */
 export type CompletedChildResult = {
     readonly playbookId: DevChildPlaybookId;
     readonly status: 'ok';
@@ -113,60 +93,69 @@ export type DevPlaybookOutput = {
     readonly status: 'complete';
     /** The final child of the selected path: `pr` on a pull-request path. */
     readonly childPlaybookId: 'code' | 'pr';
-    /** The successful result of DEV's final child call, when it has one. */
+    /** The successful result of that final child call, when it has one. */
     readonly childOutput?: JsonValue;
 } | {
     readonly status: 'child-failed';
     /** The relayed canonical child result that ended the selected path. */
     readonly childResult: CompletedChildResult;
 };
-export type DevInput = {
-    readonly runResults?: string;
+type DevCompletion = {
+    readonly kind: 'discussion-complete';
+} | {
+    readonly kind: 'complete';
+    readonly childPlaybookId: 'code' | 'pr';
+    readonly childOutput?: JsonValue;
+} | {
+    readonly kind: 'child-failed';
+    readonly childResult: CompletedChildResult;
 };
-export type DevContext = {
+export interface DevInput {
+    /** Optional seed for `<run-results>`; absent means no relevant run results. */
+    readonly runResults?: string;
+}
+export interface DevContext {
     readonly runResults: string;
     readonly developmentRequest?: string;
-    readonly discussionExchanges: readonly DiscussionExchange[];
+    /** Consumed Analyst Q&A for `<discussion-context>`; empty before any reply. */
+    readonly discussionContext: string;
     readonly planningResult?: string;
+    readonly pullRequestPath?: DevPullRequestPath;
     readonly decideCommit?: string;
     readonly evaluatedRevision?: string;
-    /** DR-050: whether the accepted planning outcome selected a pull-request path. */
-    readonly deliveryViaPullRequest: boolean;
-    readonly pullRequestPath?: DevPullRequestPath;
     readonly branch?: string;
     readonly baseRevision?: string;
     readonly issueSummary?: string;
     readonly lastCodeCommit?: string;
     readonly finalEvaluatedRevision?: string;
-    readonly completion?: 'discussion-complete' | 'complete' | 'child-failed';
-    readonly childOutput?: JsonValue;
-    readonly childFailure?: CompletedChildResult;
-    readonly lastError?: unknown;
+    readonly completion?: DevCompletion;
+    readonly lastError?: ControlError;
     readonly pendingBossQuestion?: PendingBossQuestion;
     readonly bossReply?: string;
-};
+}
 export type DevEvent = {
     readonly type: 'START_DEV';
     readonly developmentRequest: string;
 } | {
     readonly type: 'BOSS_REPLY';
     readonly answer: string;
-    readonly questionId?: 'planAnalysis';
+    readonly questionId?: string;
 };
-/** Consumed planning Q&A rendered for later relayed discussion context. */
-export declare function renderDiscussionContext(exchanges: readonly DiscussionExchange[]): string;
+export declare function authoredChildResult(error: unknown, expectedPlaybookId: string): PlaybookCallResult | undefined;
+/** One consumed Analyst question and Boss reply, as relayed discussion. */
+export declare function renderDiscussionExchange(question: string, answer: string): string;
 export declare const devMachine: import("xstate").StateMachine<DevContext, {
     readonly type: "START_DEV";
     readonly developmentRequest: string;
 } | {
     readonly type: "BOSS_REPLY";
     readonly answer: string;
-    readonly questionId?: "planAnalysis";
+    readonly questionId?: string;
 }, {
-    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<JsonValue | undefined, PlaybookInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | undefined;
+    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | undefined;
 }, {
     src: "playbook";
-    logic: import("xstate").PromiseActorLogic<JsonValue | undefined, PlaybookInput, import("xstate").EventObject>;
+    logic: import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>;
     id: string | undefined;
 } | {
     src: "player";
@@ -183,16 +172,19 @@ export declare const devMachine: import("xstate").StateMachine<DevContext, {
     type: "rememberActorError";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberPendingQuestion";
-    params: import("xstate").NonReducibleUnknown;
-} | {
     type: "rememberBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberEmptyBossReplyError";
+    type: "rememberMalformedPlayerOutput";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberMalformedPlayerOutput";
+    type: "clearBossReplyContext";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "setPendingBossQuestion";
+    params: PendingBossQuestionParams;
+} | {
+    type: "rememberMalformedBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "startDev";
@@ -201,17 +193,13 @@ export declare const devMachine: import("xstate").StateMachine<DevContext, {
     type: "completeDiscussion";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberCodePath";
+    type: "acceptPlainPlan";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberDecidePath";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberCodeViaPullRequestPath";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberDecideThenCodeViaPullRequestPath";
-    params: import("xstate").NonReducibleUnknown;
+    type: "acceptPullRequestPlan";
+    params: {
+        readonly path: DevPullRequestPath;
+    };
 } | {
     type: "rememberBranchResult";
     params: import("xstate").NonReducibleUnknown;
@@ -223,86 +211,80 @@ export declare const devMachine: import("xstate").StateMachine<DevContext, {
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "completeWithChildSuccess";
-    params: import("xstate").NonReducibleUnknown;
+    params: {
+        readonly childPlaybookId: "code" | "pr";
+    };
 } | {
-    type: "completeWithInsufficientBranchResult";
-    params: import("xstate").NonReducibleUnknown;
+    type: "completeWithInsufficientResult";
+    params: {
+        readonly playbookId: DevChildPlaybookId;
+    };
 } | {
-    type: "completeWithInsufficientCodeResult";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "completeWithInsufficientDecideResult";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "completeWithBranchFailure";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "completeWithCodeFailure";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "completeWithDecideFailure";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "completeWithPrFailure";
-    params: import("xstate").NonReducibleUnknown;
+    type: "completeWithAuthoredChildResult";
+    params: {
+        readonly playbookId: DevChildPlaybookId;
+    };
 }, {
-    type: "needsBossReply";
+    type: "needsBossReplyWithQuestion";
     params: unknown;
 } | {
     type: "emptyBossReply";
     params: unknown;
 } | {
-    type: "isDiscussionComplete";
+    type: "startsDev";
     params: unknown;
 } | {
-    type: "isCodePath";
+    type: "discussionCompleteAfterBossReply";
     params: unknown;
 } | {
-    type: "isDecideThenCode";
+    type: "needsBossReplyWithoutQuestion";
     params: unknown;
 } | {
-    type: "isCodeViaPullRequest";
+    type: "decideSucceeded";
     params: unknown;
 } | {
-    type: "isDecideThenCodeViaPullRequest";
+    type: "codeSucceededOnPullRequestPath";
     params: unknown;
 } | {
-    type: "isBranchSuccessForCode";
+    type: "codeSucceededOnPlainPath";
     params: unknown;
 } | {
-    type: "isBranchSuccessForDecide";
+    type: "codePlanned";
     params: unknown;
 } | {
-    type: "isCodeSuccessViaPullRequest";
+    type: "decideThenCodePlanned";
     params: unknown;
 } | {
-    type: "isPlainCodeSuccess";
+    type: "codeViaPullRequestPlanned";
     params: unknown;
 } | {
-    type: "isDecideSuccess";
+    type: "decideThenCodeViaPullRequestPlanned";
     params: unknown;
 } | {
-    type: "authoredBranchFailure";
+    type: "branchSucceededForCode";
     params: unknown;
 } | {
-    type: "authoredCodeFailure";
+    type: "branchSucceededForDecide";
     params: unknown;
 } | {
-    type: "authoredDecideFailure";
+    type: "authoredBranchResult";
     params: unknown;
 } | {
-    type: "authoredPrFailure";
+    type: "authoredDecideResult";
     params: unknown;
 } | {
-    type: "resumesPlanAnalysis";
+    type: "authoredCodeResult";
     params: unknown;
-}, never, "done" | "failed" | "ready" | "awaitBossReply" | "planAnalysis" | "createBranch" | "callCode" | "callDecide" | "callCodeAfterDecide" | "openPullRequest" | "discussionComplete" | "reportedChildFailure", string, DevInput, {
+} | {
+    type: "authoredPrResult";
+    params: unknown;
+}, never, "done" | "failed" | "ready" | "awaitBossReply" | "callCode" | "callDecide" | "callCodeAfterDecide" | "createBranch" | "openPullRequest" | "planAnalysis" | "discussionComplete" | "reportedChildFailure", string, DevInput, {
     readonly status: "discussion-complete";
 } | {
     readonly status: "complete";
     /** The final child of the selected path: `pr` on a pull-request path. */
     readonly childPlaybookId: "code" | "pr";
-    /** The successful result of DEV's final child call, when it has one. */
+    /** The successful result of that final child call, when it has one. */
     readonly childOutput?: JsonValue;
 } | {
     readonly status: "child-failed";
@@ -316,6 +298,9 @@ export declare const devMachine: import("xstate").StateMachine<DevContext, {
         };
         readonly planAnalysis: {
             id: "planAnalysis";
+        };
+        readonly awaitBossReply: {
+            id: "awaitBossReply";
         };
         readonly createBranch: {
             id: "createBranch";
@@ -331,9 +316,6 @@ export declare const devMachine: import("xstate").StateMachine<DevContext, {
         };
         readonly openPullRequest: {
             id: "openPullRequest";
-        };
-        readonly awaitBossReply: {
-            id: "awaitBossReply";
         };
         readonly failed: {
             id: "failed";

@@ -44,8 +44,8 @@ export const decidePlaybookRegistryEntry = {
     intent: 'synthesize independent Coder and Reviewer proposals into an approved spec-design commit',
     artifactSchema: 3,
     runtimeProfile: Object.freeze({
-        kind: 'bespoke',
-        artifactSchema: 3,
+        kind: 'shared-factory',
+        compat: createPlaybookRuntime.compat,
     }),
     requiredRoleIds: ['coder', 'reviewer'],
     concurrentRoleSets: [['coder', 'reviewer']],
