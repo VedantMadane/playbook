@@ -1,7 +1,7 @@
 import { type Captain, type CaptainSession, type TuningSelection } from '@sublang/cligent/tmux-play';
 import type { Effort, PermissionPolicy } from '@sublang/cligent';
-import type { JsonValue, PlaybookEffectLedger, PlaybookEffectLedgerCommandBatch, PlaybookControlAction, PlaybookFailureCause, PlaybookRuntime, PlaybookRuntimeSnapshot } from '@sublang/playbook/runtime';
-import { type CaptainControllerPort, type SettlementEvidence } from '../captain.playbook/captain.playbook.js';
+import type { JsonValue, PlaybookEffectLedger, PlaybookEffectLedgerCommandBatch, PlaybookControlAction, PlaybookFailureCause, PlaybookRuntime, PlaybookRuntimeSnapshot, PlaybookStepRecord } from '@sublang/playbook/runtime';
+import { type CaptainControllerPort } from '../captain.playbook/captain.playbook.js';
 import type { PlaybookSummaryPolicy } from './code.registry.js';
 interface SessionAgent {
     readonly adapter: string;
@@ -34,32 +34,25 @@ interface PlaybookCaptainUnresolvedEffectSettlementInput {
 }
 type SnapshotAgentEnvelope = DeepReadonly<Omit<SessionAgent, 'model' | 'effort' | 'fastMode'>>;
 type PlayerLedgerSnapshotEntry = DeepReadonly<PlayerLedgerEntry>;
-type RecoveryContinuation = ({
-    kind: 'reply';
-} | {
-    kind: 'runtime';
-    actionId: string;
-} | {
-    kind: 'settle';
-    status: 'ok' | 'failed' | 'rejected';
-    settlement?: RecoverySettlement;
-}) & {
-    facts?: readonly string[];
-};
-interface RecoverySettlement {
-    retentionUpdates: readonly PlaybookCaptainRetentionUpdate[];
-    unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[];
-    report?: OutcomeReport;
-    presentation?: string;
+interface ProgressChange {
+    snapshot?: PlaybookCaptainShellSnapshot | null;
+    step?: PlaybookStepRecord & {
+        runtimeSessionId: string;
+        playbookId: string;
+    };
+    retentionUpdates?: readonly PlaybookCaptainRetentionUpdate[];
+}
+interface InterruptedReport {
+    text: string;
+    effects: readonly PlaybookCaptainUnresolvedEffect[];
+    boundaryPrefix: number;
+    retentionUpdates?: readonly PlaybookCaptainRetentionUpdate[];
+    unresolvedEffects?: readonly PlaybookCaptainUnresolvedEffect[];
 }
 export interface PlaybookCaptainDeps {
     /** Stop the host's active turn, including admitted tool calls, on preparation expiry. */
-    abortPreparation?: () => void;
-    checkpointRecovery?: (point: {
-        snapshot: PlaybookCaptainShellSnapshot;
-        instruction: string;
-        continuation?: RecoveryContinuation;
-    }) => Promise<void>;
+    abortPreparation?: (reason?: string) => void;
+    recordProgress?: (change: ProgressChange) => Promise<void>;
     continuity?: {
         beforeCall(participantId: string): Promise<void>;
         acknowledged(participantId: string, token: string): void;
@@ -269,31 +262,8 @@ export interface PlaybookCaptainShell extends Captain {
      * `handleBossTurn` (CAPTAIN-7).
      */
     submitShellAction?(actionId: string): string;
-    /** Resume a host-validated saved recovery point using its exact input. */
-    selectRecovery?(text: string, instruction: string, continuation?: RecoveryContinuation): void;
-}
-interface TurnSummaryCounts {
-    interruptions: number;
-    copyPastes: number;
-}
-interface OutcomeReport {
-    playbookId?: string;
-    facts: readonly string[];
-    /**
-     * The Boss-facing rendering of `facts`, present only where the two differ —
-     * today, where a fact names a runtime action by its id and the Boss-facing
-     * form names it by the runtime's own label. `facts` is hidden control text
-     * for the result-phase prompt; this is what the CAPTAIN-34 fallback may
-     * speak.
-     */
-    bossFacts?: readonly string[];
-    status: SettlementEvidence['status'];
-    receipt?: SettlementEvidence['receipt'];
-    leafStateSummary?: string;
-    counts: TurnSummaryCounts;
-    progressPhrase: string;
-    progressRounds: number;
-    savedLine?: string;
+    /** Report an interrupted attempt without dispatching work. */
+    selectInterruptedReport?(input: string, report: InterruptedReport): void;
 }
 export declare function assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[];
 /** Validate, detach, and freeze one untrusted shell snapshot. */

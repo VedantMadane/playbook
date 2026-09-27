@@ -161,6 +161,7 @@ export interface NestedPlaybookBridge<TInput extends NestedPlaybookInput = Neste
     confirmRestore(): void;
     /** Complete durable identity; undefined until a normal or restored call suspends. */
     getSuspendedCall(): PlaybookSuspendedCall | undefined;
+    checkpointCall(child: PlaybookPendingCall): PlaybookSuspendedCall | undefined;
     resume(input: {
         callId: string;
         result: PlaybookCallResult;

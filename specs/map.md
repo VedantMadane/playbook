@@ -93,8 +93,10 @@ meta.md       The spec of specs
 | [DR-065](decisions/065-prompt-prefix-pass.md) | 065-prompt-prefix-pass.md | The prompt-prefix pass: a second GEARS pass moves each prompt's relayed runtime values after its instructions so repeated runs share a cacheable prefix, realized by a deterministic tool and accepted by the fidelity checker through its provenance section |
 | [DR-066](decisions/066-captain-prepares-step-recovery.md) | 066-captain-prepares-step-recovery.md | Bounded Captain preparation and runtime-owned interrupted-step recovery; amended by DR-068 and DR-069 |
 | [DR-067](decisions/067-captain-relays-player-questions.md) | 067-captain-relays-player-questions.md | Captain explains complete player questions; Boss communicates only through Captain between turns; amended by DR-068 and DR-069 |
-| [DR-068](decisions/068-interrupted-continuation-settlement.md) | 068-interrupted-continuation-settlement.md | Distinct saved dispatch and reporting states, hard-loss reconciliation, nested cancellation and current-task question context; marker replaced by DR-069 |
-| [DR-069](decisions/069-host-owned-interrupted-work-settlement.md) | 069-host-owned-interrupted-work-settlement.md | Shared-host settlement when later work has no saved machine position; complete reporting-only points |
+| [DR-068](decisions/068-interrupted-continuation-settlement.md) | 068-interrupted-continuation-settlement.md | Distinct saved dispatch and reporting states, hard-loss reconciliation, nested cancellation and current-task question context; marker replaced by DR-069; saved selections replaced by DR-070 |
+| [DR-069](decisions/069-host-owned-interrupted-work-settlement.md) | 069-host-owned-interrupted-work-settlement.md | Shared-host settlement when later work has no saved machine position; complete reporting-only points, replaced by DR-070 |
+
+| [DR-070](decisions/070-durable-step-progress.md) | 070-durable-step-progress.md | Save normal step positions and results; restore and report before Boss chooses further work |
 
 ## Packages
 

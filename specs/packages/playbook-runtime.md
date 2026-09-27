@@ -77,7 +77,7 @@ runtime contract types `PlaybookFailureCode`, `PlaybookFailureCause`,
 `PlaybookEffectBoundary`, `PlaybookEffectBoundaryStart`, `PlaybookEffectLogicalOperation`, `PlaybookEffectLedger`, `PlaybookEffectLedgerCommand`, `PlaybookEffectLedgerCommandBatch`, `PlaybookEffectLedgerCapability`, `PlaybookControlAction`, `PlaybookControlView`,
 `PlaybookControlReceipt`, `PlaybookRetainedGenerationMetadata`, `PlaybookAdoptionContext`, `PlaybookPorts`, `PlaybookSession`,
 `PlaybookTraceType`, `PlaybookTraceEvent`,
-`PlaybookRuntime`, and `PlaybookRuntimeFactory<Options = unknown>`, as
+`PlaybookRuntime`, `PlaybookStepRecord`, and `PlaybookRuntimeFactory<Options = unknown>`, as
 the TypeScript projection of
 [slc/link.md](../../slc/link.md#playbookruntime-contract).
 The executable `@sublang/playbook/xstate-runtime` module shall export `assertPlaybookEffectLedger`, `emptyPlaybookEffectLedger`, and `isPlaybookEffectLedgerMonotonicExtension` over those shared contract types, plus `PlaybookSemanticFieldAuthority`, `PlaybookSemanticOutcomeSpec`, `PlaybookSemanticEvidenceInput`, `PlaybookReconciledSemanticOutput`, `PlaybookRetainedSemanticEvidence`, `PlaybookSemanticReconciliationReason`, `PlaybookSemanticReconciliation`, `PlaybookSemanticCandidateStructureError`, and `reconcilePlaybookSemanticEvidence` as the centralized semantic-reconciliation surface of [[playbook-runtime-77](#playbook-runtime-77)].
@@ -94,7 +94,7 @@ tools. `PlaybookRuntime.init` shall
 accept a `PlaybookSession` whose optional `roleBindings` maps each local role to exact `playerId` and `promptIdentity` strings and whose optional `playerSessions` implements the exact synchronous store contract in [[playbook-runtime-58](#playbook-runtime-58)], and `PlaybookPorts` shall declare exactly
 the members `callPlayer`,
 `callCaptain`, `callJudge`, `callPlaybook`, `emitStatus`, and
-`emitTelemetry`.
+`emitTelemetry`, and optional `recordStep(step: PlaybookStepRecord, position?: PlaybookRuntimeSnapshot): Promise<void>` for durable invocation progress [[recovery-1](recovery.md#recovery-1)].
 `PlaybookRuntime.handleBossInput` shall accept exactly `{ text, signal }`:
 no FSM event, parsed decision, or other host-decided input shall enter a
 runtime through it, so a host's per-turn resolution of a Boss turn reaches a
@@ -763,6 +763,7 @@ state descriptor, the governed failure-attempt member of [[playbook-runtime-71](
 A question shall count as pending only while the machine awaits its reply in an authored reply-wait state, under one pendingness shared with the state telemetry a host ledger mirrors, so the ledger and this snapshot cannot disagree about the same fact: for a runtime the shared factory constructs that wait is the singular canonical `awaitBossReply` state, and a context question a later state retains — the recoverable failure a resumed player reached included — shall export as no pending question, while a bespoke runtime counts the questions awaiting replies in its own authored wait states, DECIDE's parallel branch waits included.
 Where exactly one nested playbook call is suspended, that snapshot shall also carry its bridge-owned `callId`, `stateId`, `playbookId`, exact `text`, and `childSessionId`, enriched with the matching call-to-turn owner when present and the governed replay prefix of [[playbook-runtime-71](#playbook-runtime-71)] when applicable; export shall return `undefined` if the pending bridge identity, complete descriptor, or recorded call-to-turn ownership is absent or inconsistent.
 Where no nested playbook call is suspended, the schema-version-4 snapshot shall omit `suspendedCall`; at any other unsafe capture point `exportSnapshot` shall return `undefined`.
+The optional `exportSnapshot({interrupted:true})` request shall capture the invocation-owned stopped position [[recovery-1](recovery.md#recovery-1)]; `exportSnapshot({child})` shall capture an exact bridge-owned child call during startup as well as suspension, without running the actor.
 A direct-Captain-capable runtime shall persist the `captainCall` member of `sequences` in every exported schema-version-4 snapshot.
 The public `PlaybookRuntimeSnapshot` contract shall admit only schema version `4`, shall require `effectLedger`, shall name its token member `roleResumeTokens`, shall permit `failedEffectAttempt` only on the failed state as an exact `{ boundaryPrefix, attemptId }` object whose nonnegative prefix does not exceed the ledger and whose suffix is either nonempty and wholly owned by its canonical UUID attempt id or empty for an explicit `null`, shall permit `retainedEffectSourceSessionId` only as the canonical UUID of the original adopted source runtime, shall permit `retainedEffectReconciliation` only as an exact `{ sourceSessionId, checkpoint }` object whose source identity equals that separately retained lineage and whose valid checkpoint is a monotonic baseline of `effectLedger`, shall permit the optional invocation checkpoint [[recovery-1](recovery.md#recovery-1)] validated before restoration [[recovery-2](recovery.md#recovery-2)], and shall permit an optional `suspendedCall` descriptor carrying `callId`, `stateId`, `playbookId`, exact `text`, `childSessionId`, optional positive `turnId`, and optional nonnegative-or-null `effectBoundaryPrefixSequence` that does not exceed the ledger; schemas `1` and `2` shall reject before binding because their token and pending-question identities are ambiguous under [DR-032](../decisions/032-explicit-roles-session-players.md), while schema `3` shall reject because it cannot prove effect-ledger authority.
 The shared snapshot validator shall capture the complete supplied value once as detached frozen JSON and reject accessors and undeclared snapshot, sequence, pending-question, asker, or suspended-call fields.
@@ -901,46 +902,10 @@ JSON-safe dropped rather than thrown — and the two members the view
 surfaces first-class, the pending Boss question and the last error,
 shall not be nameable; a projection naming either shall fail runtime
 construction rather than be silently ignored.
-Actions shall derive from the live snapshot only at the safe capture
-point of [[playbook-runtime-45](#playbook-runtime-45)] (actor status `active`, quiescent, no
-pending nested call) and shall be empty anywhere else. While the
-singular state id is the recoverable failure state and the live
-snapshot accepts the retry event sourced below, the runtime shall
-advertise the `retry:<EVENT_TYPE>` action replaying exactly that event, subject for a governed artifact-schema-3 failed host attempt to the automatic-replay fence of [[playbook-runtime-71](#playbook-runtime-71)];
-for each registered resumable
-state id whose explicit-state-jump event (`BOSS_INTERRUPT` with that
-`targetId` and optional textual fields omitted) the live snapshot
-accepts, guards included, it shall advertise `jump:<stateId>`.
-A valid interrupted-invocation checkpoint shall instead advertise and execute the step retry under [[recovery-3](recovery.md#recovery-3)].
-The fallback retry event shall come from the artifact's entry-event declaration
-where that declaration names the FSM context member the machine's entry
-action copies the exact Boss text into: the runtime shall build the
-deterministic entry event from that member of the live snapshot,
-excluding the candidate when the member is absent, not a string, or
-blank, and shall not fall back to the recorded event
-([DR-034](../decisions/034-durable-failure-retry-continuity.md)).
-Where the declaration names no such member, the retry event shall be
-the recorded last classified event — the event a public Boss boundary
-sent, kept with its recorded payload — and shall be absent when the
-runtime holds none.
-The declared source is what the persisted machine snapshot already
-carries, so a runtime restored from that snapshot shall advertise the
-same retry as the process that exported it, including a failure the
-machine reached after a Boss reply resumed the work; an artifact naming
-no member shall keep the process-local behavior of its recorded event.
-The runtime shall not treat a context member that merely matches the
-entry event's text field as that declaration.
-Each action the shared factory advertises shall carry a stable id, its standing
-[[playbook-runtime-97](#playbook-runtime-97)], and a label written from the source
-state descriptions; a retry whose event carries its own
-`targetId` (the explicit-state-jump shape) shall be labeled from that
-recorded target's description — the state its replay re-enters — never
-from another configured arm of a guarded transition list; a candidate
-whose event requires a payload the
-runtime can source from neither its recorded event nor the persisted
-state above shall be excluded — `apply`
-shall never invent free text and shall never enter Boss-input
-classification.
+Actions shall derive from the live snapshot only at the safe capture point [[playbook-runtime-45](#playbook-runtime-45)] and shall be empty elsewhere.
+A failed invocation shall offer only the checkpoint-based retry [[recovery-3](recovery.md#recovery-3)]; no captured position means no retry, and legacy `entryEvent.contextField` metadata shall have no effect.
+For each registered resumable state whose `BOSS_INTERRUPT` with `targetId` and no optional text is accepted, guards included, the runtime shall advertise `jump:<stateId>`.
+Each action shall have a stable id, standing [[playbook-runtime-97](#playbook-runtime-97)], and label from the actual source or jump-target description; `apply` shall neither invent free text nor classify Boss input.
 A label shall never fall back to an identifier, and a candidate whose
 label could only be one shall be excluded on the same terms as one whose
 payload cannot be sourced. The label is the only Boss-facing name the
@@ -952,8 +917,7 @@ no-op and puts a machine identifier into Boss-facing text
 ([[captain-playbook-5](captain-playbook.md#captain-playbook-5)]). A jump whose
 target publishes no description shall therefore not be advertised —
 borrowing another state's description would name the wrong state — and a
-retry shall fall back from its target's description to its own source
-state's, and shall not be advertised when neither exists.
+retry shall not be advertised when its invocation source has no description.
 `apply({ actionId, key, signal })` shall revalidate against the live
 state and settle `{ disposition: 'rejected', reason }` with no effect
 when the action is not currently advertised; an accepted action shall
@@ -1629,9 +1593,7 @@ question with its stable id, and the last error as
 The suite shall discover every linked playbook artifact in the
 repository rather than listing them, and shall fail unless each
 artifact built on the shared factory declares a `controlContextFields`
-projection, each artifact declaring a deterministic entry event whose
-machine has a recoverable failure state also names that event's
-persisted retry source [[playbook-runtime-52](#playbook-runtime-52)], and each
+projection, and each
 artifact's `_internal` exposes the prompt composers
 its own machine uses, preserving the invocation arguments of the runtime seam, including the player identity lookup and optional third resume flag of [[playbook-runtime-92](#playbook-runtime-92)] — the player composer where and only where that
 playbook calls players — so a re-link or a newly linked artifact cannot
@@ -1648,38 +1610,8 @@ the real CODE runtime parked at `failed` exports only its declared
 exposing the resolved player roster, option value, or player-authored
 members its live context holds; and unless naming a first-class-surfaced
 member fails runtime construction.
-Action derivation shall fail unless: the real CODE runtime parked in
-`failed` advertises only the `retry:START_CODE` action for its recorded
-entry event with a label written from the source state description;
-a synthetic guarded multi-arm `BOSS_INTERRUPT` matrix exercises a
-non-first `targetId` and labels its retry from the recorded target's
-description, never from the first configured arm; a recorded event the current state does not accept produces no
-retry entry; outside the failure state no retry entry appears; the
-synthetic context-conditional target flips from excluded to included
-once the live context gains its required input; and jump events are
-sent with textual fields omitted, never with invented text (an applied
-retry replays the recorded payload with no classification call).
-It shall further fail unless the declared retry source of
-[[playbook-runtime-52](#playbook-runtime-52)] survives a process boundary on a
-synthetic machine whose entry action copies the entry text into the
-declared member: the runtime parked in `failed` advertises the same
-action id and label before export and after restoring that snapshot
-into a fresh instance, the applied action replays the original player
-prompt, and the exported snapshot's members are exactly those of
-[[playbook-runtime-45](#playbook-runtime-45)]; a failure reached after a Boss
-reply resumed the work — which the same machine's undeclared twin
-cannot retry in its own live process — advertises and applies that
-retry in both processes; a declared member the machine never populates
-excludes the candidate rather than falling back to the recorded event;
-and the undeclared twin still advertises its recorded retry live and
-none after restore.
-It shall further fail unless no advertised label is ever an identifier:
-a registered resumable target whose source publishes no description
-shall not be advertised at all — not advertised under its own target id
-— while a described sibling target the same snapshot accepts still is;
-and a retry whose transition target publishes no description shall be
-labeled from its own source state's description, with neither the target
-id nor the replayed event type appearing in the label.
+Action derivation shall verify exact interrupted-step retry before and after restoration, including accepted Boss answers and non-first guarded entry targets, without depending on legacy entry-context metadata [[playbook-runtime-52](#playbook-runtime-52)].
+The suite shall verify no retry without a JSON invocation checkpoint, no retry outside failure, source-description labels with no identifier fallback, guarded jumps appearing only when their required context is present, and jump events carrying no invented text [[playbook-runtime-52](#playbook-runtime-52)].
 Receipts shall fail unless the A29-17 engine-level twins hold against
 real `apply()`: an advertised retry from `failed` settles
 `executed` with the run result; the same `actionId` re-applied after

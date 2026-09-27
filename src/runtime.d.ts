@@ -173,6 +173,8 @@ export type PlaybookRunResult = {
     pendingCall: PlaybookPendingCall;
 };
 export interface PlaybookPorts {
+    /** Acknowledge the durable start before work and its result before transition. */
+    recordStep?(step: PlaybookStepRecord, position?: PlaybookRuntimeSnapshot): Promise<void>;
     callPlayer(roleId: string, prompt: string, signal: AbortSignal, options: PlayerCallOptions): Promise<PlayerResult>;
     callCaptain(prompt: string, signal: AbortSignal, options: CaptainCallOptions): Promise<CaptainResult>;
     callJudge(prompt: string, signal: AbortSignal): Promise<string>;
@@ -396,10 +398,19 @@ export interface PlaybookRuntimeSnapshot {
     suspendedCall?: PlaybookSuspendedCall;
 }
 export interface PlaybookRecoveryCheckpoint {
+    readonly id?: string;
     readonly stateId: string;
     readonly prompt: string;
     readonly machine: JsonValue;
     readonly boundaryPrefix: number;
+    /** Completed actor output supplied by the execution journal on restore. */
+    readonly result?: JsonValue;
+}
+export interface PlaybookStepRecord {
+    readonly id: string;
+    readonly kind: 'player' | 'captain' | 'script' | 'preparation';
+    readonly stateId: string;
+    readonly result?: JsonValue;
 }
 export type PlaybookControlStanding = 'ready' | 'no-op' | 'blocked';
 export type PlaybookControlActionReason = 'receipt-complete';
@@ -448,7 +459,10 @@ export interface PlaybookRetainedGenerationMetadata {
 }
 export interface PlaybookRuntime {
     init(session: PlaybookSession): Promise<void>;
-    exportSnapshot?(): PlaybookRuntimeSnapshot | undefined;
+    exportSnapshot?(checkpoint?: {
+        interrupted?: true;
+        child?: PlaybookPendingCall;
+    }): PlaybookRuntimeSnapshot | undefined;
     restore?(session: PlaybookSession, snapshot: PlaybookRuntimeSnapshot): Promise<void>;
     adopt?(session: PlaybookSession, snapshot: PlaybookRuntimeSnapshot, context: PlaybookAdoptionContext): Promise<void>;
     readonly retainedGenerationMetadata?: PlaybookRetainedGenerationMetadata;

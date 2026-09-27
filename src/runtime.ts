@@ -492,6 +492,8 @@ export type PlaybookRunResult =
     };
 
 export interface PlaybookPorts {
+  /** Acknowledge the durable start before work and its result before transition. */
+  recordStep?(step: PlaybookStepRecord, position?: PlaybookRuntimeSnapshot): Promise<void>;
   callPlayer(
     roleId: string,
     prompt: string,
@@ -784,10 +786,20 @@ export interface PlaybookRuntimeSnapshot {
 }
 
 export interface PlaybookRecoveryCheckpoint {
+  readonly id?: string;
   readonly stateId: string;
   readonly prompt: string;
   readonly machine: JsonValue;
   readonly boundaryPrefix: number;
+  /** Completed actor output supplied by the execution journal on restore. */
+  readonly result?: JsonValue;
+}
+
+export interface PlaybookStepRecord {
+  readonly id: string;
+  readonly kind: 'player' | 'captain' | 'script' | 'preparation';
+  readonly stateId: string;
+  readonly result?: JsonValue;
 }
 
 // DR-063 §3: what running an advertised action would do. `ready` is the only
@@ -863,7 +875,7 @@ export interface PlaybookRuntime {
   // a safe capture point (parked quiescence between public boundaries);
   // `restore` is an alternative to `init` that rehydrates the exported
   // snapshot under the same immutable session identity.
-  exportSnapshot?(): PlaybookRuntimeSnapshot | undefined;
+  exportSnapshot?(checkpoint?: { interrupted?: true; child?: PlaybookPendingCall }): PlaybookRuntimeSnapshot | undefined;
   restore?(
     session: PlaybookSession,
     snapshot: PlaybookRuntimeSnapshot,

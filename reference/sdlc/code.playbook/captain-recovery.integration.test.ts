@@ -440,10 +440,10 @@ describe('Captain preparation through a durable session', () => {
           async acquire(id: string) {
             const lease = await realStore.acquire(id);
             return { ...lease,
-              async checkpointRecovery(point: Parameters<typeof lease.checkpointRecovery>[0]) {
+              async recordProgress(point: Parameters<typeof lease.recordProgress>[0]) {
                 if (refuseProgressSave) throw new Error('injected process death before saving progress');
-                if (preparation === 'save-failure') throw new Error('injected recovery storage failure');
-                return lease.checkpointRecovery(point);
+                if (preparation === 'save-failure' && !RecoveryAdapter.holdInitial && point.step?.kind === 'preparation') throw new Error('injected recovery storage failure');
+                return lease.recordProgress(point);
               },
               async settle(point: Parameters<typeof lease.settle>[0]) {
                 if (refuseInterruptedSettlement) throw new Error('injected process death before settlement');
@@ -571,27 +571,25 @@ describe('Captain preparation through a durable session', () => {
               return;
             }
             expect(saved?.state).toBe('uncertain');
-            expect(saved?.uncertain?.recovery?.snapshot.frames).toHaveLength(2);
-            expect(saved?.uncertain?.recovery?.snapshot.frames.at(-1).runtime.state.stateId).toBe('failed');
-            expect(JSON.stringify(saved?.uncertain?.recovery)).not.toContain('resumeToken');
+            expect(saved?.uncertain?.progress?.snapshot.frames).toHaveLength(2);
+            expect(saved?.uncertain?.progress?.snapshot.frames.at(-1).runtime.state.stateId).toBe('failed');
+            expect(JSON.stringify(saved?.uncertain?.progress)).not.toContain('resumeToken');
             if (!('cliStart' in scenario) && !('cliRetry' in scenario)) {
               const lease = await realStore.acquire(id);
               try {
-                const point = saved!.uncertain!.recovery!;
+                const point = saved!.uncertain!.progress!;
                 for (const invalid of [
-                  { ...point, instruction: '' },
-                  { ...point, extra: true },
-                  { ...point, continuation: { kind: 'runtime' } },
-                  { ...point, continuation: { kind: 'reply', actionId: 'invented' } },
-                  { ...point, snapshot: { ...point.snapshot, sequences: { ...point.snapshot.sequences, turn: 99 } } },
+                  { snapshot: { ...point.snapshot, sequences: { ...point.snapshot.sequences, turn: 99 } } },
+                  { step: { ...point.steps[0], id: 'bad-id' } },
+                  { step: { ...point.steps[0], kind: 'unknown' } },
                 ]) {
-                  await expect(lease.checkpointRecovery(invalid as any)).rejects.toThrow();
+                  await expect(lease.recordProgress(invalid as any)).rejects.toThrow();
                   expect(await realStore.read(id)).toEqual(saved);
                 }
                 const hinted = JSON.parse(JSON.stringify(point));
                 hinted.snapshot.captain.conversation = { kind: 'pinned', token: 'secret-preparation-hint' };
-                await lease.checkpointRecovery(hinted);
-                expect(JSON.stringify((await realStore.read(id)).uncertain.recovery)).not.toContain('secret-preparation-hint');
+                await lease.recordProgress({ snapshot: hinted.snapshot });
+                expect(JSON.stringify((await realStore.read(id)).uncertain.progress)).not.toContain('secret-preparation-hint');
               } finally { await lease.release(); }
             }
             refuseInterruptedSettlement = false;
@@ -599,7 +597,7 @@ describe('Captain preparation through a durable session', () => {
             if ('cliRetry' in scenario) {
               const calls = RecoveryAdapter.calls.length;
               const refused = await runCli(['--session', id, 'Continue']);
-              expect(refused.stderr).toContain('may repeat external effects after it');
+              expect(refused.stderr).toContain('restores and reports');
               expect(refused.stderr).toContain('saved step preserves work from this turn');
               expect(refused.stderr).not.toContain('--discard-uncertain');
               const discarded = await runCli(['--session', id, '--discard-uncertain']);
@@ -617,11 +615,11 @@ describe('Captain preparation through a durable session', () => {
               await expect(controller.recover('replacement task')).rejects.toThrow('before supplying new input');
               resumed = await controller.recover();
             }
-            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'closing').at(-1)?.prompt).toContain('Recovery preparation: available');
+            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'prepare')).toHaveLength(1);
             expect(resumed.state).toBe('settled');
             expect(resumed.snapshot.frames).toHaveLength(2);
             expect(resumed.snapshot.frames.map(({ sessionId }) => sessionId)).toEqual(
-              saved!.uncertain!.recovery!.snapshot.frames.map(({ sessionId }) => sessionId),
+              saved!.uncertain!.progress!.snapshot.frames.map(({ sessionId }) => sessionId),
             );
             expect(resumed.snapshot.frames.at(-1).runtime.state.stateId).toBe('failed');
             expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'decision')).toHaveLength(0);
@@ -734,7 +732,7 @@ describe('Captain preparation through a durable session', () => {
             await controller.dispose();
             controller = await openSessionHost({ store, mode: 'recover', sessionId: id, config, loadModule, adapterImports });
             expect((await controller.recover()).state).toBe('settled');
-            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'player')).toHaveLength(2);
+            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'player')).toHaveLength(1);
             return;
           }
           if ('interruptContinuation' in scenario) {
@@ -752,7 +750,7 @@ describe('Captain preparation through a durable session', () => {
               return;
             }
             expect(stopped.state).toBe('uncertain');
-            expect(stopped.uncertain?.recovery?.continuation?.kind).toBe(startWithQuestion ? 'reply' : 'runtime');
+            expect(stopped.uncertain?.progress?.steps.some((step: any) => step.kind === 'player')).toBe(true);
             const calls = RecoveryAdapter.calls.length;
             refuseInterruptedSettlement = false;
             refuseProgressSave = false;
@@ -761,7 +759,7 @@ describe('Captain preparation through a durable session', () => {
             controller = await openSessionHost({ store, mode: 'recover', sessionId: id, config, loadModule, adapterImports });
             const recovered = await controller.recover();
             expect(recovered.state).toBe('settled');
-            expect(recovered.snapshot.mode).toBe('chat');
+            expect(recovered.snapshot.mode).toBe('engaged.parked');
             expect(recovered.unresolvedEffects).not.toEqual([]);
             expect(RecoveryAdapter.calls.slice(calls).every(({ kind }) => kind === 'closing')).toBe(true);
             expect(Number((await execFileAsync('git', ['rev-list', '--count', 'HEAD'], { cwd })).stdout.trim())).toBe(beforeCommits + 1);
@@ -777,6 +775,15 @@ describe('Captain preparation through a durable session', () => {
             expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'player')).toHaveLength(3);
             const outcomes = retried.snapshot.journal.filter(({ kind }) => kind === 'outcome');
             expect(outcomes.length).toBe(retried.snapshot.journal.filter(({ kind }) => kind === 'action').length);
+            return;
+          }
+          if (preparation === 'save-failure') {
+            await expect(controller.recover(instruction)).rejects.toThrow('injected recovery storage failure');
+            const stopped = await controller.read();
+            expect(stopped.state).toBe('settled');
+            expect(stopped.snapshot.frames.at(-1).sessionId).toBe(sourceId);
+            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'prepare')).toHaveLength(0);
+            expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'player')).toHaveLength(1);
             return;
           }
           const resumed = await controller.recover(instruction);

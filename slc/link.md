@@ -60,7 +60,7 @@ node "<definition-directory>/materialize-link.mjs" --fsm "<source.fsm.ts>" --out
   "label": "EXAMPLE",
   "options": {},
   "inputMapping": {},
-  "entryEvent": { "type": "BOSS_TASK", "textField": "bossIntent", "contextField": "bossIntent" },
+  "entryEvent": { "type": "BOSS_TASK", "textField": "bossIntent" },
   "bossEvents": [],
   "outcomeAuthority": {
     "governedPlayerStates": {
@@ -457,10 +457,19 @@ interface PlaybookEffectLedgerCapability {
 }
 
 interface PlaybookRecoveryCheckpoint {
+  readonly id?: string;
   readonly stateId: string;
   readonly prompt: string;
   readonly machine: JsonValue;
   readonly boundaryPrefix: number;
+  readonly result?: JsonValue;
+}
+
+interface PlaybookStepRecord {
+  readonly id: string;
+  readonly kind: 'player' | 'captain' | 'script' | 'preparation';
+  readonly stateId: string;
+  readonly result?: JsonValue;
 }
 
 interface PlaybookRuntimeSnapshot {
@@ -641,8 +650,8 @@ Boss text supplied by the entry event is not a required startup option unless So
 A generated entry guard that requires the text already in context is likewise
 not independent Source evidence; it is a producer defect when the entry action
 has yet to copy the event's text. Do not compensate with a required option or
-invented startup task. `entryEvent.contextField` supplies failure-retry text;
-it does not populate fresh entry context before FSM guards execute.
+invented startup task. Entry metadata does not populate fresh context before
+FSM guards execute. Interrupted-step checkpoints retain accepted input.
 A source-appropriate optional seed may remain, and genuine required bootstrap catalogs or other options shall not be erased or filled with invented defaults.
 
 Concrete player binding and prompt identity are host policy and shall not enter `PlaybookRuntimeOptions`, machine input, or the emitted artifact.
@@ -653,6 +662,7 @@ The host shall derive `promptIdentity` from the current effective model when pre
 
 ```typescript
 interface PlaybookPorts {
+  recordStep?(step: PlaybookStepRecord, position?: PlaybookRuntimeSnapshot): Promise<void>;
   callPlayer(
     roleId: string,
     prompt: string,
@@ -1894,7 +1904,8 @@ rehydrate it in a later process (DR-014). A runtime that implements either
 member shall implement both. When generated for a runtime whose host needs
 durability, the pair shall behave as follows.
 
-`exportSnapshot()` shall return `undefined` unless the runtime is at a safe
+A shared runtime may also receive `exportSnapshot({interrupted:true})` for its current invocation or `exportSnapshot({child})` for a bridge-owned child during startup; these capture stopped positions without execution.
+Ordinary `exportSnapshot()` shall return `undefined` unless the runtime is at a safe
 capture point: initialized, not disposing or disposed, no active
 `handleBossInput`/`resumePlaybookCall` boundary, and the root actor at a
 quiescent state with actor status `active`.
@@ -2196,24 +2207,12 @@ parked-session snapshot uses (actor status `active`, quiescent, no pending
 nested call); anywhere else `actions` is empty while the rest of the view
 still describes the state.
 While effect-possible outcome evidence remains unresolved, the view shall omit its pending Boss questions and state description and shall replace every ordinary action with exactly `reconcile:unresolved-effect` labeled `Retry unresolved effect reconciliation` and `abandon:unresolved-effect` labeled `Abandon unresolved workflow attempt`.
-A valid invocation checkpoint takes precedence over entry-event replay: it retries only the stopped invocation after its effect checks, using `retry:<EVENT_TYPE>` for the same entry target or `retry:step` otherwise.
+A valid invocation checkpoint is the only source of a retry: it retries only the stopped invocation after its effect checks, using `retry:<EVENT_TYPE>` for the same entry target or `retry:step` otherwise.
 Saved-result assessment (`retry:adjudication`) never repeats the player, and verified read-only restoration (`retry:restored-step`) records an exact baseline check before replay.
 These retries have standing `ready`; an unsafe checkpoint grants no replay. Saved-result assessment withholds ordinary state jumps. Reconciliation and abandonment remain available whenever effects are unresolved, even alongside an eligible assessment or restoration.
-Two ordinary action families use source state descriptions; an ordinary invocation checkpoint replaces entry-event retry, leaving eligible public state jumps available only when assessment and unresolved-effect fences are absent:
+Ordinary retry and jump actions use source state descriptions and require assessment and unresolved-effect fences to be absent:
 
-- **Failure-state retry** — while the singular state id is the recoverable
-  failure state and the live snapshot accepts the retry event sourced below,
-  the runtime shall advertise `retry:<EVENT_TYPE>` replaying exactly that
-  event. Where the emitted module's entry-event declaration names the FSM
-  context member the machine's entry action copies the exact Boss text into
-  (DR-034), the retry event is that deterministic entry event built from the
-  live snapshot's member — excluded when the member is absent, not a string,
-  or blank, and never falling back to the record. Where it names no member,
-  the retry event is the recorded last classified event (the event a public
-  Boss boundary sent that drove the run into `failed`, kept with its recorded
-  payload), and there is none while the runtime holds none. The member is
-  declared, never inferred from a context member that happens to match the
-  entry event's text field.
+- **Failure-state retry** — a valid invocation checkpoint retries that step only; a completed saved result is consumed without executing the operation again. No checkpoint means no retry. Legacy `entryEvent.contextField` metadata is ignored.
 - **Jump entries** — for each registered resumable state id whose
   explicit-state-jump event (`BOSS_INTERRUPT` with that `targetId`, optional
   textual fields omitted) the live snapshot accepts, guards included, the
@@ -2227,9 +2226,8 @@ back to a target id or to the replayed event type, because a controller host
 names an executed or refused action by its label and never by its id, so an
 identifier used as a label defeats that substitution. A jump whose target
 publishes no description is therefore not advertised — borrowing another
-state's description would name the wrong state — and a retry falls back from
-its target's description to its own source state's, and is not advertised when
-neither exists.
+state's description would name the wrong state — and a retry requires the
+interrupted invocation's source description.
 
 `apply({ actionId, key, signal })` shall revalidate the action against the
 live state and settle `{ disposition: 'rejected', reason }` with no effect
@@ -2245,7 +2243,7 @@ pair, and may execute once the action is advertised — and a key whose call
 threw before reaching acceptance (lifecycle misuse, invalid input, a
 pre-acceptance abort, a rejected start-boundary sink) likewise records
 nothing, so a later call with that key may execute.
-Executing an event-based retry or jump sends the validated event through the same actor drive as `handleBossInput` — state
+Executing a jump sends the validated event through the same actor drive as `handleBossInput` — state
 transitions, player/judge boundaries, statuses, and traces flow unchanged —
 and settles `executed` with the projected run result, or `failed` with the
 normalized error when the run settles in the failure state, aborts, or a
@@ -2278,12 +2276,13 @@ signal's own abort reason, in which case it evidences the cancellation and is
 dropped, not latched
 ([DR-036](../specs/decisions/036-coherent-abort-settlement.md)).
 
-The recorded receipts and the recorded last classified event are
-process-local: the durable runtime snapshot persists neither. A restored
-runtime therefore advertises the retry of a declared entry-event source
-immediately — that payload rides the persisted machine snapshot — while a
-module declaring no source advertises a retry again only after its next
-classified event.
+Recorded control receipts are process-local. Invocation checkpoints retain the original input and accepted output across restoration; a restored runtime offers only the currently valid step controls.
+
+The optional `PlaybookPorts.recordStep(step, position?)` lets a durable host save ordinary work without understanding machine internals.
+The shared runtime records player, direct-Captain and script starts before execution and their actor results before advancing.
+The runtime owns the complete stopped position, including accepted Boss input; the host joins nested frames and atomically stores starts, results and retention updates.
+A custom runtime that cannot provide that position remains runnable, but a crash returns it to Captain with recorded work preserved.
+Opening or reporting an interrupted run executes no work; Boss chooses the next action after checking outside effects and stopping any surviving worker.
 
 ## Abort
 

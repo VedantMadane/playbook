@@ -47,7 +47,7 @@ The store shall encode a manifest as a closed schema-version-7 JSON object with 
 | `state: 'settled' \| 'uncertain'` | `structuralProjection`, `lastAppliedExecutionProjection`, `snapshot`, `effectLedger`, `unresolvedEffects`; optional `retainedGenerations` and `settledAbandonment`; `uncertain` present exactly in uncertain state |
 | `state: 'history-only'` | Nonempty string `reason`; no executable recovery fields |
 
-- uncertain recovery optionally includes exactly `{snapshot,instruction,continuation?}` for the saved working or reporting point, whose controller/journal match the preceding settled boundary and whose parked stack or chat-mode `settle` snapshot and complete pending settlement retain the interrupted task [[recovery-18](recovery.md#recovery-18)];
+- uncertain `progress` stores the runtime-owned position and immutable step starts/results, validated against the preceding settled controller and current ledger [[recovery-18](recovery.md#recovery-18)];
 - executable fields preserve the structural/execution projections, uncertainty, settlement, snapshot and ledger relationships of the durable Captain contract [[playbook-cli-23](playbook-cli.md#playbook-cli-23)], in their token-free storage form [[session-storage-7](#session-storage-7)]; stored state never implies lease ownership.
 - these optional recovery extensions retain the current version numbers only under the coordinated host upgrade gate [[release-35](release.md#release-35)]; an older same-version host is unsupported and is not promised history or deletion support for them;
 - unknown manifest or nested recovery versions remain byte-for-byte unchanged; they allow history viewing and deletion with a lease, but no execution or silent downgrade.
@@ -172,7 +172,7 @@ When migrating a stopped legacy store, the shared migrator shall hold the sessio
 
 ### session-storage-11
 
-The published session API shall offer applications the same create, open, begin-turn, checkpointRecovery [[recovery-18](recovery.md#recovery-18)], settle, retry, discard, abandonment and release operations as both CLIs, using the same store, validators, writer leases and durable effect ledger [[playbook-cli-23](playbook-cli.md#playbook-cli-23)]:
+The published session API shall offer applications the same create, open, begin-turn, recordProgress [[recovery-18](recovery.md#recovery-18)], settle, retry, discard, abandonment and release operations as both CLIs, using the same store, validators, writer leases and durable effect ledger [[playbook-cli-23](playbook-cli.md#playbook-cli-23)]:
 
 - opening validates required replay/context and destination compatibility before module imports, shell restoration, hint consumption or repository reconciliation [[session-storage-4](#session-storage-4)] [[session-storage-9](#session-storage-9)];
 - hosts supply agent calls, module loading, presentation and repository dependencies; they do not reimplement manifest writes, journal authority or recovery decisions;

@@ -381,7 +381,7 @@ The runtime checks the continuation. It retries the interrupted step, keeps earl
 
 Captain asks Boss for a real missing decision, uncertain permission, or a missing or contradictory playbook transition. Repository checks alone cannot prove that publishing or another outside action is safe to repeat; Captain must check that separately.
 
-Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline. When a turn with a saved point throws and its calls drain safely, the latest stopped step is saved and accepts a new instruction; the interactive pane stays open. A process loss instead keeps a saved point for Retry. Immediately before continuation, that point is replaced so Retry cannot rerun preparation or bypass checks on later work. Custom hosts must provide cancellation before preparation is available.
+Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline. When a turn with a saved point throws and its calls drain safely, the latest stopped step is saved and accepts a new instruction; the interactive pane stays open. Before every player, script or preparation step, the runner saves its position; it saves the result before advancing. After process loss, Retry only restores and reports. Boss chooses what happens next. Custom hosts must provide cancellation before preparation is available.
 
 Custom runtimes can provide the same recovery offer: step prompt, optional preparation conditions and evidence, and a continuation they will validate. Captain needs no list of repair tools or error strings. Older checkpoints without this offer keep their existing controls.
 
@@ -389,14 +389,14 @@ Captain may answer a player from the original task when it already answers the q
 
 If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
 
-All applications sharing a session store, including Spex and the CLI, must upgrade together before using these recovery fields. Hosts from 15.1.x cannot read the extended records; see [the compatibility decision](../specs/decisions/068-interrupted-continuation-settlement.md).
+All applications sharing a session store, including Spex and the CLI, must upgrade together before using these recovery fields. Hosts from 15.1.x cannot read the extended records.
 
 ### Recovering an uncertain turn
 
 Before model work, the runner takes one exclusive session lease and writes an
 uncertain marker. If the process is interrupted after effects may
 have begun but before settlement is durable, ordinary continuation refuses
-to guess. Retry checks work after the saved point before resuming it; without a point, it checks whether the recorded turn can safely repeat. Discard is a separate explicit request:
+to guess. Retry restores the saved position and reports what happened, without running any work. Discard is a separate explicit request:
 
 ```sh
 playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --retry-uncertain
@@ -405,7 +405,7 @@ playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --discard-uncertain
 
 Retry reads no input and reuses the byte-exact recorded turn and its exact
 attempted Captain, player, and per-role model, effort, and fast-mode settings;
-current config cannot retune that attempt. A finished action gets only its closing report on Retry. If later work went beyond the saved position, Captain preserves the files and evidence, ends that attempt without replay, and asks Boss to check the work before starting another attempt. Saved assessment or read-only restoration may use their own verified evidence. Without a point, recorded repository changes or an unresolved operation prevent whole-turn replay; repository evidence does not prove the absence of outside effects. Discard
+current config cannot retune that attempt. A completed step can use its saved result without running again. Before repeating an unfinished step, Boss must confirm that the old worker has stopped and check any outside actions; unchanged files do not prove nothing happened. A runtime that cannot save its position returns to Captain with the work preserved. Discard
 reads no input and runs no model: it restores the exact prior settled boundary,
 or deletes a never-settled fresh session, while abandoning the attempted work.
 An interrupted interactive turn that could not save a normal pause uses the same uncertain record and these headless recovery commands. Discard preserves the attempt's replay history and

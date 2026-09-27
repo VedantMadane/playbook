@@ -7321,29 +7321,6 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       },
     );
 
-    // DR-034's companion standing guard. A recoverable failure state whose
-    // artifact names no retry source is recoverable only while its process
-    // lives, and the engine cannot say so for a third-party artifact — so
-    // the repository says it for the artifacts it maintains, and a re-link
-    // that drops the declaration fails here rather than in a continued
-    // session. The source is a member of the deterministic entry event, so
-    // this binds an artifact that declares one; a controller playbook whose
-    // parked entry is a mapped union has no such event and no host that
-    // reads its actions.
-    it.each(artifacts)('%s declares its retry source where it can fail', (
-      path,
-      source,
-    ) => {
-      if (!source.includes('createXStatePlaybookRuntime(')) return;
-      if (!source.includes('entryEvent:')) return;
-      const fsmSource = readFileSync(
-        new URL(path.replace('.playbook.ts', '.fsm.ts'), root),
-        'utf8',
-      );
-      if (!/\n\s{4}failed: \{/.test(fsmSource)) return;
-      expect(source).toContain('contextField:');
-    });
-
     // The `_internal` clause of link.md §Output, matched to what each machine
     // actually does: a playbook that calls players exposes the player
     // composer; a controller that calls none exposes no stub under that name.
@@ -7763,10 +7740,10 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       key: 'reply-path-retry',
       signal: sigOf(),
     });
-    expect(receipt.disposition).toBe('executed');
+    expect(receipt.disposition).toBe(checkpoint ? 'executed' : 'rejected');
     expect(
       receipt.disposition === 'executed' ? receipt.run.outcome : undefined,
-    ).toBe('terminal');
+    ).toBe(checkpoint ? 'terminal' : undefined);
     await restored.dispose();
   });
 
@@ -7885,10 +7862,9 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     expect(failedRun.outcome).toBe('failed');
 
     // The live context gained the required input: excluded flips to
-    // included; the recorded entry event is retryable from failed.
+    // included; the non-JSON context cannot provide an invocation checkpoint.
     const view = runtime.describe!();
     expect(view.actions).toEqual([
-      { id: 'retry:START', label: 'Retry: implement state', standing: 'ready' },
       { id: 'jump:implement', label: 'Resume from: implement state', standing: 'ready' },
     ]);
     // Sanitized JSON-safe context: the raw Error entry is normalized, the
@@ -8881,16 +8857,9 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
 
     const failed = await runtime.handleBossInput(turn('take the second route'));
     expect(failed.outcome).toBe('failed');
-    expect(runtime.describe!().actions).toContainEqual({
-      id: checkpoint ? 'retry:step' : 'retry:BOSS_INTERRUPT',
-      label: 'Retry: secondRoute state',
-      standing: 'ready',
-    });
-    expect(runtime.describe!().actions).not.toContainEqual({
-      id: checkpoint ? 'retry:step' : 'retry:BOSS_INTERRUPT',
-      label: 'Retry: firstRoute state',
-      standing: 'ready',
-    });
+    expect(runtime.describe!().actions).toEqual(checkpoint ? [{
+      id: 'retry:step', label: 'Retry: secondRoute state', standing: 'ready',
+    }] : []);
     await runtime.dispose();
   });
 
@@ -9169,7 +9138,7 @@ describe('action labels never fall back to an identifier (PBRT-52)', () => {
     await runtime.dispose();
   });
 
-  it('labels a retry from its source description rather than the target id', async () => {
+  it('offers no retry without an invocation checkpoint', async () => {
     const retryMachine = createMachine({
       id: 'rm',
       initial: 'ready',
@@ -9203,11 +9172,7 @@ describe('action labels never fall back to an identifier (PBRT-52)', () => {
 
     const view = runtime.describe!();
     expect(view.state.stateId).toBe('failed');
-    expect(view.actions).toEqual([
-      { id: 'retry:START', label: 'Retry: failed state', standing: 'ready' },
-    ]);
-    expect(view.actions[0]!.label).not.toContain('plain');
-    expect(view.actions[0]!.label).not.toContain('START');
+    expect(view.actions).toEqual([]);
     await runtime.dispose();
   });
 });

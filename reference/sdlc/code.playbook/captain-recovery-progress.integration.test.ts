@@ -13,9 +13,6 @@ import {
   createXStatePlaybookRuntime,
   emptyPlaybookEffectLedger,
 } from '../../../src/xstate-runtime.js';
-import { projectRecovery } from './bin/portable-codec.js';
-import { validateCaptainSessionRecord } from './bin/session-store.js';
-import { assertPlaybookCaptainShellSnapshot } from './playbook-captain.js';
 import { createSessionStore } from './session-store.js';
 import { openSessionHost } from './session-host.js';
 import { executionConfigFromPlan } from './bin/run.js';
@@ -365,93 +362,20 @@ it.each([
           const lease = await store.acquire(id);
           return {
             ...lease,
-            async checkpointRecovery(point: any) {
-              if (kind === 'save-failure' && allow && point.continuation?.kind === 'settle') throw new Error('optional save failed');
-              const prior = await lease.read();
-              if (
-                allow &&
-                !interrupted &&
-                ['step', 'adjudication', 'restored'].includes(kind) &&
-                point.continuation?.kind === 'settle' &&
-                point.snapshot.frames.length === 2
-              ) {
-                interrupted = true;
-                crash = true;
-                controller!.host.abortActiveTurn(
-                  'interrupted after the child parked',
-                );
-                throw new Error('lost the first checkpoint acknowledgement');
+            async recordProgress(change: any) {
+              if (kind === 'save-failure' && allow && change.snapshot?.mode === 'chat') throw new Error('optional save failed');
+              if (crash && refusePoint) throw new Error('process lost before checkpoint');
+              await lease.recordProgress(change);
+              if (allow && !interrupted && ['step', 'adjudication', 'restored'].includes(kind) && !change.step && change.snapshot?.frames?.length === 2) {
+                interrupted = true; crash = true;
+                controller!.host.abortActiveTurn('interrupted after the child parked');
+                throw new Error('lost checkpoint acknowledgement');
               }
-              if (!crash) {
-                expect(() =>
-                  validateCaptainSessionRecord(
-                    projectRecovery({
-                      ...prior,
-                      uncertain: { ...prior.uncertain, recovery: point },
-                    }),
-                  ),
-                ).not.toThrow();
-                if (point.snapshot.sequences.turn > 0) {
-                  const variants = [];
-                  const captain = structuredClone(point);
-                  captain.snapshot.captain.runtime.sequences.trace++;
-                  variants.push(captain);
-                  const journal = structuredClone(point);
-                  journal.snapshot.journal[0].payload = {
-                    text: 'different valid Boss input',
-                  };
-                  variants.push(journal);
-                  const {
-                    frames: _frames,
-                    pendingBossQuestions: _questions,
-                    lastError: _error,
-                    retainedEffectReconciliation: _fence,
-                    ...base
-                  } = point.snapshot;
-                  variants.push({
-                    ...point,
-                    snapshot: { ...base, mode: 'chat' },
-                  });
-                  for (const variant of variants) {
-                    expect(() =>
-                      assertPlaybookCaptainShellSnapshot(variant.snapshot),
-                    ).not.toThrow();
-                    await expect(
-                      lease.checkpointRecovery(variant),
-                    ).rejects.toThrow(
-                      'must retain the settled controller and current parked work',
-                    );
-                  }
-                }
-              }
-              if (
-                prior.uncertain.recovery &&
-                JSON.stringify(
-                  prior.uncertain.recovery.snapshot.effectLedger,
-                ) !== JSON.stringify(prior.effectLedger)
-              ) {
-                // A stale point remains a valid historical record, but cannot be
-                // submitted as the current checkpoint through the writer API.
-                expect(() => validateCaptainSessionRecord(prior)).not.toThrow();
-                await expect(
-                  lease.checkpointRecovery(prior.uncertain.recovery),
-                ).rejects.toThrow('must contain the current effect ledger');
-              }
-              if (
-                kind === 'vanished' &&
-                allow &&
-                point.continuation &&
-                !interrupted
-              ) {
-                await lease.checkpointRecovery(point);
-                interrupted = true;
-                crash = true;
+              if (kind === 'vanished' && allow && change.step?.kind === 'preparation' && change.step.result !== undefined && !interrupted) {
+                interrupted = true; crash = true;
                 controller!.host.abortActiveTurn('stopped before dispatch');
                 throw new Error('stopped before dispatch');
               }
-              if (crash && refusePoint)
-                throw new Error('process lost before checkpoint');
-              return lease.checkpointRecovery(point);
             },
             async settle(point: any) {
               if (crash) throw new Error('process lost before settlement');
@@ -609,16 +533,15 @@ it.each([
         return;
       }
       expect(saved.state).toBe('uncertain');
-      expect(saved.uncertain.recovery).toBeDefined();
+      expect(saved.uncertain.progress).toBeDefined();
       if (kind !== 'adopted-assessment' && kind !== 'vanished') {
-        expect(saved.uncertain.recovery.continuation).toMatchObject({ kind: 'settle' });
         expect(
-          saved.uncertain.recovery.snapshot.frames.map(
+          saved.uncertain.progress.snapshot.frames.map(
             (frame: any) => frame.playbookId,
           ),
         ).toEqual(['flow', 'leaf']);
         expect(
-          saved.uncertain.recovery.snapshot.frames.at(-1).runtime
+          saved.uncertain.progress.snapshot.frames.at(-1).runtime
             .recoveryCheckpoint.boundaryPrefix,
         ).toBeGreaterThan(0);
       }
@@ -627,7 +550,7 @@ it.each([
       crash = false;
       refusePoint = false;
       failLeaf = false;
-      // A vanished saved action is refused as a normal turn, not a setup crash.
+      // Reporting an interruption never dispatches a previously available action.
       vanish = kind === 'vanished';
       controller = await openSessionHost({
         ...options,
@@ -636,9 +559,7 @@ it.each([
       });
       const last = await controller.recover();
       expect(last.state).toBe('settled');
-      expect(last.snapshot.lastSettlementStatus).toBe(
-        vanish ? 'rejected' : kind === 'adopted-assessment' ? 'ok' : saved.uncertain.recovery.continuation.status,
-      );
+      expect(last.snapshot.lastSettlementStatus).toBe('ok');
       if (!vanish && kind !== 'adopted-assessment') {
         expect(last.snapshot.mode).toBe('engaged.parked');
         const completed = await controller.recover('Continue child.');

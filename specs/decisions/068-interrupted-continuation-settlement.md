@@ -5,6 +5,8 @@
 
 ## Status
 
+Amended by [DR-070](070-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice.
+
 Accepted.
 Amends [DR-066](066-captain-prepares-step-recovery.md), [DR-036](036-coherent-abort-settlement.md), [DR-067](067-captain-relays-player-questions.md), [DR-038](038-universal-run-resumption.md), [DR-040](040-outcome-authority-effect-reconciliation.md), and [DR-049](049-portable-session-contract.md).
 

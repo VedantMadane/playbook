@@ -308,7 +308,7 @@ export async function runPlaybookRun(options = {}) {
       if (!args.retryUncertain) {
         const releaseError = await releaseLease(lease);
         lease = undefined;
-        await reportUncertainSession(stderr, sessionId, priorRecord.uncertain.recovery !== undefined);
+        await reportUncertainSession(stderr, sessionId, priorRecord.uncertain.progress !== undefined);
         if (releaseError !== undefined) {
           await writeStream(
             stderr,
@@ -969,99 +969,46 @@ function isCaptainSessionHostCleanupIncomplete(error) {
   );
 }
 
-function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, continuation, retainedGenerations) {
-  const checkpoint = assertPlaybookEffectLedger(snapshot.effectLedger);
+function restoreInterruptedProgress(record, ledger) {
+  const base = record.snapshot;
+  const progress = record.uncertain.progress;
   const current = assertPlaybookEffectLedger(ledger);
-  const checkpointBoundaryCount = checkpoint.boundaries.length;
-  const currentPrefix = current.boundaries.slice(0, checkpointBoundaryCount);
-  if (!isPlaybookEffectLedgerMonotonicExtension(checkpoint, current)) {
+  if (!isPlaybookEffectLedgerMonotonicExtension(base.effectLedger, current)) {
     throw new Error('Captain recovery evidence changed incompatibly');
   }
-  const assessmentRetry = continuation?.kind === 'runtime' &&
-    ['retry:adjudication', 'retry:restored-step'].includes(continuation.actionId);
-  const leaf = snapshot.mode === 'engaged.parked' ? snapshot.frames.at(-1) : undefined;
-  const invocation = leaf?.runtime.recoveryCheckpoint;
-  const withoutAssessment = (boundaries) => boundaries.map((boundary, index) => {
-    if (!invocation || index < invocation.boundaryPrefix || ![leaf.sessionId, leaf.runtime.retainedEffectSourceSessionId].includes(boundary.runtimeSessionId) || boundary.sourceStateId !== invocation.stateId) return boundary;
-    const { semanticCandidate, restored, ...physical } = boundary;
-    return physical;
-  });
-  const assessmentOnly = assessmentRetry && current.boundaries.length === checkpoint.boundaries.length &&
-    isDeepStrictEqual(current.logicalOperations, checkpoint.logicalOperations) &&
-    isDeepStrictEqual(withoutAssessment(currentPrefix), withoutAssessment(checkpoint.boundaries));
-  const progressed = !isDeepStrictEqual(checkpoint, current);
-  const dispatched = continuation !== undefined || snapshot.frames?.some((frame) => frame.runtime.failedEffectAttempt !== undefined);
-  const unsafe = !isDeepStrictEqual(currentPrefix, checkpoint.boundaries) ||
-    !isDeepStrictEqual(current.logicalOperations, checkpoint.logicalOperations) ||
-    current.boundaries.slice(checkpointBoundaryCount).some((boundary) => boundary.physicalReceipt?.classification !== 'unchanged');
-  if (progressed && !assessmentOnly && (dispatched || unsafe)) {
-    // The later machine position is unknown. Do not restore a stale runtime
-    // or attach someone else's work to it. Settle the evidence at host level.
-    const changedBoundaries = current.boundaries.filter((boundary, index) => !isDeepStrictEqual(boundary, checkpoint.boundaries[index]));
-    const changedOperations = current.logicalOperations.filter((operation, index) => !isDeepStrictEqual(operation, checkpoint.logicalOperations[index]));
-    const owners = new Set([...changedBoundaries, ...changedOperations].map((entry) => entry.runtimeSessionId));
-    const affected = (frames) => frames.some((frame) => owners.has(frame.sessionId) || owners.has(frame.runtime.retainedEffectSourceSessionId));
-    const clears = new Set(Object.entries(retainedGenerations ?? {}).filter(([, generation]) => affected(generation.frames)).map(([id]) => id));
-    const { frames, pendingBossQuestions, lastError, retainedEffectReconciliation, ...base } = snapshot;
-    return {
-      snapshot: assertPlaybookCaptainShellSnapshot({ ...base, mode: 'chat', effectLedger: current }),
-      continuation: {
-        kind: 'settle', status: 'failed',
-        facts: [...(continuation?.facts ?? []), 'The process stopped after work began, but its exact stopping point was not saved. Files and recorded evidence are preserved. No player work was repeated. This attempt has ended; check the saved work before starting another attempt.'],
-        settlement: {
-          retentionUpdates: [...clears].sort().map((rootPlaybookId) => ({ kind: 'clear', rootPlaybookId })),
-          unresolvedEffects: projectUnresolvedEffects(current, [
-            ...changedBoundaries.map(({ boundaryId }) => ({ kind: 'boundary', boundaryId })),
-            ...changedOperations.map(({ operationId }) => ({ kind: 'logical-operation', operationId })),
-          ]),
-        },
-      },
-    };
+  const saved = progress?.snapshot;
+  const changedBoundaries = current.boundaries.filter((boundary, index) => !isDeepStrictEqual(boundary, base.effectLedger.boundaries[index]));
+  const changedOperations = current.logicalOperations.filter((operation, index) => !isDeepStrictEqual(operation, base.effectLedger.logicalOperations[index]));
+  const report = {
+    boundaryPrefix: base.effectLedger.boundaries.length,
+    effects: projectUnresolvedEffects(current, [
+      ...changedBoundaries.map(({ boundaryId }) => ({ kind: 'boundary', boundaryId })),
+      ...changedOperations.map(({ operationId }) => ({ kind: 'logical-operation', operationId })),
+    ]),
+    text: saved
+      ? 'The run stopped. Its saved position is restored; no work was repeated. Choose how to continue. Before repeating unfinished work, confirm that the earlier worker has stopped and check any outside actions it may have taken.'
+      : 'The exact stopping point was not saved. Files and recorded results are preserved; no work was repeated. Check the saved work and stop any earlier worker before starting another attempt.',
+  };
+  if (saved) {
+    if (!isPlaybookEffectLedgerMonotonicExtension(saved.effectLedger, current)) throw new Error('Saved step evidence changed incompatibly');
+    const frames = saved.frames?.map((frame) => {
+      const checkpoint = frame.runtime.recoveryCheckpoint;
+      const step = progress.steps.find((entry) => entry.id === checkpoint?.id && entry.runtimeSessionId === frame.sessionId && entry.playbookId === frame.playbookId && entry.stateId === checkpoint?.stateId);
+      return { ...frame, runtime: { ...frame.runtime, effectLedger: current,
+        ...(step?.result === undefined || frame.runtime.state.stateId !== 'failed' ? {} : { recoveryCheckpoint: { ...checkpoint, result: step.result } }),
+      } };
+    });
+    return { snapshot: assertPlaybookCaptainShellSnapshot({ ...saved, effectLedger: current, ...(frames ? { frames } : {}) }), report };
   }
-  if (!isDeepStrictEqual(currentPrefix, checkpoint.boundaries) &&
-      !(assessmentRetry && isDeepStrictEqual(withoutAssessment(currentPrefix), withoutAssessment(checkpoint.boundaries)))) {
-    throw new Error(
-      "Captain uncertain turn repository-effect reconciliation cannot restore a changed pre-turn boundary",
-    );
-  }
-  if (
-    !isDeepStrictEqual(current.logicalOperations, checkpoint.logicalOperations)
-  ) {
-    throw new Error(
-      "Captain uncertain turn repository-effect reconciliation found deferred logical-operation progress and cannot replay the Boss turn",
-    );
-  }
-  const suffix = current.boundaries.slice(checkpointBoundaryCount);
-  const blocking = suffix.find(
-    (boundary) => boundary.physicalReceipt?.classification !== "unchanged",
-  );
-  if (blocking !== undefined) {
-    const classification =
-      blocking.physicalReceipt?.classification ?? "incomplete";
-    throw new Error(
-      `Captain uncertain turn repository-effect boundary ${JSON.stringify(blocking.boundaryId)} is ${classification}; whole-turn replay remains parked for reconciliation`,
-    );
-  }
-  const frames =
-    snapshot.mode !== "engaged.parked"
-      ? undefined
-      : snapshot.frames.map((frame) => {
-          if (catalog[frame.playbookId]?.artifactSchema !== 3) {
-            throw new Error(
-              `Captain uncertain turn cannot rebase frame ${JSON.stringify(frame.playbookId)} without exact artifact-schema authority`,
-            );
-          }
-          return {
-            ...frame,
-            runtime: { ...frame.runtime, effectLedger: current },
-          };
-        });
-
-  return { snapshot: assertPlaybookCaptainShellSnapshot({
-    ...snapshot,
-    effectLedger: current,
-    ...(frames === undefined ? {} : { frames }),
-  }) };
+  const owners = new Set([...changedBoundaries, ...changedOperations, ...(progress?.steps ?? [])].map((entry) => entry.runtimeSessionId));
+  const clears = Object.entries(record.retainedGenerations ?? {})
+    .filter(([, generation]) => generation.frames.some((frame) => owners.has(frame.sessionId) || owners.has(frame.runtime.retainedEffectSourceSessionId)))
+    .map(([rootPlaybookId]) => ({ kind: 'clear', rootPlaybookId }));
+  const { frames, pendingBossQuestions, lastError, retainedEffectReconciliation, ...chat } = base;
+  return {
+    snapshot: assertPlaybookCaptainShellSnapshot({ ...chat, mode: 'chat', effectLedger: current }),
+    report: { ...report, retentionUpdates: clears, unresolvedEffects: report.effects },
+  };
 }
 
 // A drained turn can retain its actual stopped stack without replaying work.
@@ -1069,7 +1016,7 @@ function reconcileWholeTurnReplaySnapshot(snapshot, ledger, catalog, continuatio
 export async function settleInterruptedRecovery(shell, lease) {
   if (typeof lease.read !== 'function') return;
   const record = await lease.read();
-  if (!record?.uncertain?.recovery) return;
+  if (!record?.uncertain?.progress) return;
   const settlement = shell.exportSettlement();
   if (!settlement) return;
   return { attemptId: record.uncertain.attemptId, record: await lease.settle({ attemptId: record.uncertain.attemptId, ...settlement }) };
@@ -1123,43 +1070,20 @@ export async function createCaptainSessionHost({
     effectLedgerSnapshotFromCapabilities(hostCapabilities);
   const interrupted = reconcileUncertainTurnReplay && typeof sessionLease.read === 'function'
     ? await sessionLease.read() : undefined;
-  const recovery = interrupted?.uncertain?.recovery;
-  let sourceSnapshot = recovery?.snapshot ?? restoreSnapshot;
-  let interruptedContinuation;
-  if (
-    sourceSnapshot !== undefined &&
-    !isDeepStrictEqual(sourceSnapshot.effectLedger, currentEffectLedger())
-  ) {
-    const recovered =
-      typeof sessionLease.read === "function"
-        ? await sessionLease.read()
-        : undefined;
-    if (
-      recovered?.state === "settled" &&
-      isDeepStrictEqual(recovered.snapshot.effectLedger, currentEffectLedger())
-    ) {
-      sourceSnapshot = recovered.snapshot;
+  let sourceSnapshot = restoreSnapshot;
+  let interruptedReport;
+  if (interrupted) {
+    const restored = restoreInterruptedProgress(interrupted, currentEffectLedger());
+    sourceSnapshot = restored.snapshot;
+    interruptedReport = restored.report;
+  } else if (sourceSnapshot && !isDeepStrictEqual(sourceSnapshot.effectLedger, currentEffectLedger())) {
+    const recovered = await sessionLease.read?.();
+    if (recovered?.state !== 'settled' || !isDeepStrictEqual(recovered.snapshot.effectLedger, currentEffectLedger())) {
+      throw new Error('Captain session effect ledger requires reconciliation before source-state restoration');
     }
+    sourceSnapshot = recovered.snapshot;
   }
-  if (sourceSnapshot !== undefined && reconcileUncertainTurnReplay) {
-    const reconciled = reconcileWholeTurnReplaySnapshot(
-      sourceSnapshot,
-      currentEffectLedger(),
-      config.catalog,
-      recovery?.continuation,
-      interrupted?.retainedGenerations,
-    );
-    sourceSnapshot = reconciled.snapshot;
-    interruptedContinuation = reconciled.continuation;
-  } else if (
-    sourceSnapshot !== undefined &&
-    !isDeepStrictEqual(sourceSnapshot.effectLedger, currentEffectLedger())
-  ) {
-    throw new Error(
-      "Captain session effect ledger requires reconciliation before source-state restoration",
-    );
-  }
-  if (sourceSnapshot !== undefined && !recovery && typeof sessionLease.consumeHints === "function") {
+  if (sourceSnapshot !== undefined && !interrupted && typeof sessionLease.consumeHints === "function") {
     sourceSnapshot = attachSessionHints(sourceSnapshot, await sessionLease.consumeHints());
   }
   const bufferedRecords = [];
@@ -1176,11 +1100,11 @@ export async function createCaptainSessionHost({
     else await forwardRecord(record);
   } }];
   const shell = createPlaybookCaptainShell(captainOptionsFromConfig(config), {
-    abortPreparation: () => host?.abortActiveTurn('Captain preparation exceeded its 150-second limit'),
+    abortPreparation: (reason) => host?.abortActiveTurn(typeof reason === 'string' ? reason : 'Captain preparation exceeded its 150-second limit'),
     loadModule,
     hostCapabilities,
-    ...(typeof sessionLease.checkpointRecovery === 'function' ? {
-      checkpointRecovery: (point) => sessionLease.checkpointRecovery(point),
+    ...(typeof sessionLease.recordProgress === 'function' ? {
+      recordProgress: (change) => sessionLease.recordProgress(change),
     } : {}),
     continuity: {
       async beforeCall(participantId) { sessionLease.clearHint?.(participantId); await sessionLease.assertOwner(); },
@@ -1240,8 +1164,7 @@ export async function createCaptainSessionHost({
     }
     presentationReady = true;
     for (const record of bufferedRecords) await forwardRecord(record);
-    if (interruptedContinuation) shell.selectRecovery(interrupted.uncertain.input, recovery?.instruction ?? interrupted.uncertain.input, interruptedContinuation);
-    else if (recovery) shell.selectRecovery(interrupted.uncertain.input, recovery.instruction, recovery.continuation);
+    if (interruptedReport) shell.selectInterruptedReport(interrupted.uncertain.input, interruptedReport);
     return { shell, host, snapshot, reconcileRepositoryEffects, getInterruptedSettlement: (attemptId) => attemptId !== undefined && interruptedSettlement?.attemptId === attemptId ? interruptedSettlement.record : undefined };
   } catch (error) {
     let cleanupError;
@@ -1814,8 +1737,8 @@ async function reportUncertainSession(stderr, sessionId, hasRecoveryPoint = fals
     [
       `playbook run: Captain session ${JSON.stringify(sessionId)} has an uncertain turn and will not be replayed automatically`,
       hasRecoveryPoint
-        ? "Retry resumes the saved step and may repeat external effects after it. Discard is unavailable because the saved step preserves work from this turn."
-        : "Retry may duplicate external effects from the interrupted attempt; discard abandons that attempted turn.",
+        ? "Retry restores and reports the saved work without running it. Discard is unavailable because the saved step preserves work from this turn."
+        : "Retry restores and reports without running work. Discard abandons the attempted turn only when no work was recorded.",
       `playbook run --session ${sessionId} --retry-uncertain`,
       ...(hasRecoveryPoint ? [] : [`playbook run --session ${sessionId} --discard-uncertain`]),
       "",

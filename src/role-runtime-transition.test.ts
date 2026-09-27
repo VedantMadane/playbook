@@ -4642,7 +4642,7 @@ describe('DR-032 shared role runtime transition', () => {
       outcome: 'failed',
       state: { stateId: 'failed' },
     });
-    expect(restored.describe?.().actions.map(({ id }) => id)).toContain(
+    expect(restored.describe?.().actions.map(({ id }) => id)).not.toContain(
       'retry:START',
     );
     expect(restored.exportSnapshot?.()?.failedEffectAttempt).toEqual({

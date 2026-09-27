@@ -3113,13 +3113,9 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       },
     );
     expect(retried.result.code).toBe(0);
-    expect(retryPrompts).toHaveLength(1);
-    expect(retryPrompts[0]).toContain('[Boss message]\ncontinue');
-    expect(retried.result.snapshot).toMatchObject({
-      mode: 'engaged.parked',
-      lastAction: 'resume',
-    });
-    expect(lifecycle.adopts).toBe(2);
+    expect(retryPrompts).toHaveLength(0);
+    expect(retried.result.snapshot).toMatchObject({ mode: 'chat', lastAction: 'respond' });
+    expect(lifecycle.adopts).toBe(1);
 
     const adoptionPrompts: string[] = [];
     FakeAdapter.decision = (prompt) => {
@@ -3140,7 +3136,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(adoptionPrompts[0]).toContain(
       'Retained resumptions:\n- code (/code):',
     );
-    expect(lifecycle.adopts).toBe(3);
+    expect(lifecycle.adopts).toBe(2);
     expect(adopted.result.snapshot).toMatchObject({
       mode: 'engaged.parked',
       lastAction: 'resume',
@@ -3671,7 +3667,6 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
     const recordPath = join(sessionsDir, `${firstId}.json`);
-    let replacementWrites = 0;
     const sessionStore = createCaptainSessionStore({
       sessionsDir,
       fsOps: {
@@ -3679,7 +3674,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
           if (
             from.endsWith('.tmp') &&
             to === recordPath &&
-            ++replacementWrites === 2
+            JSON.parse(await readFile(from, 'utf8')).state === 'settled'
           ) {
             throw new Error('synthetic settlement rename failure');
           }
@@ -3878,7 +3873,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(record.snapshot.sequences.turn).toBe(1);
   });
 
-  it('writes uncertainty before effects, refuses implicit replay, and retries exact stored input', async () => {
+  it('writes uncertainty before effects and reports the exact interrupted input without replay', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-uncertain-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -3938,7 +3933,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(refused.stdout).toBe('');
     expect({ reads, hosts }).toEqual({ reads: 0, hosts: 0 });
     expect(refused.stderr).toContain('will not be replayed automatically');
-    expect(refused.stderr).toContain('may duplicate external effects');
+    expect(refused.stderr).toContain('restores and reports without running work');
     expect(refused.stderr).toContain(
       `playbook run --session ${firstId} --retry-uncertain`,
     );
@@ -3972,7 +3967,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       },
     );
     expect(retried.result.code).toBe(0);
-    expect(retried.inputs).toEqual([exactInput]);
+    expect(retried.inputs).toEqual([]);
     expect(reads).toBe(0);
     expect(retryMarker).toMatchObject({
       state: 'uncertain',
@@ -4002,7 +3997,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     );
   });
 
-  it('replays only an all-unchanged multi-attempt suffix and rebases schema-3 frame mirrors', async () => {
+  it('reports an all-unchanged multi-attempt suffix without replay', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-effect-retry-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4154,14 +4149,9 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       },
     );
     expect(retried.result.code, retried.stderr).toBe(0);
-    expect(captainInputs).toEqual([
-      '/code inspect it',
-      'finish recovered review',
-    ]);
-    expect(restoredFrameLedgers).toEqual([
-      { playbookId: 'code', ledger: beforeRetry.effectLedger },
-      { playbookId: 'review', ledger: beforeRetry.effectLedger },
-    ]);
+    expect(captainInputs).toEqual(['/code inspect it']);
+    expect(restoredFrameLedgers).toEqual([]);
+    expect(retried.result.snapshot.mode).toBe('chat');
     expect(retried.result.snapshot.captain.runtime.effectLedger).toEqual(
       emptyPlaybookEffectLedger(),
     );
@@ -4308,7 +4298,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     const recovered = await store.read(firstId);
     expect(recovered.state).toBe('settled');
     expect(recovered.snapshot.mode).toBe('chat');
-    expect(recovered.snapshot.lastSettlementStatus).toBe('failed');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
     expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
     expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
     expect(recovered.effectLedger).toEqual(beforeRetry.effectLedger);
@@ -4445,7 +4435,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     const recovered = await store.read(firstId);
     expect(recovered.state).toBe('settled');
     expect(recovered.snapshot.mode).toBe('chat');
-    expect(recovered.snapshot.lastSettlementStatus).toBe('failed');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
     expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
     expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
   });
@@ -4571,12 +4561,12 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     const recovered = await store.read(firstId);
     expect(recovered.state).toBe('settled');
     expect(recovered.snapshot.mode).toBe('chat');
-    expect(recovered.snapshot.lastSettlementStatus).toBe('failed');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
     expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
     expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
   });
 
-  it('retries the exact attempted tuning instead of settled or current tuning', async () => {
+  it('restores the attempted tuning without rerunning its input', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-retuned-retry-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4696,7 +4686,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     );
 
     expect(retried.result.code).toBe(0);
-    expect(retried.inputs).toEqual([attemptedInput]);
+    expect(retried.inputs).toEqual([]);
     expect(retryHost).toMatchObject({
       captainConfig: { model: 'captain-B', fastMode: true },
       players: [

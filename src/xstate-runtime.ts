@@ -598,6 +598,7 @@ export function snapshotPlaybookSession(
     callPlaybook: capturedPort(portDescriptors, 'callPlaybook'),
     emitStatus: capturedPort(portDescriptors, 'emitStatus'),
     emitTelemetry: capturedPort(portDescriptors, 'emitTelemetry'),
+    ...(portDescriptors.recordStep === undefined ? {} : { recordStep: capturedPort(portDescriptors, 'recordStep') }),
   });
   const playerSessions = hasPlayerSessions
     ? capturedSessionStore(sessionDescriptors)
@@ -2888,7 +2889,7 @@ export function assertPlaybookRuntimeSnapshot(
     if ((state.stateId !== 'failed' && pendingBossQuestions.length === 0) || !isRecord(checkpoint)) {
       throw new TypeError('runtime recoveryCheckpoint requires an interrupted state and an object');
     }
-    rejectUnknownKeys(checkpoint, ['stateId', 'prompt', 'machine', 'boundaryPrefix'], 'runtime recoveryCheckpoint');
+    rejectUnknownKeys(checkpoint, ['stateId', 'prompt', 'machine', 'boundaryPrefix', 'result', 'id'], 'runtime recoveryCheckpoint');
     const stateId = requireNonEmptyString(checkpoint.stateId, 'recoveryCheckpoint.stateId');
     const prompt = requireNonEmptyString(checkpoint.prompt, 'recoveryCheckpoint.prompt');
     const boundaryPrefix = checkpoint.boundaryPrefix;
@@ -2898,7 +2899,7 @@ export function assertPlaybookRuntimeSnapshot(
         checkpoint.machine.value !== stateId) {
       throw new TypeError('runtime recoveryCheckpoint has an invalid machine or boundary prefix');
     }
-    recoveryCheckpoint = Object.freeze({stateId, prompt, boundaryPrefix, machine: snapshotJsonValue(checkpoint.machine)});
+    recoveryCheckpoint = Object.freeze({stateId, prompt, boundaryPrefix, machine: snapshotJsonValue(checkpoint.machine), ...(own(checkpoint, 'id') ? { id: effectUuid(checkpoint.id, 'recoveryCheckpoint.id') } : {}), ...(own(checkpoint, 'result') ? { result: snapshotJsonValue(checkpoint.result) } : {})});
   }
   const fields = {
     playbookId,
@@ -3051,6 +3052,7 @@ export interface NestedPlaybookBridge<
   confirmRestore(): void;
   /** Complete durable identity; undefined until a normal or restored call suspends. */
   getSuspendedCall(): PlaybookSuspendedCall | undefined;
+  checkpointCall(child: PlaybookPendingCall): PlaybookSuspendedCall | undefined;
   resume(input: {
     callId: string;
     result: PlaybookCallResult;
@@ -4149,6 +4151,9 @@ export function createNestedPlaybookBridge<
     actorLogic,
     getPendingCall: () => pendingIdentity(current),
     getSuspendedCall: () => suspendedIdentity(current),
+    checkpointCall: (child) => current && current.callId === child.callId && current.input.playbookId === child.playbookId
+      ? { ...child, stateId: current.input.stateId, text: current.input.text, ...(current.turnId === undefined ? {} : { turnId: current.turnId }) }
+      : undefined,
     prepareRestore(call) {
       // Capture the complete host-owned descriptor before observing or
       // mutating bridge state, so a rejected preparation cannot leave state.

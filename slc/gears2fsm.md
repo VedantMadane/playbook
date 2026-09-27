@@ -727,8 +727,7 @@ current event, not solely from the context that action will populate.
 For an omitted event value, use an existing context seed only where Source
 permits it; do not manufacture a required constructor value to satisfy a
 context-only entry guard. The linked runtime sends the entry event normally;
-its `entryEvent.contextField` declaration supports failure retry and does not
-copy fresh text into context before the guard.
+entry metadata does not copy fresh text into context before the guard.
 An entry event's copy action shall not clear per-run parameters the event omits: an absent optional field falls back to the existing (input-seeded) context value.
 The two surfaces shall not be collapsed. `BOSS_INTERRUPT` always carries its
 target id and may additionally carry typed Boss-supplied fields such as an

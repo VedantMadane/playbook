@@ -418,7 +418,7 @@ Captain may answer a player from the original task when it already answers the q
 
 If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
 
-All applications sharing a session store, including Spex and the CLI, must upgrade together before using these recovery fields. Hosts from 15.1.x cannot read the extended records; see [the compatibility decision](../specs/decisions/068-interrupted-continuation-settlement.md).
+All applications sharing a session store, including Spex and the CLI, must upgrade together before using these recovery fields. Hosts from 15.1.x cannot read the extended records.
 
 A single recovery entry point handles either a paused step or an uncertain attempt:
 
@@ -430,7 +430,7 @@ try {
 } finally { await controller.dispose(); }
 ```
 
-For uncertainty it uses the saved instruction and exact attempted settings. It checks later effects against a saved point before resuming it; without one, it checks whether the original turn can safely repeat. Work beyond a saved position is preserved for review or abandonment instead of being repeated, and saved assessment/restoration permits only its own verified evidence changes. It never chooses discard. For an already settled pause, `recover(bossInstruction)` requires Boss's instruction or answer and passes it through the same Captain turn as CLI input; an ordinary answer does not force preparation. New input cannot replace an uncertain instruction before recovery.
+For uncertainty it restores the saved position and reports the recorded work using the attempted settings. It runs no player, script or preparation. Boss then chooses an available action or supplies input. Completed results are reused; before repeating unfinished work, Boss must stop any old worker and check outside actions. A runtime without a saved position returns to Captain with work preserved. It never chooses discard. For an already settled pause, `recover(bossInstruction)` requires Boss's instruction or answer and passes it through the same Captain turn as CLI input; an ordinary answer does not force preparation. New input cannot replace an uncertain instruction before recovery.
 
 If a turn fails and leaves this open controller uncertain, dispose it and reopen with `mode:'recover'` before calling `recover()` without new input.
 

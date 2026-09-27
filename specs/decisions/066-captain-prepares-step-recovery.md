@@ -5,6 +5,8 @@
 
 ## Status
 
+Amended by [DR-070](070-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice.
+
 Accepted.
 Amends [DR-029](029-session-scoped-conversational-captain.md)'s tool-free Captain in one scope: a model- or host-selected recovery action, including bounded automatic recovery, may run a separate preparation call.
 Refines [DR-034](034-durable-failure-retry-continuity.md)'s entry retry with a runtime-owned checkpoint of the actual interrupted invocation.

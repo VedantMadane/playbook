@@ -2551,26 +2551,21 @@ async function createLease({
   now,
 }) {
   let released = false;
-  let operationActive = false;
+  let operationTail = Promise.resolve();
   let indeterminateEffectLedgerWrite;
   let releasing = false;
   const ownerChecks = new Set();
 
-  const requireActive = () => {
-    if (released) throw new Error('Captain session lease was already released');
-    if (operationActive) {
-      throw new Error('Captain session lease operation is already in progress');
-    }
-  };
-
-  const runExclusive = async (operation) => {
-    requireActive();
-    operationActive = true;
-    try {
-      return await operation();
-    } finally {
-      operationActive = false;
-    }
+  // All lifecycle, step and repository writes share one order, including
+  // calls from parallel players. A failed write does not poison the queue.
+  const runExclusive = (operation) => {
+    if (releasing) return Promise.reject(new Error('Captain session lease is releasing'));
+    const run = operationTail.then(() => {
+      if (released) throw new Error('Captain session lease was already released');
+      return operation();
+    });
+    operationTail = run.then(() => undefined, () => undefined);
+    return run;
   };
 
   const assertOwnerUnchecked = async () => {
@@ -3122,7 +3117,7 @@ async function createLease({
         ...settledAbandonmentMember(prior),
         uncertain: {
           baseUpdatedAt: prior.uncertain.baseUpdatedAt,
-          ...(prior.uncertain.recovery === undefined ? {} : { recovery: prior.uncertain.recovery }),
+          ...(prior.uncertain.progress === undefined ? {} : { progress: prior.uncertain.progress }),
           input: prior.uncertain.input,
           attemptId: nextAttemptId,
           attemptNumber: prior.uncertain.attemptNumber + 1,
@@ -3617,17 +3612,43 @@ async function createLease({
       return record.effectLedger;
     });
 
-  const checkpointRecovery = (point) => runExclusive(async () => {
+  const recordProgress = (value) => runExclusive(async () => {
+    const change = requireRecord(snapshotJsonValue(value, 'Captain progress change'), 'Captain progress change');
+    exactOptionalKeys(change, [], ['snapshot', 'step', 'retentionUpdates'], 'Captain progress change');
     await assertOwnerUnchecked();
     const prior = await readRecord(sessionId, { missing: 'undefined' });
     if (prior?.state !== 'uncertain' || prior.uncertain.abandonment) {
-      throw new Error('Saving a recovery point requires an active uncertain turn');
+      throw new Error('Saving progress requires an active uncertain turn');
     }
-    if (!isDeepStrictEqual(point?.snapshot?.effectLedger, prior.effectLedger)) {
-      throw new Error('Recovery point must contain the current effect ledger');
+    const progress = structuredClone(prior.uncertain.progress ?? { snapshot: null, steps: [] });
+    if (Object.hasOwn(change, 'snapshot')) {
+      if (change.snapshot !== null && !isDeepStrictEqual(change.snapshot.effectLedger, prior.effectLedger)) {
+        throw new Error('Saved progress must contain the current effect ledger');
+      }
+      progress.snapshot = change.snapshot;
     }
+    if (change.step !== undefined) {
+      const step = snapshotJsonValue(change.step, 'Captain step');
+      const index = progress.steps.findIndex(({ id }) => id === step.id);
+      if (index < 0) {
+        if (!Object.hasOwn(change, 'snapshot')) throw new Error('A step start requires its position or explicit null');
+        if (Object.hasOwn(step, 'result')) throw new Error('A step result requires its saved start');
+        progress.steps.push(step);
+      } else {
+        const { result, ...start } = step;
+        const saved = progress.steps[index];
+        const { result: priorResult, ...priorStart } = saved;
+        if (!isDeepStrictEqual(start, priorStart) ||
+            (priorResult !== undefined && !isDeepStrictEqual(priorResult, result))) {
+          throw new Error('A saved step cannot be replaced');
+        }
+        progress.steps[index] = step;
+      }
+    }
+    const retainedGenerations = applyRetainedGenerationUpdates(prior.retainedGenerations ?? {},
+      validateRetainedGenerationUpdates(change.retentionUpdates ?? []), prior.structuralProjection);
     const record = validateCaptainSessionRecord(projectRecovery({
-      ...prior, uncertain: { ...prior.uncertain, recovery: point },
+      ...prior, retainedGenerations, uncertain: { ...prior.uncertain, progress },
     }));
     await assertOwnerUnchecked();
     await writeRecord(record, { noReplace: false });
@@ -3647,7 +3668,7 @@ async function createLease({
           'Captain session unresolved-effect abandonment must recover before discard',
         );
       }
-      if (prior.uncertain.recovery !== undefined) {
+      if (prior.uncertain.progress !== undefined) {
         throw new Error('The saved step preserves work from the interrupted turn; resume its saved step instead of discarding');
       }
       if (!isDeepStrictEqual(prior.effectLedger, prior.snapshot.effectLedger)) {
@@ -3685,9 +3706,9 @@ async function createLease({
     });
 
   const release = () => {
+    if (released || releasing) return Promise.reject(new Error(`Captain session lease is ${released ? 'released' : 'releasing'}`));
     replayWriter.closeAppendAdmission();
-    return runExclusive(async () => {
-      releasing = true;
+    const pending = runExclusive(async () => {
       try {
         await Promise.allSettled([...ownerChecks]);
         await replayWriter.prepareRelease();
@@ -3704,6 +3725,8 @@ async function createLease({
         releasing = false;
       }
     });
+    releasing = true;
+    return pending;
   };
 
   return Object.freeze({
@@ -3727,7 +3750,7 @@ async function createLease({
     completeUnresolvedEffectAbandonment,
     recoverUnresolvedEffectAbandonment,
     writeEffectLedger,
-    checkpointRecovery,
+    recordProgress,
     settle,
     discard,
     assertOwner,
@@ -4071,7 +4094,7 @@ function validateCanonicalCaptainSessionRecord(
     exactOptionalKeys(
       uncertain,
       UNCERTAIN_KEYS,
-      ['abandonment', 'recovery'],
+      ['abandonment', 'progress'],
       'Captain session record uncertain',
     );
     if (uncertain.baseUpdatedAt !== null) {
@@ -4149,42 +4172,32 @@ function validateCanonicalCaptainSessionRecord(
       uncertain.attemptedExecutionProjection,
       artifactSchemas,
     );
-    if (uncertain.recovery !== undefined) {
-      const point = requireRecord(uncertain.recovery, 'Captain recovery point');
-      rejectUnknownOrMissingKeys(point, ['snapshot', 'instruction', ...(Object.hasOwn(point, 'continuation') ? ['continuation'] : [])], 'Captain recovery point');
-      if (point.continuation !== undefined) {
-        const continuation = requireRecord(point.continuation, 'Captain recovery continuation');
-        const factsKey = Object.hasOwn(continuation, 'facts') ? ['facts'] : [];
-        if (factsKey.length && (!Array.isArray(continuation.facts) || continuation.facts.some((fact) => typeof fact !== 'string' || !fact.trim()))) throw new Error('Captain recovery facts must be nonempty strings');
-        if (continuation.kind === 'reply') rejectUnknownOrMissingKeys(continuation, ['kind', ...factsKey], 'Captain recovery continuation');
-        else if (continuation.kind === 'runtime') {
-          rejectUnknownOrMissingKeys(continuation, ['kind', 'actionId', ...factsKey], 'Captain recovery continuation');
-          requireCanonicalNonblank(continuation.actionId, 'Captain recovery action');
-        } else if (continuation.kind === 'settle') {
-          rejectUnknownOrMissingKeys(continuation, ['kind', 'status', ...factsKey, ...(Object.hasOwn(continuation, 'settlement') ? ['settlement'] : [])], 'Captain recovery continuation');
-          if (!['ok', 'failed', 'rejected'].includes(continuation.status)) throw new Error('Captain saved settlement status is invalid');
-          if (continuation.settlement !== undefined) {
-            const settlement = requireRecord(continuation.settlement, 'Captain saved settlement');
-            exactOptionalKeys(settlement, ['retentionUpdates', 'unresolvedEffects'], ['report', 'presentation'], 'Captain saved settlement');
-            const updates = validateRetainedGenerationUpdates(settlement.retentionUpdates);
-            validateRetainedGenerations(applyRetainedGenerationUpdates(record.retainedGenerations ?? {}, updates, structural), structural, point.snapshot.effectLedger);
-            assertPlaybookCaptainUnresolvedEffects(settlement.unresolvedEffects);
-            if (settlement.presentation !== undefined) requireCanonicalNonblank(settlement.presentation, 'Captain saved presentation');
-            if (settlement.report !== undefined) validateRecoveryReport(settlement.report, continuation.status);
-          }
-
-        } else throw new Error('Captain recovery continuation must be reply, runtime or settle');
+    if (uncertain.progress !== undefined) {
+      const progress = requireRecord(uncertain.progress, 'Captain progress');
+      rejectUnknownOrMissingKeys(progress, ['snapshot', 'steps'], 'Captain progress');
+      if (!Array.isArray(progress.steps)) throw new Error('Captain steps must be an array');
+      const ids = new Set();
+      for (const step of progress.steps) {
+        exactOptionalKeys(requireRecord(step, 'Captain step'), ['id', 'kind', 'stateId', 'runtimeSessionId', 'playbookId'], ['result'], 'Captain step');
+        assertUuid(step.id, 'Captain step id');
+        assertUuid(step.runtimeSessionId, 'Captain step runtime');
+        if (ids.has(step.id)) throw new Error('Captain step ids must be unique');
+        ids.add(step.id);
+        if (!['player', 'captain', 'script', 'preparation'].includes(step.kind)) throw new Error('Unknown Captain step kind');
+        requireCanonicalNonblank(step.stateId, 'Captain step state');
+        if (!Object.hasOwn(structural.catalog, step.playbookId)) throw new Error('Captain step names an unknown playbook');
       }
-      assertAcceptedInput(point.instruction);
-      const prepared = assertPlaybookCaptainShellSnapshot(point.snapshot);
-      assertSnapshotMatchesStructure(prepared, structural, artifactSchemas);
-      if ((prepared.mode !== 'engaged.parked' && point.continuation?.kind !== 'settle') ||
-          !isDeepStrictEqual(prepared.captain, snapshot.captain) ||
-          !isDeepStrictEqual(prepared.journal, snapshot.journal) ||
-          !isDeepStrictEqual(prepared.sequences, snapshot.sequences) ||
-          !isPlaybookEffectLedgerMonotonicExtension(snapshot.effectLedger, prepared.effectLedger) ||
-          !isPlaybookEffectLedgerMonotonicExtension(prepared.effectLedger, effectLedger)) {
-        throw new Error('Captain recovery point must retain the settled controller and current parked work');
+      if (progress.snapshot !== null) {
+        const prepared = assertPlaybookCaptainShellSnapshot(progress.snapshot);
+        assertSnapshotMatchesStructure(prepared, structural, artifactSchemas);
+        if (!isDeepStrictEqual(prepared.captain, snapshot.captain) ||
+            !isDeepStrictEqual(prepared.journal, snapshot.journal) ||
+            !isDeepStrictEqual(prepared.sequences, snapshot.sequences) ||
+            !isPlaybookEffectLedgerMonotonicExtension(snapshot.effectLedger, prepared.effectLedger) ||
+            !isPlaybookEffectLedgerMonotonicExtension(prepared.effectLedger, effectLedger)) {
+          throw new Error('Saved progress must retain the settled controller and current work');
+        }
+
       }
     }
     if (uncertain.baseUpdatedAt === null) {
@@ -5727,33 +5740,6 @@ function assertSnapshotMatchesStructure(
       throw new Error(
         `Captain session snapshot frame ${JSON.stringify(frame.playbookId)} effect ledger differs from its structural schema authority`,
       );
-    }
-  }
-}
-
-function validateRecoveryReport(value, status) {
-  const report = requireRecord(value, 'Captain saved report');
-  exactOptionalKeys(report, ['status', 'facts', 'counts', 'progressPhrase', 'progressRounds'], ['playbookId', 'bossFacts', 'receipt', 'leafStateSummary', 'savedLine'], 'Captain saved report');
-  if (report.status !== status) throw new Error('Captain saved report status disagrees with settlement');
-  for (const key of ['facts', 'bossFacts']) {
-    if (report[key] !== undefined && (!Array.isArray(report[key]) || report[key].some((text) => typeof text !== 'string'))) throw new Error(`Captain saved report ${key} must contain strings`);
-  }
-  for (const key of ['progressPhrase', 'playbookId', 'leafStateSummary', 'savedLine']) {
-    if (report[key] !== undefined && typeof report[key] !== 'string') throw new Error(`Captain saved report ${key} must be text`);
-  }
-  requireCanonicalNonblank(report.progressPhrase, 'Captain saved progress phrase');
-  const counts = requireRecord(report.counts, 'Captain saved counts');
-  rejectUnknownOrMissingKeys(counts, ['interruptions', 'copyPastes'], 'Captain saved counts');
-  if ([counts.interruptions, counts.copyPastes, report.progressRounds].some((n) => !Number.isSafeInteger(n) || n < 0)) throw new Error('Captain saved counts must be nonnegative integers');
-  if (report.receipt !== undefined) {
-    const receipt = requireRecord(report.receipt, 'Captain saved receipt');
-    exactOptionalKeys(receipt, ['disposition'], ['reason', 'error'], 'Captain saved receipt');
-    if (!['executed', 'failed', 'rejected'].includes(receipt.disposition)) throw new Error('Captain saved receipt disposition is invalid');
-    if (receipt.reason !== undefined && typeof receipt.reason !== 'string') throw new Error('Captain saved receipt reason must be text');
-    if (receipt.error !== undefined) {
-      const error = requireRecord(receipt.error, 'Captain saved receipt error');
-      rejectUnknownOrMissingKeys(error, ['name', 'message'], 'Captain saved receipt error');
-      if (typeof error.name !== 'string' || typeof error.message !== 'string') throw new Error('Captain saved receipt error must contain text');
     }
   }
 }

@@ -181,7 +181,7 @@ async function waitForExit(child: ChildProcess) {
 }
 
 describe('headless Captain process-crash recovery (PBCLI-24)', () => {
-  it('reconstructs an unchanged governed boundary before one exact whole-turn replay', async () => {
+  it('reconstructs an unchanged boundary and reports without whole-turn replay', async () => {
     const paths = await crashFixture();
     const exactInput = '  child crash input\nwith exact bytes\n';
     const crashing = startChild(paths, 'crash', exactInput);
@@ -230,30 +230,9 @@ describe('headless Captain process-crash recovery (PBCLI-24)', () => {
     );
 
     const retry = startChild(paths, 'retry', 'must not replace stored input');
-    const replayStarted = await waitForMessage(
-      retry.child,
-      (value) => value.type === 'effect' || value.type === 'result',
-    );
-    if (replayStarted.type !== 'effect') {
-      throw new Error(
-        `retry exited before replay: code=${replayStarted.result?.code} ${retry.stderr()}`,
-      );
-    }
-    expect(replayStarted, retry.stderr()).toMatchObject({
-      type: 'effect',
-      input: exactInput,
-      mode: 'retry',
-    });
-    const result = await waitForMessage(
-      retry.child,
-      (value) => value.type === 'result',
-    );
+    const result = await waitForMessage(retry.child, (value) => value.type === 'result');
     expect(result.result.code, retry.stderr()).toBe(0);
-    expect(result.events).toEqual([
-      'captain-runtime',
-      'fixture-runtime',
-      'player',
-    ]);
+    expect(result.events).toEqual(['captain-runtime']);
     await waitForExit(retry.child);
     const settled = JSON.parse(await readFile(recordPath, 'utf8'));
     expect(settled.state).toBe('settled');
@@ -263,12 +242,6 @@ describe('headless Captain process-crash recovery (PBCLI-24)', () => {
         boundaryId: '90000000-0000-4000-8000-000000000034',
         attemptId,
         attemptNumber: 1,
-        physicalReceipt: { classification: 'unchanged' },
-      },
-      {
-        boundaryId: '90000000-0000-4000-8000-000000000035',
-        attemptId: nextAttemptId,
-        attemptNumber: 2,
         physicalReceipt: { classification: 'unchanged' },
       },
     ]);
@@ -318,7 +291,7 @@ describe('headless Captain process-crash recovery (PBCLI-24)', () => {
     const recovered = JSON.parse(await readFile(recordPath, 'utf8'));
     expect(recovered).toMatchObject({
       state: 'settled',
-      snapshot: { mode: 'chat', lastSettlementStatus: 'failed' },
+      snapshot: { mode: 'chat', lastSettlementStatus: 'ok' },
       unresolvedEffects: [{ classification: 'concurrent-or-foreign-change' }],
       effectLedger: {
         logicalOperations: [],

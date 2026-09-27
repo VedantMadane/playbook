@@ -24,7 +24,7 @@ export async function openSessionHost(options) {
     if (options.mode === 'recover') retryPending = record?.state === 'uncertain';
     if (options.mode === 'new' && record !== undefined) throw new Error('session already exists');
     if (options.mode !== 'new' && options.sessionId && record === undefined) throw new Error('session does not exist');
-    if (record?.state === 'uncertain' && !retryPending) throw new Error(record.uncertain.recovery ? 'session has an interrupted step; select Retry to resume it' : 'session has an uncertain turn; select Retry or Discard');
+    if (record?.state === 'uncertain' && !retryPending) throw new Error(record.uncertain.progress ? 'session has an interrupted step; select Retry to resume it' : 'session has an uncertain turn; select Retry or Discard');
     if (retryPending && record?.state !== 'uncertain') throw new Error('session has no uncertain turn to retry');
     const cwd = options.cwd ?? record?.cwd ?? process.cwd();
     const selected = retryPending ? record.uncertain.attemptedExecutionProjection : options.config ?? (options.plan ? executionConfigFromPlan(options.plan) : record?.lastAppliedExecutionProjection);
@@ -120,7 +120,7 @@ export async function openSessionHost(options) {
       assertIdle();
       if (prior?.state === 'uncertain' && !retryPending) throw new Error(RECOVERY_REOPEN);
       if (retryPending) {
-        if (input !== undefined) throw new Error('Resume the recorded interrupted instruction before supplying new input');
+        if (input !== undefined) throw new Error('Restore and report the interrupted run before supplying new input');
         return execute(undefined, true);
       }
       if (typeof input !== 'string' || !input.trim()) throw new Error('Recovery of a paused task requires a Boss instruction');
