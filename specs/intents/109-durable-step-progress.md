@@ -24,7 +24,7 @@ Replace special recovery points with saved normal progress, including scripts an
 
 ## Verification
 
-- Protocol model: `node scripts/models/recovery.mjs`; 33,534 new-protocol states pass across seven scenarios; the former protocol fails ordinary, nested, preparation, script and accepted-answer cases. Two crashes, surviving workers, explicit Boss-authorized retries and both atomic-write outcomes are modeled; parallel bespoke execution explicitly uses the lost-position exit.
+- The initial protocol model reported 33,534 passing states across seven scenarios and five failures in an alleged former protocol. Subsequent review found missing states and an inaccurate historical comparison; those results do not establish the original acceptance claim. The checked-in replacement is a bounded policy model with deliberate mutations and separate real process tests.
 - Real process tests: 15 durable-progress cases plus root/nested DECIDE pass, covering player and script completion, missing receipts/results, atomic publication, preparation, completed roots, carried Boss edits, accepted answers, pending questions, a second crash, CLI recovery and an explicit Boss choice to repeat an unfinished script.
 - Runtime script tests: saved-result consumption, lost acknowledgement and rejected start save pass without duplicate execution.
 - Full non-live suite initially reported 2,153 passes, 13 failures and 23 skips. The failures exposed two regressions (control-error propagation and lease-release admission), obsolete retry expectations, and stale package/doc checks; all were fixed and their affected suites passed. A later preparation-save test was updated to assert the new stop-on-save-failure contract and passed.

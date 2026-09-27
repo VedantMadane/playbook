@@ -7,7 +7,7 @@
 
 Amended by [DR-070](070-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice.
 
-Accepted.
+Superseded by DR-070 except for the unsupported-position exit, cancellation cleanup, and child-retention rules below.
 Amends [DR-068](068-interrupted-continuation-settlement.md), [DR-066](066-captain-prepares-step-recovery.md), and [DR-040](040-outcome-authority-effect-reconciliation.md).
 
 ## Context
@@ -17,6 +17,8 @@ Putting a new marker into every old runtime cannot represent that position, brea
 A saved result also needs its pending retention changes and reports, not only its stack.
 
 ## Decision
+
+The saved-selection and whole-turn replay bullets below describe the former protocol; DR-070 replaces them.
 
 - The shared host owns the lost-progress decision defined by [[recovery-27](../packages/recovery.md#recovery-27)]; no runtime receives an invented interruption marker or source identity.
 - An explicit uncertain retry with unrepresentable later work settles a failed attempt in chat, preserving all files, receipts, and ordered unresolved-effect evidence; it runs no player and makes no claim that a workflow completed.

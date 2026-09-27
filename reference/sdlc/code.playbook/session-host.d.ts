@@ -98,7 +98,7 @@ export interface SessionHostController {
    */
   submitShellAction(actionId: string): Promise<SessionRecovery>;
   retry(): Promise<SessionRecovery>;
-  /** Resume recorded uncertainty without input; settled pauses require Boss input. Never discards work.
+  /** Restore and report recorded uncertainty without running work; settled pauses require Boss input. Never discards work.
    * After this live controller becomes uncertain, dispose and reopen with mode:'recover' first. */
   recover(input?: string): Promise<SessionRecovery>;
   dispose(): Promise<void>;

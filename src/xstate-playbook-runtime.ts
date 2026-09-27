@@ -5598,6 +5598,7 @@ export function createXStatePlaybookRuntime<
       );
     }
 
+    let interruptedWork = false;
     let acceptedStepResult: PlaybookRuntimeSnapshot['recoveryCheckpoint'];
     let requiredRecoveryBaseline: PlaybookRepositoryReceipt['baseline'] | undefined;
 
@@ -5674,7 +5675,7 @@ export function createXStatePlaybookRuntime<
     // tool-free judgment. Never repeat the player to recover that evidence.
     function recoverableJudgment(): PlaybookEffectBoundary | undefined {
       if (
-        !recoveryCheckpoint ||
+        !recoveryCheckpoint || recoveryCheckpoint.result !== undefined ||
         retainedEffectReconciliationRequired ||
         deferredReconciliationOperationId !== undefined
       )
@@ -5772,6 +5773,7 @@ export function createXStatePlaybookRuntime<
     }
 
     async function resumeCheckpoint(checkpoint: NonNullable<PlaybookRuntimeSnapshot['recoveryCheckpoint']>): Promise<void> {
+      interruptedWork = false;
       acceptedStepResult = checkpoint;
       try {
         stopActor();
@@ -5850,7 +5852,11 @@ export function createXStatePlaybookRuntime<
           !hasUnresolvedReconciliation()
             ? pendingBossQuestionForState(state, context ?? {})
             : undefined;
-        const failedEffectAttempt =
+        const interruptedPrefix = interrupted ? activeEffectLedgerPrefixSequence : undefined;
+        const interruptedAttempts = new Set(effectLedgerMirror.boundaries.filter(({ sequence }) => interruptedPrefix !== undefined && sequence > interruptedPrefix).map(({ attemptId }) => attemptId));
+        const failedEffectAttempt = interrupted && interruptedPrefix !== undefined && interruptedAttempts.size <= 1
+          ? { boundaryPrefix: interruptedPrefix, attemptId: interruptedAttempts.values().next().value ?? null }
+          :
           hasGovernedPlayerStates &&
           !interrupted && state.stateId === 'failed' &&
           failedAttemptMatchesCurrentLedger(effectLedgerMirror)
@@ -5861,6 +5867,7 @@ export function createXStatePlaybookRuntime<
             : undefined;
         return {
           schemaVersion: 4,
+          ...(interrupted || interruptedWork ? { interrupted: true as const } : {}),
           playbookId: session.playbookId,
           machine: machineSnapshot,
           roleResumeTokens: snapshotRoleResumeTokens(),
@@ -5908,10 +5915,12 @@ export function createXStatePlaybookRuntime<
       signal: AbortSignal,
       execute: () => Promise<PlaybookActorOutput>,
     ): Promise<PlaybookActorOutput> {
+      interruptedWork = false;
       const saved = acceptedStepResult;
       if (saved?.stateId === input.stateId && saved.result !== undefined) {
         acceptedStepResult = undefined;
-        recoveryCheckpoint = undefined;
+        const { result: _result, ...start } = saved;
+        recoveryCheckpoint = start;
         return snapshotJsonValue(saved.result) as PlaybookActorOutput;
       }
       const record = savedPorts?.recordStep;
@@ -7980,6 +7989,7 @@ export function createXStatePlaybookRuntime<
       const initTask = (async () => {
         session = boundSession;
         recoveryCheckpoint = boundSnapshot.recoveryCheckpoint;
+        interruptedWork = boundSnapshot.interrupted === true;
         syncDeferredReconciliationOverlay();
         refreshUnresolvedSemanticReconciliation(effectLedgerMirror);
         prepareReconstructedGovernedDelivery(
@@ -8600,7 +8610,7 @@ export function createXStatePlaybookRuntime<
       // Defined only at a safe capture point — initialized, not disposing
       // or disposed, no active public boundary, and the actor quiescent with
       // status `active`.
-      exportSnapshot: exportRuntimeSnapshot,
+      exportSnapshot: (checkpoint?: { child?: PlaybookPendingCall }) => exportRuntimeSnapshot(checkpoint?.child ? { child: checkpoint.child } : undefined),
 
       // DR-014 §1 / PBRT-45: alternative to `init` that rehydrates an
       // exported snapshot under the same immutable session identity.
@@ -8675,6 +8685,7 @@ export function createXStatePlaybookRuntime<
             .filter((boundary) => runtimeBoundaryIsOwned(boundary) && boundary.sourceStateId === recoveryCheckpoint!.stateId).at(-1);
         const recovery = recoveryCheckpoint === undefined ||
           (pending === undefined && retry === undefined) ? undefined : {
+            ...(interruptedWork ? { explicitOnly: true as const } : {}),
             prompt: recoveryCheckpoint.prompt,
             ...(stoppedBoundary === undefined ? {} : { evidence: snapshotJsonValue({
               declaredResults: stoppedBoundary.sourceOutcomeSchema,
@@ -9271,6 +9282,7 @@ export function createXStatePlaybookRuntime<
                 suppressInspectionEmissions = false;
                 actor.start();
               }
+              interruptedWork = false;
               actor.send(event);
               await waitForPlaybookQuiescence(actor, {
                 pendingCalls: nestedBridge,

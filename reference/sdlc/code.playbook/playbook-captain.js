@@ -472,7 +472,7 @@ function unresolvedEffectBossReport(unresolvedEffects) {
     return [
         'Repository-effect evidence:',
         ...unresolvedEffectReportLines(unresolvedEffects).map((line) => `- ${line}`),
-        'This evidence does not establish workflow completion or attribute any repository change or commit to this workflow.',
+        'Repository observations describe files and commits; workflow results are reported separately.',
     ].join('\n');
 }
 // DR-062 §5: a settled turn whose accepted commit absorbed or altered the
@@ -1976,6 +1976,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
     // object after its one live capability input has moved to a clearable slot.
     const recordProgress = deps.recordProgress;
     const journalledFrames = new WeakSet();
+    const frameWorkSequence = new WeakMap();
     deps = {};
     const buildCurrentEnablements = async () => {
         const hostCapabilities = pendingHostCapabilities;
@@ -2823,6 +2824,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
     const createPorts = (frame) => ({
         ...(recordProgress === undefined ? {} : { recordStep: async (step, position) => {
                 journalledFrames.add(frame);
+                frameWorkSequence.set(frame, (frameWorkSequence.get(frame) ?? 0) + 1);
                 await saveProgress(step.result === undefined ? { frame, position } : undefined, { ...step, runtimeSessionId: frame.sessionId, playbookId: frame.entry.id });
             } }),
         callPlayer: async (roleId, prompt, signal, options) => {
@@ -2862,6 +2864,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             playerTransactions.set(binding.playerId, calling);
             let result;
             let hostResolved = false;
+            frameWorkSequence.set(frame, (frameWorkSequence.get(frame) ?? 0) + 1);
             const untracked = !recordProgress || journalledFrames.has(frame) ? undefined : {
                 id: randomUUID(), kind: 'player', stateId: frame.state?.stateId ?? roleId,
                 runtimeSessionId: frame.sessionId, playbookId: frame.entry.id,
@@ -2979,7 +2982,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 throw error;
             }
             if (untracked)
-                await saveProgress(undefined, { ...untracked, result: snapshotJsonValue(result) });
+                await saveProgress(undefined, { ...untracked, result: { status: result.status } });
             return result;
         },
         callCaptain: async (prompt, signal, options) => {
@@ -2987,6 +2990,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             if (!activeContext) {
                 throw new Error('callCaptain invoked outside a Boss turn');
             }
+            frameWorkSequence.set(frame, (frameWorkSequence.get(frame) ?? 0) + 1);
             const step = !recordProgress || journalledFrames.has(frame) ? undefined : {
                 id: randomUUID(), kind: 'captain', stateId: frame.state?.stateId ?? 'captain',
                 runtimeSessionId: frame.sessionId, playbookId: frame.entry.id,
@@ -3006,7 +3010,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 ...(result.error !== undefined ? { error: result.error } : {}),
             };
             if (step)
-                await saveProgress(undefined, { ...step, result: snapshotJsonValue(output) });
+                await saveProgress(undefined, { ...step, result: { status: output.status } });
             return output;
         },
         callJudge: async (prompt, signal) => {
@@ -3809,9 +3813,14 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 // runtime publishes before disposal removes the frame. The opaque run
                 // output remains runtime-to-runtime data and never becomes Captain
                 // evidence (CAPPLAY-10).
-                activeTurn?.settlementFacts.push(rootCompletionFact(frame, result));
+                const description = result.stateDescription ?? result.terminal?.description ?? leafStateDescription(frame);
+                activeTurn?.settlementFacts.push(rootCompletionFact(frame, { ...result, ...(description === undefined ? {} : { stateDescription: description }) }));
                 recordTerminalRetention(frame, result);
                 await runEffect(() => disposeStack('final'));
+                try {
+                    await saveProgress(undefined, { id: randomUUID(), kind: 'completion', stateId: result.state.stateId, runtimeSessionId: frame.sessionId, playbookId: frame.entry.id, result: snapshotJsonValue({ state: result.state, ...(description === undefined ? {} : { description }), ...(result.terminal === undefined ? {} : { terminalOutcome: result.terminal }) }) }, false);
+                }
+                catch { /* The last acknowledged step result remains available. */ }
             }
             return;
         }
@@ -3901,18 +3910,21 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         clearLeafLedger();
         let calledStatusEmitted = false;
         let childInputStarted = false;
+        let initialChildState;
+        const childAcceptedInput = () => childInputStarted && (frameWorkSequence.has(child) || child.runtime.describe?.().state.stateId !== initialChildState);
         let returnStatusHandled = false;
         let retainedChild = false;
         let resumeCancellation;
         try {
             await initFrame(child);
+            initialChildState = child.runtime.describe?.().state.stateId;
             invocationSignal.throwIfAborted();
             await requireSession().emitStatus(`◇ ${frameLabel(child)} called by ${frameLabel(parent)}`);
             calledStatusEmitted = true;
             // The active child receives Boss cancellation directly. Do not also
             // destroy its suspended caller while the child is draining to a pause.
             const result = await driveFrame(child, request.text, activeContext, AbortSignal.any([invocationSignal, activeContext.signal]), () => { resumeCancellation = parent.pauseCancellation?.(); childInputStarted = true; });
-            if (result.outcome === 'terminal' || (result.outcome === 'aborted' && (!childInputStarted || child.runtime.exportSnapshot?.() === undefined))) {
+            if (result.outcome === 'terminal' || (result.outcome === 'aborted' && (!childAcceptedInput() || child.runtime.exportSnapshot?.() === undefined))) {
                 const callResult = callResultFor(child, result);
                 returnStatusHandled = true;
                 const returned = await popChild(child, result.outcome === 'aborted' ? 'stopped' : 'returned');
@@ -3946,7 +3958,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             return { state: 'suspended', childSessionId: child.sessionId };
         }
         catch (error) {
-            if (childInputStarted && !(error instanceof VisibilityControlError) && !invocationSignal.aborted && leafFrame() === child) {
+            if (childAcceptedInput() && !(error instanceof VisibilityControlError) && !invocationSignal.aborted && leafFrame() === child) {
                 try {
                     const view = child.runtime.describe?.();
                     if (view?.state.status === 'active' && view.state.quiescent &&
@@ -4240,6 +4252,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         lines.push(view.recovery === undefined || !abortPreparation
             ? 'Recovery preparation: unavailable.'
             : digestLine `Recovery preparation: available for ${view.recovery.description ?? 'the interrupted step'}. Select recover to prepare and continue the authorized task; ask Boss only for missing input or an incomplete playbook.`);
+        if (view.recovery?.explicitOnly)
+            lines.push('This work was interrupted. Select recover or retry only when Boss explicitly chooses that continuation; unrelated text is not permission to repeat it. Before repeating unfinished work, Boss must confirm that the earlier worker stopped and check outside actions.');
         lines.push(retainedResumptionDigest());
         return lines.join('\n');
     };
@@ -5183,12 +5197,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             retainedGenerations.delete(rootPlaybookId);
             ineligibleRetainedGenerations.delete(rootPlaybookId);
             await setMode('engaged.parked', 'resume', rootPlaybookId, targetRootSessionId);
-            if (requiresEffectReconciliation) {
-                await requireSession().setVisiblePlayers([]);
-            }
-            else {
-                await requestVisibility(adoptedFrames.at(-1));
-            }
+            await requestVisibility(adoptedFrames.at(-1));
             await requireSession().emitStatus(`◇ /${enablementById.get(rootPlaybookId).command} resumed`);
             if (activeTurn) {
                 appendMandatoryPresentationSuffix(activeTurn, requiresEffectReconciliation
@@ -5252,11 +5261,15 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             // `processFrameResult` marks the resume and disposal it performs, each
             // at the operation itself; a boundary drawn around the whole sequence
             // would file this frame's shell work as an effect too.
+            const priorWork = frameWorkSequence.get(frame) ?? 0;
             const result = await driveFrame(frame, text, context);
             // The runtime accepted the input. Record any caller-owned established
             // fact before result processing, disposal, or parking telemetry can
             // fail, so later shell trouble cannot erase completed work.
-            onDriven?.();
+            if (!['no-action', 'aborted', 'failed'].includes(result.outcome) || (frameWorkSequence.get(frame) ?? 0) > priorWork)
+                onDriven?.();
+            else
+                activeTurn?.settlementFacts.push(`The playbook did not accept the Boss text; no delivery is confirmed.`);
             await processFrameResult(frame, result, context);
         }
         catch (error) {
@@ -5381,10 +5394,10 @@ export function createPlaybookCaptainShell(options, deps = {}) {
     // The runtimes own each frame's position. The shell only joins their stack.
     const saveProgress = async (starting, step, required = true) => {
         const turn = activeTurn;
-        if (!turn || !recordProgress)
+        if (!turn || turn.interruptedReport || !recordProgress)
             return;
         try {
-            if (step?.result !== undefined) {
+            if (step?.result !== undefined && !['completion', 'answer'].includes(step.kind)) {
                 await recordProgress({ step });
                 return;
             }
@@ -5466,7 +5479,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     catch {
                         break;
                     }
-                    if (!leaf || !view?.recovery)
+                    if (!leaf || !view?.recovery || view.recovery.explicitOnly)
                         break;
                     const identity = JSON.stringify([leaf.sessionId, view.recovery, view.lastError]);
                     if (attempted.has(identity))
@@ -5588,16 +5601,16 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             journalAction({ action: 'respond' });
             const reask = decisionCall;
             if (reask === undefined) {
-                const rejection = replyRejection(selection.text);
+                const rejection = turn.interruptedReport ? undefined : replyRejection(selection.text);
                 if (rejection !== undefined) {
                     throw markControlFailure(new CaptainProseError(rejection));
                 }
-                await surfaceSettlement({ context, text: selection.text });
+                await surfaceSettlement({ context, text: turn.interruptedReport ? appendPendingQuestions(selection.text) : selection.text });
             }
             else {
                 await surfaceProse(context, { ...reask.outcome, finalText: selection.text }, reask.compose);
             }
-            facts.push('Answered Boss in chat; no engagement changed.');
+            facts.push(turn.interruptedReport ? 'Reported the interrupted run; no work was repeated.' : 'Answered Boss in chat; no engagement changed.');
             journalOutcome([...facts]);
             // DR-029: an `ok` settlement is final for the turn.
             lastSettlementStatus = 'ok';
@@ -5826,6 +5839,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     return { status: turn.report?.status ?? 'ok', facts: [...(turn.report?.facts ?? [])] };
                 }
             }
+            if (questionAnswered)
+                await saveProgress(undefined, { id: randomUUID(), kind: 'answer', stateId: before.state.stateId, runtimeSessionId: leaf.sessionId, playbookId: leaf.entry.id, result: snapshotJsonValue({ questions: before.pendingQuestions.map(({ asker, question }) => ({ asker, question })), instruction: continuationInstruction }) });
             turn.settled = true;
             journalAction({ action: 'recover', playbookId: leaf.entry.id });
             if (!questionAnswered) {
@@ -7160,7 +7175,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                 await prepareRetainedGenerationOffers();
                 if (activeTurn.interruptedReport) {
                     markConversationCatchUp();
-                    await settleSelection({ action: 'respond', text: appendPendingQuestions(activeTurn.interruptedReport.text) }, context.signal);
+                    await settleSelection({ action: 'respond', text: activeTurn.interruptedReport.text }, context.signal);
                     return;
                 }
                 const result = await captainRuntime.handleBossInput({
@@ -7231,6 +7246,15 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                                 delete ledger.resumeToken;
                             playerTransactions.delete(playerId);
                         }
+                    }
+                }
+                if (context.signal.aborted && activeTurn && !activeTurn.presentationAttempted) {
+                    reportCarriedPreExistingChanges(activeTurn);
+                    if (activeTurn.mandatoryPresentationSuffix) {
+                        try {
+                            await surfaceSettlement({ context, text: 'The run stopped. Its completed work is saved.' });
+                        }
+                        catch { /* Preserve the original cancellation and the recorded reply. */ }
                     }
                 }
                 await saveStoppedProgress();

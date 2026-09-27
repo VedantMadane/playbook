@@ -5,6 +5,8 @@
 
 ## Status
 
+Whole-playbook retry superseded by [DR-070](070-durable-step-progress.md); only a captured invocation may be retried.
+
 Amended by [DR-070](070-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice.
 
 Amended by [DR-066](066-captain-prepares-step-recovery.md): a captured invocation takes precedence over entry replay, preserving completed predecessor work.

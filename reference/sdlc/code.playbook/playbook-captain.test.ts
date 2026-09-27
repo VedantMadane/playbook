@@ -3100,7 +3100,7 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
     expect(turnSummaryCalls(parked)[0]?.prompt).toContain(possibleEffectLine);
     expect(parked.replies[0]).toContain(possibleEffectLine);
     expect(parked.replies[0]).toContain(
-      'This evidence does not establish workflow completion or attribute any repository change or commit to this workflow.',
+      'Repository observations describe files and commits; workflow results are reported separately.',
     );
     expect(parked.replies[0]).not.toContain('/current/worktree');
     expect(parked.replies[0]).not.toContain(UNRESOLVED_EFFECT_BOUNDARY_ID);
@@ -6951,7 +6951,7 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     expect(failurePrompt).toContain('invalid nested visible set');
   });
 
-  it.each(['status-error', 'visibility-abort'])('disposes an exportable child before delivery: %s', async (failure) => {
+  it.each(['status-error', 'visibility-abort', 'input-abort'])('disposes an exportable child before delivery: %s', async (failure) => {
     let childResult: unknown;
     const code = fakeCodeEntry(async (runtime, runtimeTurn) => {
       if (!runtime.ports) throw new Error('runtime ports missing');
@@ -6974,19 +6974,20 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
       child.describe = () => ({ state: quiescentResult('drafting').state, pendingQuestions: [], actions: [] });
       // A describable child still must not be retained before input delivery.
       child.exportSnapshot = () => ({}) as PlaybookRuntimeSnapshot;
+      if (failure === 'input-abort') child.handleBossInput = async () => {
+        abort.abort(new Error('cancel before child accepts input'));
+        return { outcome: 'aborted', state: quiescentResult('drafting').state };
+      };
       return child;
     };
-    // Give the child one role its caller does not map so the visibility
-    // request is observably the explicitly bound child leaf.
     docs.entry.requiredRoleIds = ['docs'];
     delete code.entry.summaryPolicy;
     delete docs.entry.summaryPolicy;
-    const shell = makeShell([code, docs], {
-      sessionIds: [ROOT_ID, CHILD_ID],
-    });
+    const shell = makeShell([code, docs], { sessionIds: [ROOT_ID, CHILD_ID] });
     const session = stubSession();
     const context = stubContext();
     const abort = new AbortController();
+    if (failure === 'input-abort') context.context.signal = abort.signal;
     if (failure === 'visibility-abort') {
       context.context.signal = abort.signal;
       context.context.setVisiblePlayers = async (ids) => {
@@ -7001,7 +7002,7 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
 
     await shell.init!(session.session);
     const running = shell.handleBossTurn(turn('/code open a nested child'), context.context);
-    if (failure === 'visibility-abort') await running.catch(() => {});
+    if (failure !== 'status-error') await running.catch(() => {});
     else await expect(running).resolves.toBeUndefined();
 
     expect(docs.runtimes[0]?.inputs).toEqual([]);
@@ -10743,7 +10744,7 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
     expect(code.runtimes[0]?.adoptions[0]?.snapshot.effectLedger).toEqual(
       emptyPlaybookEffectLedger(),
     );
-    expect(resumed.visiblePlayers).toEqual([]);
+    expect(resumed.visiblePlayers).toEqual([['code-coder', 'code-reviewer']]);
     expect(resumed.replies[0]).toContain(
       'remains parked until its repository-effect evidence is reconciled',
     );
@@ -11076,7 +11077,7 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
     expect(code.runtimes[0]?.adoptions[0]?.snapshot.effectLedger).toEqual(
       captureLedger,
     );
-    expect(resumed.visiblePlayers).toEqual([]);
+    expect(resumed.visiblePlayers).toEqual([['code-coder', 'code-reviewer']]);
     expect(shell.exportSettlement()?.snapshot).toMatchObject({
       effectLedger: authoritativeLedger,
       retainedEffectReconciliation: {

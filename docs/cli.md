@@ -186,8 +186,8 @@ stderr, and `--verbose` adds only telemetry topic names to stderr.
 | `--verbose` | add Captain telemetry topic names to stderr |
 | `--continue` | continue the newest Captain session stored for this working directory, or the reported global fallback |
 | `--session <id>` | continue one durable Captain session explicitly |
-| `--retry-uncertain` | with `--session`, retry its exact recorded uncertain input |
-| `--discard-uncertain` | with `--session`, abandon its uncertain attempt |
+| `--retry-uncertain` | with `--session`, restore and report interrupted work; then choose a continuation |
+| `--discard-uncertain` | with `--session`, discard an attempt only if no work was recorded |
 | `--` | end options before one literal input or reply |
 | `-h`, `--help` | print the complete grammar without reading stdin or config |
 
@@ -381,15 +381,15 @@ The runtime checks the continuation. It retries the interrupted step, keeps earl
 
 Captain asks Boss for a real missing decision, uncertain permission, or a missing or contradictory playbook transition. Repository checks alone cannot prove that publishing or another outside action is safe to repeat; Captain must check that separately.
 
-Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline. When a turn with a saved point throws and its calls drain safely, the latest stopped step is saved and accepts a new instruction; the interactive pane stays open. Before every player, script or preparation step, the runner saves its position; it saves the result before advancing. After process loss, Retry only restores and reports. Boss chooses what happens next. Custom hosts must provide cancellation before preparation is available.
+Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline. When a turn with recorded progress throws and its calls drain safely, the latest stopped step is saved and accepts a new instruction; the interactive pane stays open. Before every player, script or preparation step, the runner saves its position; it saves the result before advancing. After process loss, Retry only restores and reports. Boss chooses what happens next. Custom hosts must provide cancellation before preparation is available.
 
-Custom runtimes can provide the same recovery offer: step prompt, optional preparation conditions and evidence, and a continuation they will validate. Captain needs no list of repair tools or error strings. Older checkpoints without this offer keep their existing controls.
+Custom runtimes can provide the same recovery offer: step prompt, optional preparation conditions and evidence, and a continuation they will validate. Captain needs no list of repair tools or error strings. Failed checkpoints without an invocation position have no step retry; restarting the whole playbook could repeat completed work.
 
 Captain may answer a player from the original task when it already answers the question. It reports what it reused, respects later Boss instructions and never sends that original answer twice automatically.
 
 If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
 
-All applications sharing a session store, including Spex and the CLI, must upgrade together before using these recovery fields. Hosts from 15.1.x cannot read the extended records.
+All applications sharing a session store, including Spex and the CLI, must upgrade together before running this version: every step writes the new progress fields. Hosts from 15.1.x cannot read the extended records.
 
 ### Recovering an uncertain turn
 
@@ -409,7 +409,7 @@ current config cannot retune that attempt. A completed step can use its saved re
 reads no input and runs no model: it restores the exact prior settled boundary,
 or deletes a never-settled fresh session, while abandoning the attempted work.
 An interrupted interactive turn that could not save a normal pause uses the same uncertain record and these headless recovery commands. Discard preserves the attempt's replay history and
-refuses if the effect ledger has advanced beyond the prior checkpoint or any recovery point exists. It does not undo files or commits. Captain never selects discard automatically.
+refuses if the effect ledger has advanced beyond the prior checkpoint or any step was recorded. It does not undo files or commits. Captain never selects discard automatically.
 
 Stop old writers before upgrading. When using the ordinary `~/.spex/sessions`
 default, the CLI imports sessions from

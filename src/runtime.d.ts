@@ -395,6 +395,8 @@ export interface PlaybookRuntimeSnapshot {
     };
     /** Interrupted invocation, captured before its external call (DR-066). */
     recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
+    /** Restored work requires an explicit choice before continuation. */
+    interrupted?: true;
     suspendedCall?: PlaybookSuspendedCall;
 }
 export interface PlaybookRecoveryCheckpoint {
@@ -408,7 +410,7 @@ export interface PlaybookRecoveryCheckpoint {
 }
 export interface PlaybookStepRecord {
     readonly id: string;
-    readonly kind: 'player' | 'captain' | 'script' | 'preparation';
+    readonly kind: 'player' | 'captain' | 'script' | 'preparation' | 'completion' | 'answer';
     readonly stateId: string;
     readonly result?: JsonValue;
 }
@@ -421,6 +423,8 @@ export interface PlaybookControlAction {
     reason?: PlaybookControlActionReason;
 }
 export interface PlaybookRecoveryOffer {
+    /** This offer must not be selected by automatic recovery. */
+    explicitOnly?: true;
     prompt: string;
     description?: string;
     /** Runtime-owned conditions to satisfy; these never authorize task completion. */
@@ -460,7 +464,6 @@ export interface PlaybookRetainedGenerationMetadata {
 export interface PlaybookRuntime {
     init(session: PlaybookSession): Promise<void>;
     exportSnapshot?(checkpoint?: {
-        interrupted?: true;
         child?: PlaybookPendingCall;
     }): PlaybookRuntimeSnapshot | undefined;
     restore?(session: PlaybookSession, snapshot: PlaybookRuntimeSnapshot): Promise<void>;

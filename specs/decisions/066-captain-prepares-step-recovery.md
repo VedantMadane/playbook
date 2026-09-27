@@ -22,6 +22,8 @@ The procedure author should not need to describe exception handling, and neither
 
 ## Decision
 
+The saved-selection and whole-turn replay rules below are historical and replaced by DR-070; bounded live preparation remains.
+
 - Ordinary Captain decisions, replies, and adjudication remain tool-free.
 - Starting or continuing a task authorizes bounded preparation of its next step; the host may select the same `recover` operation after a recoverable stop without asking Boss to repeat that authorization.
 - Recovery is a contract between the host and the runtime, not a catalog of repair tools or error strings: the runtime supplies the interrupted task and an available continuation, Captain prepares prerequisites with its configured tools, and the runtime checks whether that continuation is now valid.

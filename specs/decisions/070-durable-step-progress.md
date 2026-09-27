@@ -7,7 +7,8 @@
 
 Accepted after bounded model exploration, real process-loss tests and a smaller production implementation.
 Replaces the saved-continuation mechanism of [DR-068](068-interrupted-continuation-settlement.md) and narrows [DR-069](069-host-owned-interrupted-work-settlement.md) to unsupported positions.
-Amends [DR-066](066-captain-prepares-step-recovery.md).
+Amends [DR-066](066-captain-prepares-step-recovery.md), [DR-029](029-session-scoped-conversational-captain.md), [DR-031](031-shared-captain-session-front-ends.md), [DR-040](040-outcome-authority-effect-reconciliation.md), [DR-049](049-portable-session-contract.md), and [DR-051](051-host-selected-runtime-recovery.md).
+Supersedes the whole-playbook retry fallback of [DR-034](034-durable-failure-retry-continuity.md).
 
 ## Context
 
@@ -25,10 +26,15 @@ Scripts and preparation also need start and result records.
   An unsupported frame explicitly selects the preserved-work exit rather than a guessed position.
 - Reopening an uncertain run restores and reports only; Boss chooses a currently available continuation before any new work starts.
   A missing result means unfinished work, not permission to repeat it, and no automatic recovery loop runs during this reporting turn.
+- No recorded work and an unchanged ledger restore the pre-turn position; the interrupted message was not processed and may be discarded. Reporting writes no new progress.
+- Interrupted positions require an explicit continuation choice on later turns too, including after adoption; ordinary delivery must never silently retry the old task.
+- Whole-playbook retry is deliberately removed: an absent invocation checkpoint, including an old failed snapshot or a failed nested call, cannot justify repeating earlier work.
+- The journal also records completed root outcomes and answers selected from the existing task; reports read these facts and preparation results without copying presentation text.
 - A worker may outlive its host; it remains unfinished until its completion or retirement is established, and repository observations cannot establish that an outside action is safe to repeat.
 - Persist stopped positions and retention changes together; compute mandatory reports from recorded work, and omit nonessential counts after interruption instead of storing presentation fields.
-- Remove saved `reply`, `runtime` and `settle` selections and their copied report format; keep the ordinary runtime recovery offers, bounded live preparation and explicit unsupported-position exit.
-- Check a bounded whole-protocol model before implementation, then connect its transitions to real process-loss tests; the model's bounds and worker assumptions are explicit, and it is not a proof of unmodeled tools or implementation.
+- Remove saved `reply`, `runtime` and `settle` selections and their copied report format; keep checkpoint-based runtime recovery offers, bounded live preparation and explicit unsupported-position exit.
+- Check a bounded recovery-policy model and require deliberate rule violations to fail; connect its transitions to real process-loss tests.
+  The model covers saved positions, results and Boss choices, not the full machines, tools or implementation; its mutants do not claim to reproduce an entire historical protocol.
 
 ## Consequences
 

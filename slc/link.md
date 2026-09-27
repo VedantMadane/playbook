@@ -504,6 +504,8 @@ interface PlaybookRuntimeSnapshot {
   };
   /** Interrupted invocation, captured before its external call (DR-066). */
   recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
+  /** Restored work requires an explicit choice before continuation. */
+  interrupted?: true;
   suspendedCall?: PlaybookSuspendedCall;
 }
 
@@ -1904,7 +1906,7 @@ rehydrate it in a later process (DR-014). A runtime that implements either
 member shall implement both. When generated for a runtime whose host needs
 durability, the pair shall behave as follows.
 
-A shared runtime may also receive `exportSnapshot({interrupted:true})` for its current invocation or `exportSnapshot({child})` for a bridge-owned child during startup; these capture stopped positions without execution.
+A shared runtime may also receive the internal step-start snapshot for its current invocation or `exportSnapshot({child})` for a bridge-owned child during startup; these capture stopped positions without execution.
 Ordinary `exportSnapshot()` shall return `undefined` unless the runtime is at a safe
 capture point: initialized, not disposing or disposed, no active
 `handleBossInput`/`resumePlaybookCall` boundary, and the root actor at a
@@ -2282,6 +2284,8 @@ The optional `PlaybookPorts.recordStep(step, position?)` lets a durable host sav
 The shared runtime records player, direct-Captain and script starts before execution and their actor results before advancing.
 The runtime owns the complete stopped position, including accepted Boss input; the host joins nested frames and atomically stores starts, results and retention updates.
 A custom runtime that cannot provide that position remains runnable, but a crash returns it to Captain with recorded work preserved.
+An `interrupted:true` snapshot makes its recovery offer `explicitOnly:true`, preserved across restore and adoption; the host must exclude that offer from automatic preparation or retry.
+Only internal step-start capture creates a synthetic failed position; public snapshot capture returns the actual stopped state.
 Opening or reporting an interrupted run executes no work; Boss chooses the next action after checking outside effects and stopping any surviving worker.
 
 ## Abort

@@ -115,7 +115,7 @@ export interface SessionStructuralProjection {
 }
 export interface SessionStep {
   readonly id: string;
-  readonly kind: 'player' | 'captain' | 'script' | 'preparation';
+  readonly kind: 'player' | 'captain' | 'script' | 'preparation' | 'completion' | 'answer';
   readonly stateId: string;
   readonly runtimeSessionId: string;
   readonly playbookId: string;

@@ -1637,6 +1637,8 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
     ],
     './playbook-captain': [
       'PlaybookCaptainDeps',
+      'ProgressChange',
+      'InterruptedReport',
       'PlaybookCaptainFrameSnapshot',
       'PlaybookCaptainRegistryEntry',
       'PlaybookCaptainRegistryEntryV3',

@@ -3632,7 +3632,7 @@ async function createLease({
       const index = progress.steps.findIndex(({ id }) => id === step.id);
       if (index < 0) {
         if (!Object.hasOwn(change, 'snapshot')) throw new Error('A step start requires its position or explicit null');
-        if (Object.hasOwn(step, 'result')) throw new Error('A step result requires its saved start');
+        if (Object.hasOwn(step, 'result') && !['completion', 'answer'].includes(step.kind)) throw new Error('A step result requires its saved start');
         progress.steps.push(step);
       } else {
         const { result, ...start } = step;
@@ -3668,8 +3668,8 @@ async function createLease({
           'Captain session unresolved-effect abandonment must recover before discard',
         );
       }
-      if (prior.uncertain.progress !== undefined) {
-        throw new Error('The saved step preserves work from the interrupted turn; resume its saved step instead of discarding');
+      if ((prior.uncertain.progress?.steps.length ?? 0) > 0) {
+        throw new Error('Recorded work must be restored and reported before you choose how to continue; it cannot be discarded');
       }
       if (!isDeepStrictEqual(prior.effectLedger, prior.snapshot.effectLedger)) {
         throw new Error(
@@ -4183,7 +4183,34 @@ function validateCanonicalCaptainSessionRecord(
         assertUuid(step.runtimeSessionId, 'Captain step runtime');
         if (ids.has(step.id)) throw new Error('Captain step ids must be unique');
         ids.add(step.id);
-        if (!['player', 'captain', 'script', 'preparation'].includes(step.kind)) throw new Error('Unknown Captain step kind');
+        if (!['player', 'captain', 'script', 'preparation', 'completion', 'answer'].includes(step.kind)) throw new Error('Unknown Captain step kind');
+        if (['completion', 'answer'].includes(step.kind) && (!step.result || typeof step.result !== 'object' || Array.isArray(step.result))) throw new Error('A recorded completion or answer requires its result');
+        if (step.kind === 'completion') {
+          exactOptionalKeys(step.result, ['state'], ['description', 'terminalOutcome'], 'Completed root result');
+          if (step.result.state?.status !== 'done' || step.result.state.stateId !== step.stateId) throw new Error('Completed root result must name its final state');
+          if (step.result.description !== undefined) requireCanonicalNonblank(step.result.description, 'Completed root description');
+          if (step.result.terminalOutcome !== undefined) {
+            const terminal = step.result.terminalOutcome;
+            exactOptionalKeys(terminal, ['stateId', 'kind'], ['description'], 'Completed root outcome');
+            if (terminal.stateId !== step.stateId || !['success', 'failure'].includes(terminal.kind)) throw new Error('Completed root outcome must name its final state and kind');
+            if (terminal.description !== undefined) requireCanonicalNonblank(terminal.description, 'Completed root outcome description');
+          }
+        }
+        if (step.kind === 'answer') {
+          exactOptionalKeys(step.result, ['questions', 'instruction'], [], 'Selected answer');
+          requireCanonicalNonblank(step.result.instruction, 'Selected answer instruction');
+          if (!Array.isArray(step.result.questions) || !step.result.questions.length) throw new Error('Selected answer requires questions');
+          for (const question of step.result.questions) {
+            exactOptionalKeys(question, ['asker', 'question'], [], 'Selected answer question');
+            if (question.asker?.kind === 'captain') exactOptionalKeys(question.asker, ['kind'], [], 'Selected answer asker');
+            else {
+              exactOptionalKeys(question.asker, ['kind', 'roleId'], [], 'Selected answer asker');
+              if (question.asker.kind !== 'role') throw new Error('Unknown selected answer asker');
+              requireCanonicalNonblank(question.asker.roleId, 'Selected answer role');
+            }
+            requireCanonicalNonblank(question.question, 'Selected answer question');
+          }
+        }
         requireCanonicalNonblank(step.stateId, 'Captain step state');
         if (!Object.hasOwn(structural.catalog, step.playbookId)) throw new Error('Captain step names an unknown playbook');
       }

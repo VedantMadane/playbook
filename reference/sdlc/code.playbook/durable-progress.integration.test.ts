@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
 const exec = promisify(execFile);
 const fixture = fileURLToPath(new URL('./fixtures/durable-progress-loss.mjs', import.meta.url));
-it.each(['player-result', 'player-before-receipt', 'script-result', 'script-before-result', 'nested-player', 'nested-script', 'preparation', 'completed', 'script-before-rename', 'script-after-rename', 'carried', 'accepted-answer', 'waiting-question'])(
+it.each(['later-step', 'player-result', 'player-before-receipt', 'script-result', 'script-before-result', 'nested-player', 'nested-script', 'preparation', 'completed', 'completed-terminal-only', 'automatic-answer', 'script-before-rename', 'script-after-rename', 'carried', 'accepted-answer', 'waiting-question', 'reserved-question', 'before-first-step', 'retention-switch', 'retention-lost-switch', 'retention-lost-same-root'])(
   'restores %s after SIGKILL without repeating work', async (scenario) => {
     const dir = await mkdtemp(join(tmpdir(), 'durable-progress-'));
     try {
@@ -21,12 +21,23 @@ it.each(['player-result', 'player-before-receipt', 'script-result', 'script-befo
   }, 30_000,
 );
 
-it.each(['second-crash', 'cli'])('reports safely through %s', async (kind) => {
+it.each(['second-crash', 'player-second-crash', 'lost-position-second-crash', 'cli'])('reports safely through %s', async (kind) => {
+  const scenario = kind === 'lost-position-second-crash' ? 'retention-lost-switch' : kind === 'player-second-crash' ? 'player-result' : 'nested-script';
   const dir = await mkdtemp(join(tmpdir(), 'durable-reopen-'));
   try {
-    await expect(exec(process.execPath, [fixture, dir, 'nested-script', 'start'])).rejects.toMatchObject({ signal: 'SIGKILL' });
-    if (kind === 'second-crash') await expect(exec(process.execPath, [fixture, dir, 'nested-script', 'again'])).rejects.toMatchObject({ signal: 'SIGKILL' });
-    const result = await exec(process.execPath, [fixture, dir, 'nested-script', kind === 'cli' ? 'cli' : 'exit']);
+    await expect(exec(process.execPath, [fixture, dir, scenario, 'start'])).rejects.toMatchObject({ signal: 'SIGKILL' });
+    if (kind !== 'cli') await expect(exec(process.execPath, [fixture, dir, scenario, 'again'])).rejects.toMatchObject({ signal: 'SIGKILL' });
+    const result = await exec(process.execPath, [fixture, dir, scenario, kind === 'cli' ? 'cli' : 'exit']);
     expect(JSON.parse(result.stdout)).toEqual({ settled: true });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}, 30_000);
+
+it.each(['carried-cancel', 'no-work-discard'])('settles %s without losing work', async (scenario) => {
+  const dir = await mkdtemp(join(tmpdir(), 'durable-settle-'));
+  try {
+    if (scenario === 'no-work-discard') {
+      await expect(exec(process.execPath, [fixture, dir, 'before-first-step', 'start'])).rejects.toMatchObject({ signal: 'SIGKILL' });
+      expect(JSON.parse((await exec(process.execPath, [fixture, dir, 'before-first-step', 'discard'])).stdout)).toEqual({ settled: true });
+    } else expect(JSON.parse((await exec(process.execPath, [fixture, dir, scenario, 'start'])).stdout)).toEqual({ settled: true });
   } finally { await rm(dir, { recursive: true, force: true }); }
 }, 30_000);

@@ -308,7 +308,7 @@ export async function runPlaybookRun(options = {}) {
       if (!args.retryUncertain) {
         const releaseError = await releaseLease(lease);
         lease = undefined;
-        await reportUncertainSession(stderr, sessionId, priorRecord.uncertain.progress !== undefined);
+        await reportUncertainSession(stderr, sessionId, (priorRecord.uncertain.progress?.steps.length ?? 0) > 0);
         if (releaseError !== undefined) {
           await writeStream(
             stderr,
@@ -976,26 +976,50 @@ function restoreInterruptedProgress(record, ledger) {
   if (!isPlaybookEffectLedgerMonotonicExtension(base.effectLedger, current)) {
     throw new Error('Captain recovery evidence changed incompatibly');
   }
+  const steps = progress?.steps ?? [];
   const saved = progress?.snapshot;
   const changedBoundaries = current.boundaries.filter((boundary, index) => !isDeepStrictEqual(boundary, base.effectLedger.boundaries[index]));
   const changedOperations = current.logicalOperations.filter((operation, index) => !isDeepStrictEqual(operation, base.effectLedger.logicalOperations[index]));
+  const noWork = steps.length === 0 && changedBoundaries.length === 0 && changedOperations.length === 0;
+  const completion = steps.findLast((step) => step.kind === 'completion');
+  const facts = steps.map((step) => {
+    const name = `/${step.playbookId}`;
+    if (step.kind === 'completion') return `${name} ${step.result.terminalOutcome?.kind === 'failure' ? 'stopped with a failure' : 'finished'}. ${step.result.description ?? 'No result description was supplied.'}`;
+    if (step.kind === 'answer') return `Captain selected the original task as the answer for ${name}. Questions: ${step.result.questions.map(({ question }) => JSON.stringify(question)).join('; ')}. Answer: ${JSON.stringify(step.result.instruction)}.`;
+    if (step.kind === 'preparation') return step.result === undefined
+      ? `Captain started preparation for ${name}; it may have used tools. No result was saved.`
+      : `Captain preparation for ${name}: ${step.result.summary}`;
+    return `${name} ${step.kind} call: ${step.result === undefined ? 'started; no result was saved' : step.result?.status === undefined ? 'result saved' : `returned ${step.result.status}`}.`;
+  });
   const report = {
     boundaryPrefix: base.effectLedger.boundaries.length,
     effects: projectUnresolvedEffects(current, [
       ...changedBoundaries.map(({ boundaryId }) => ({ kind: 'boundary', boundaryId })),
       ...changedOperations.map(({ operationId }) => ({ kind: 'logical-operation', operationId })),
     ]),
-    text: saved
-      ? 'The run stopped. Its saved position is restored; no work was repeated. Choose how to continue. Before repeating unfinished work, confirm that the earlier worker has stopped and check any outside actions it may have taken.'
-      : 'The exact stopping point was not saved. Files and recorded results are preserved; no work was repeated. Check the saved work and stop any earlier worker before starting another attempt.',
+    text: [noWork
+      ? 'The last message was not processed. Your previous position and pending questions are restored; no work was repeated.'
+      : saved
+        ? completion && !saved.frames?.length
+          ? 'The completed run is restored; no work was repeated.'
+          : 'The run stopped. Its saved position is restored; no work was repeated. Choose how to continue. Before repeating unfinished work, confirm that the earlier worker has stopped and check any outside actions it may have taken.'
+        : 'The exact stopping point was not saved. Files and repository evidence are preserved; no work was repeated. Check the saved work and stop any earlier worker before starting another attempt.', ...facts].join('\n\n'),
   };
+  if (noWork) return { snapshot: base, report };
   if (saved) {
     if (!isPlaybookEffectLedgerMonotonicExtension(saved.effectLedger, current)) throw new Error('Saved step evidence changed incompatibly');
     const frames = saved.frames?.map((frame) => {
       const checkpoint = frame.runtime.recoveryCheckpoint;
-      const step = progress.steps.find((entry) => entry.id === checkpoint?.id && entry.runtimeSessionId === frame.sessionId && entry.playbookId === frame.playbookId && entry.stateId === checkpoint?.stateId);
-      return { ...frame, runtime: { ...frame.runtime, effectLedger: current,
-        ...(step?.result === undefined || frame.runtime.state.stateId !== 'failed' ? {} : { recoveryCheckpoint: { ...checkpoint, result: step.result } }),
+      const step = steps.find((entry) => entry.id === checkpoint?.id && entry.runtimeSessionId === frame.sessionId && entry.playbookId === frame.playbookId && entry.stateId === checkpoint?.stateId);
+      const { failedEffectAttempt: priorAttempt, ...runtime } = frame.runtime;
+      const attempts = runtime.interrupted && priorAttempt
+        ? new Set(current.boundaries.filter(({ sequence }) => sequence > priorAttempt.boundaryPrefix).map(({ attemptId }) => attemptId)) : undefined;
+      const failedEffectAttempt = attempts === undefined ? priorAttempt : attempts.size > 1 ? undefined
+        : { boundaryPrefix: priorAttempt.boundaryPrefix, attemptId: attempts.values().next().value ?? null };
+      return { ...frame, runtime: { ...runtime, effectLedger: current,
+        ...(failedEffectAttempt === undefined ? {} : { failedEffectAttempt }),
+        ...(checkpoint ? { interrupted: true } : {}),
+        ...(step?.result === undefined || !frame.runtime.interrupted ? {} : { recoveryCheckpoint: { ...checkpoint, result: step.result } }),
       } };
     });
     return { snapshot: assertPlaybookCaptainShellSnapshot({ ...saved, effectLedger: current, ...(frames ? { frames } : {}) }), report };
@@ -1731,16 +1755,16 @@ async function reportHeadlessReplay(channel, status) {
   await channel.flushWarning();
 }
 
-async function reportUncertainSession(stderr, sessionId, hasRecoveryPoint = false) {
+async function reportUncertainSession(stderr, sessionId, hasRecordedWork = false) {
   await writeStream(
     stderr,
     [
       `playbook run: Captain session ${JSON.stringify(sessionId)} has an uncertain turn and will not be replayed automatically`,
-      hasRecoveryPoint
+      hasRecordedWork
         ? "Retry restores and reports the saved work without running it. Discard is unavailable because the saved step preserves work from this turn."
         : "Retry restores and reports without running work. Discard abandons the attempted turn only when no work was recorded.",
       `playbook run --session ${sessionId} --retry-uncertain`,
-      ...(hasRecoveryPoint ? [] : [`playbook run --session ${sessionId} --discard-uncertain`]),
+      ...(hasRecordedWork ? [] : [`playbook run --session ${sessionId} --discard-uncertain`]),
       "",
     ].join("\n"),
   );
@@ -1849,8 +1873,8 @@ function runHelpText(userConfigPath) {
     "  --no-provision   do not provision thin filesystem registry engines",
     "  --continue       prefer this working directory, else global newest",
     "  --session <id>   reply to one durable Captain session UUID",
-    "  --retry-uncertain retry that session's exact recorded uncertain input",
-    "  --discard-uncertain discard that session's uncertain attempt",
+    "  --retry-uncertain restore and report interrupted work without running it",
+    "  --discard-uncertain discard only an attempt with no recorded work",
     '  --json           print exactly {"sessionId", "reply"}',
     "  --verbose        print Captain telemetry topics to stderr",
     "  -h, --help       print this help without reading input or config",

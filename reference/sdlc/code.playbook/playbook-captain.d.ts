@@ -34,7 +34,7 @@ interface PlaybookCaptainUnresolvedEffectSettlementInput {
 }
 type SnapshotAgentEnvelope = DeepReadonly<Omit<SessionAgent, 'model' | 'effort' | 'fastMode'>>;
 type PlayerLedgerSnapshotEntry = DeepReadonly<PlayerLedgerEntry>;
-interface ProgressChange {
+export interface ProgressChange {
     snapshot?: PlaybookCaptainShellSnapshot | null;
     step?: PlaybookStepRecord & {
         runtimeSessionId: string;
@@ -42,7 +42,7 @@ interface ProgressChange {
     };
     retentionUpdates?: readonly PlaybookCaptainRetentionUpdate[];
 }
-interface InterruptedReport {
+export interface InterruptedReport {
     text: string;
     effects: readonly PlaybookCaptainUnresolvedEffect[];
     boundaryPrefix: number;
@@ -50,7 +50,7 @@ interface InterruptedReport {
     unresolvedEffects?: readonly PlaybookCaptainUnresolvedEffect[];
 }
 export interface PlaybookCaptainDeps {
-    /** Stop the host's active turn, including admitted tool calls, on preparation expiry. */
+    /** Stop the host's active turn, including admitted tool calls, on preparation expiry or a required save failure. */
     abortPreparation?: (reason?: string) => void;
     recordProgress?: (change: ProgressChange) => Promise<void>;
     continuity?: {

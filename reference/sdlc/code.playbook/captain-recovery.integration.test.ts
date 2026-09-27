@@ -556,7 +556,7 @@ describe('Captain preparation through a durable session', () => {
               }
               await rejection;
               const stopped = await controller.read();
-              if (!('settleAbort' in scenario)) await expect(controller.lease.discard({ attemptId: stopped!.uncertain!.attemptId })).rejects.toThrow('resume its saved step');
+              if (!('settleAbort' in scenario)) await expect(controller.lease.discard({ attemptId: stopped!.uncertain!.attemptId })).rejects.toThrow('restored and reported');
               await controller.dispose();
             }
             const saved = await realStore.read(id);
@@ -603,7 +603,7 @@ describe('Captain preparation through a durable session', () => {
               const discarded = await runCli(['--session', id, '--discard-uncertain']);
               expect(discarded.code).toBe(2);
               expect(discarded.stdout).toBe('');
-              expect(discarded.stderr).toContain('resume its saved step');
+              expect(discarded.stderr).toContain('restored and reported');
               expect(RecoveryAdapter.calls).toHaveLength(calls);
               expect((await realStore.read(id)).uncertain?.attemptId).toBe(saved.uncertain?.attemptId);
               const retried = await runCli(['--session', id, '--retry-uncertain']);
