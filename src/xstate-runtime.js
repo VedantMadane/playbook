@@ -1725,7 +1725,6 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         'retainedEffectReconciliation',
         'failedEffectAttempt',
         'recoveryCheckpoint',
-        'interrupted',
         'suspendedCall',
     ], 'runtime snapshot');
     let suspendedCall;
@@ -1890,8 +1889,6 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         }
         failedEffectAttempt = Object.freeze({ boundaryPrefix, attemptId });
     }
-    if (own(snapshot, 'interrupted') && snapshot.interrupted !== true)
-        throw new TypeError('runtime interrupted must be true');
     let recoveryCheckpoint;
     if (own(snapshot, 'recoveryCheckpoint')) {
         const checkpoint = snapshot.recoveryCheckpoint;
@@ -1928,7 +1925,6 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
             ? {}
             : { failedEffectAttempt }),
         ...(recoveryCheckpoint === undefined ? {} : { recoveryCheckpoint }),
-        ...(snapshot.interrupted === true ? { interrupted: true } : {}),
     };
     return Object.freeze({
         schemaVersion: 4,

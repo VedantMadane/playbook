@@ -1547,7 +1547,7 @@ describe('durable Captain session records (PBCLI-23/24/51/52/53/54/63/64)', () =
     const recordText = await readFile(recordPath, 'utf8');
     expect(recordText).not.toContain(tokenO);
     await expect(lease.discard({ attemptId: attempt2 })).rejects.toThrow(
-      /differs from its pre-turn checkpoint/,
+      /cannot be discarded/,
     );
     await expect(
       lease.settle({

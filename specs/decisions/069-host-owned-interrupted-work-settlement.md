@@ -20,7 +20,7 @@ A saved result also needs its pending retention changes and reports, not only it
 
 The saved-selection and whole-turn replay bullets below describe the former protocol; DR-070 replaces them.
 
-- The shared host owns the lost-progress decision defined by [[recovery-27](../packages/recovery.md#recovery-27)]; no runtime receives an invented interruption marker or source identity.
+- The shared host owns the lost-progress decision defined by [[recovery-27](../packages/recovery.md#recovery-27)]; a lost position is never replaced with an invented runtime position or source identity.
 - An explicit uncertain retry with unrepresentable later work settles a failed attempt in chat, preserving all files, receipts, and ordered unresolved-effect evidence; it runs no player and makes no claim that a workflow completed.
   This applies with or without a saved point and whether the prior shell was idle or engaged.
   It differs from discard, which restores the prior boundary and remains forbidden after ledger progress.
@@ -31,7 +31,7 @@ The saved-selection and whole-turn replay bullets below describe the former prot
 - A reporting-only point preserves pending retention changes, unresolved effects, the complete summary, and mandatory presentation text.
   Cancellation during reporting preserves the computed action status.
 - After Boss cancellation and complete call draining, an unaccepted player result loses its provider continuation hint; the paused runtime stays, with no late result accepted and no effects replayed.
-- A child is retained on cancellation only after its initial text was delivered; summary ownership begins at an action executed in the current turn, not at an idle ancestor.
+- A child is retained on cancellation only after its initial text was accepted by the runtime; summary ownership begins at an action executed in the current turn, not at an idle ancestor.
 - A retry follows its saved selection without adding an automatic recovery loop that the original selection did not have.
 
 ## Consequences

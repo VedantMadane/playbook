@@ -55,6 +55,7 @@ import {
   assertCaptainSessionExecutionCompatible,
   assertCaptainSessionsDirectoryUsable,
   createCaptainSessionStore,
+  isUncertainTurnDiscardable,
   projectCaptainSessionStructure,
   SESSION_ID_PATTERN,
   validateCaptainSessionExecutionProjection,
@@ -308,7 +309,7 @@ export async function runPlaybookRun(options = {}) {
       if (!args.retryUncertain) {
         const releaseError = await releaseLease(lease);
         lease = undefined;
-        await reportUncertainSession(stderr, sessionId, (priorRecord.uncertain.progress?.steps.length ?? 0) > 0);
+        await reportUncertainSession(stderr, sessionId, !isUncertainTurnDiscardable(priorRecord));
         if (releaseError !== undefined) {
           await writeStream(
             stderr,
@@ -969,7 +970,7 @@ function isCaptainSessionHostCleanupIncomplete(error) {
   );
 }
 
-function restoreInterruptedProgress(record, ledger) {
+export function restoreInterruptedProgress(record, ledger) {
   const base = record.snapshot;
   const progress = record.uncertain.progress;
   const current = assertPlaybookEffectLedger(ledger);
@@ -980,10 +981,10 @@ function restoreInterruptedProgress(record, ledger) {
   const saved = progress?.snapshot;
   const changedBoundaries = current.boundaries.filter((boundary, index) => !isDeepStrictEqual(boundary, base.effectLedger.boundaries[index]));
   const changedOperations = current.logicalOperations.filter((operation, index) => !isDeepStrictEqual(operation, base.effectLedger.logicalOperations[index]));
-  const noWork = steps.length === 0 && changedBoundaries.length === 0 && changedOperations.length === 0;
+  const noWork = isUncertainTurnDiscardable(record);
   const completion = steps.findLast((step) => step.kind === 'completion');
   const facts = steps.map((step) => {
-    const name = `/${step.playbookId}`;
+    const name = `/${record.structuralProjection.catalog[step.playbookId].command}`;
     if (step.kind === 'completion') return `${name} ${step.result.terminalOutcome?.kind === 'failure' ? 'stopped with a failure' : 'finished'}. ${step.result.description ?? 'No result description was supplied.'}`;
     if (step.kind === 'answer') return `Captain selected the original task as the answer for ${name}. Questions: ${step.result.questions.map(({ question }) => JSON.stringify(question)).join('; ')}. Answer: ${JSON.stringify(step.result.instruction)}.`;
     if (step.kind === 'preparation') return step.result === undefined
@@ -991,8 +992,9 @@ function restoreInterruptedProgress(record, ledger) {
       : `Captain preparation for ${name}: ${step.result.summary}`;
     return `${name} ${step.kind} call: ${step.result === undefined ? 'started; no result was saved' : step.result?.status === undefined ? 'result saved' : `returned ${step.result.status}`}.`;
   });
+  const completedRoots = steps.filter((step) => step.kind === 'completion' && step.result.retention !== 'keep').map((step) => ({ kind: 'clear', rootPlaybookId: step.playbookId }));
   const report = {
-    boundaryPrefix: base.effectLedger.boundaries.length,
+    retentionUpdates: completedRoots,
     effects: projectUnresolvedEffects(current, [
       ...changedBoundaries.map(({ boundaryId }) => ({ kind: 'boundary', boundaryId })),
       ...changedOperations.map(({ operationId }) => ({ kind: 'logical-operation', operationId })),
@@ -1012,14 +1014,14 @@ function restoreInterruptedProgress(record, ledger) {
       const checkpoint = frame.runtime.recoveryCheckpoint;
       const step = steps.find((entry) => entry.id === checkpoint?.id && entry.runtimeSessionId === frame.sessionId && entry.playbookId === frame.playbookId && entry.stateId === checkpoint?.stateId);
       const { failedEffectAttempt: priorAttempt, ...runtime } = frame.runtime;
-      const attempts = runtime.interrupted && priorAttempt
+      const interrupted = step !== undefined && checkpoint?.id === progress.positionStepId;
+      const attempts = interrupted && priorAttempt
         ? new Set(current.boundaries.filter(({ sequence }) => sequence > priorAttempt.boundaryPrefix).map(({ attemptId }) => attemptId)) : undefined;
       const failedEffectAttempt = attempts === undefined ? priorAttempt : attempts.size > 1 ? undefined
         : { boundaryPrefix: priorAttempt.boundaryPrefix, attemptId: attempts.values().next().value ?? null };
       return { ...frame, runtime: { ...runtime, effectLedger: current,
         ...(failedEffectAttempt === undefined ? {} : { failedEffectAttempt }),
-        ...(checkpoint ? { interrupted: true } : {}),
-        ...(step?.result === undefined || !frame.runtime.interrupted ? {} : { recoveryCheckpoint: { ...checkpoint, result: step.result } }),
+        ...(step?.result === undefined || !interrupted ? {} : { recoveryCheckpoint: { ...checkpoint, result: step.result } }),
       } };
     });
     return { snapshot: assertPlaybookCaptainShellSnapshot({ ...saved, effectLedger: current, ...(frames ? { frames } : {}) }), report };
@@ -1031,7 +1033,7 @@ function restoreInterruptedProgress(record, ledger) {
   const { frames, pendingBossQuestions, lastError, retainedEffectReconciliation, ...chat } = base;
   return {
     snapshot: assertPlaybookCaptainShellSnapshot({ ...chat, mode: 'chat', effectLedger: current }),
-    report: { ...report, retentionUpdates: clears, unresolvedEffects: report.effects },
+    report: { ...report, retentionUpdates: [...completedRoots, ...clears], unresolvedEffects: report.effects },
   };
 }
 
@@ -1761,7 +1763,7 @@ async function reportUncertainSession(stderr, sessionId, hasRecordedWork = false
     [
       `playbook run: Captain session ${JSON.stringify(sessionId)} has an uncertain turn and will not be replayed automatically`,
       hasRecordedWork
-        ? "Retry restores and reports the saved work without running it. Discard is unavailable because the saved step preserves work from this turn."
+        ? "Retry restores and reports the saved work without running it. Discard is unavailable because work or repository evidence was recorded."
         : "Retry restores and reports without running work. Discard abandons the attempted turn only when no work was recorded.",
       `playbook run --session ${sessionId} --retry-uncertain`,
       ...(hasRecordedWork ? [] : [`playbook run --session ${sessionId} --discard-uncertain`]),
@@ -1866,7 +1868,7 @@ function runHelpText(userConfigPath) {
     "An ordinary continued run restores that stored structure and working",
     "directory, then reads current config and overlays for model, effort,",
     "and fast mode.",
-    "Uncertain retry instead uses its exact recorded input and settings.",
+    "Uncertain retry only restores and reports; later work uses current settings.",
     "",
     "Options:",
     "  --with <path>    overlay a generic config fragment (repeatable)",

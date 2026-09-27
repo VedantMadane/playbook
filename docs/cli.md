@@ -369,7 +369,7 @@ workflow outcome. The same restricted recovery survives process restart
 
 ### Preparing a stopped step
 
-Captain automatically tries to prepare and resume a stopped step. You can also supply a missing answer or ask for a repair:
+Captain automatically tries to prepare and resume a step stopped by an operation in the current turn. You can also supply a missing answer or ask for a repair:
 
 ```sh
 playbook run --session <id> "Install the missing dependency and continue."
@@ -381,7 +381,7 @@ The runtime checks the continuation. It retries the interrupted step, keeps earl
 
 Captain asks Boss for a real missing decision, uncertain permission, or a missing or contradictory playbook transition. Repository checks alone cannot prove that publishing or another outside action is safe to repeat; Captain must check that separately.
 
-Preparation allows two automatic attempts per turn, once for the same unchanged failure. Each preparation has a 150-second deadline. When a turn with recorded progress throws and its calls drain safely, the latest stopped step is saved and accepts a new instruction; the interactive pane stays open. Before every player, script or preparation step, the runner saves its position; it saves the result before advancing. After process loss, Retry only restores and reports. Boss chooses what happens next. Custom hosts must provide cancellation before preparation is available.
+Preparation allows at most two automatic attempts, each following a stop produced by work in this turn. Resuming saved work or refusing new text does not start preparation. Each preparation has a 150-second deadline. When a turn with recorded progress throws and its calls drain safely, the latest stopped step is saved and accepts a new instruction; the interactive pane stays open. Before every player, script or preparation step, the runner saves its position; it saves the result before advancing. After process loss, Retry only restores and reports. Boss chooses what happens next. Custom hosts must provide cancellation before preparation is available.
 
 Custom runtimes can provide the same recovery offer: step prompt, optional preparation conditions and evidence, and a continuation they will validate. Captain needs no list of repair tools or error strings. Failed checkpoints without an invocation position have no step retry; restarting the whole playbook could repeat completed work.
 
@@ -403,9 +403,7 @@ playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --retry-uncertain
 playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --discard-uncertain
 ```
 
-Retry reads no input and reuses the byte-exact recorded turn and its exact
-attempted Captain, player, and per-role model, effort, and fast-mode settings;
-current config cannot retune that attempt. A completed step can use its saved result without running again. Before repeating an unfinished step, Boss must confirm that the old worker has stopped and check any outside actions; unchanged files do not prove nothing happened. A runtime that cannot save its position returns to Captain with the work preserved. Discard
+Retry reads no input and restores the recorded attempt only to report it. It runs no model work. Later turns use the current compatible configuration. A completed step can use its saved result without running again. Before repeating an unfinished step, Boss must confirm that the old worker has stopped and check any outside actions; unchanged files do not prove nothing happened. A runtime that cannot save its position returns to Captain with the work preserved. Discard
 reads no input and runs no model: it restores the exact prior settled boundary,
 or deletes a never-settled fresh session, while abandoning the attempted work.
 An interrupted interactive turn that could not save a normal pause uses the same uncertain record and these headless recovery commands. Discard preserves the attempt's replay history and

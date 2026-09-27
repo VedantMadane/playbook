@@ -325,6 +325,7 @@ describe('published session-store facade (PBCLI-73, PBCLI-79, PBCLI-80)', () => 
       'attachSessionHints',
       'createSessionStore',
       'defaultSessionsDir',
+      'isUncertainTurnDiscardable',
       'openSessionStore',
       'projectCaptainSessionStructure',
       'validateCaptainSessionExecutionProjection',

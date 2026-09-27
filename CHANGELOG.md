@@ -12,17 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Bounded Captain preparation, relayed player questions, durable script results, completed-root and selected-answer records, and explicit-only recovery after interruption.
-- Public `recordStep`, `PlaybookStepRecord`, `SessionStep`, `SessionProgressChange`, `ProgressChange`, `InterruptedReport`, `selectInterruptedReport`, and `projectUnresolvedEffects` contracts.
+- Bounded Captain preparation and relayed player questions, with automatic recovery only after a stop produced in the same turn. Resuming or adopting an old stop waits for Boss to choose further work.
+- Invocation `recoveryCheckpoint`, `PlaybookRecoveryOffer`, `PlaybookControlView.recovery`, and verified `restored` repository receipts.
+- `exportSnapshot({child})`, input `onAccepted`, and shell `presentedEffectPrefix` for carrying mandatory reports across cancellation.
+- Runtime `recordStep` and `PlaybookStepRecord`; session `recordProgress`, `SessionStep`, `SessionProgressChange`, `ProgressChange`, `InterruptedReport`, and `selectInterruptedReport` for saved starts, results, completions and answers.
+- SDK `mode:'recover'` and `recover()`, shared `isUncertainTurnDiscardable`, and `projectUnresolvedEffects` with public `PlaybookCaptainUnresolvedEffectReference`.
 
 ### Changed
 
-- **Breaking; requires a major release and coordinated host upgrades.** SDK and CLI save normal step starts and results. `--retry-uncertain` restores and reports without repeating work; continuation requires an explicit choice. `--discard-uncertain` refuses recorded work. Shared session records add progress; 15.1.x hosts cannot read them.
-- Failed invocations retry from their saved position. Whole-playbook retry and `entryEvent.contextField` replay are removed; old failures without a checkpoint have no automatic replacement.
+- **Breaking; requires a major release and coordinated host upgrades.** SDK and CLI save normal step starts and results. Retry restores and reports without repeating work. Discard requires no recorded work or changed repository evidence. Hosts from 15.1.x cannot read the extended records.
+- Retained generations change only at settlement; recovery derives their changes from recorded work.
 
-### Fixed
+### Removed
 
-- Preserve the parked task when a crash happens before work starts, retain checkpoint retry after using a saved result, and report interrupted work without validating quoted questions as model instructions.
+- Whole-playbook retry and `entryEvent.contextField` replay. Failed invocations retry from their saved position; old failures without a checkpoint have no automatic replacement.
 
 ## [15.1.0] - 2026-09-24
 

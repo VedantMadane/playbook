@@ -3614,18 +3614,20 @@ async function createLease({
 
   const recordProgress = (value) => runExclusive(async () => {
     const change = requireRecord(snapshotJsonValue(value, 'Captain progress change'), 'Captain progress change');
-    exactOptionalKeys(change, [], ['snapshot', 'step', 'retentionUpdates'], 'Captain progress change');
+    exactOptionalKeys(change, [], ['snapshot', 'step'], 'Captain progress change');
     await assertOwnerUnchecked();
     const prior = await readRecord(sessionId, { missing: 'undefined' });
     if (prior?.state !== 'uncertain' || prior.uncertain.abandonment) {
       throw new Error('Saving progress requires an active uncertain turn');
     }
-    const progress = structuredClone(prior.uncertain.progress ?? { snapshot: null, steps: [] });
+    const progress = structuredClone(prior.uncertain.progress ?? { snapshot: null, steps: [], positionStepId: null });
+    const newStepStart = change.step && !Object.hasOwn(change.step, 'result') && !progress.steps.some(({ id }) => id === change.step.id);
     if (Object.hasOwn(change, 'snapshot')) {
       if (change.snapshot !== null && !isDeepStrictEqual(change.snapshot.effectLedger, prior.effectLedger)) {
         throw new Error('Saved progress must contain the current effect ledger');
       }
       progress.snapshot = change.snapshot;
+      progress.positionStepId = change.snapshot !== null && newStepStart ? change.step.id : null;
     }
     if (change.step !== undefined) {
       const step = snapshotJsonValue(change.step, 'Captain step');
@@ -3645,10 +3647,8 @@ async function createLease({
         progress.steps[index] = step;
       }
     }
-    const retainedGenerations = applyRetainedGenerationUpdates(prior.retainedGenerations ?? {},
-      validateRetainedGenerationUpdates(change.retentionUpdates ?? []), prior.structuralProjection);
     const record = validateCaptainSessionRecord(projectRecovery({
-      ...prior, retainedGenerations, uncertain: { ...prior.uncertain, progress },
+      ...prior, uncertain: { ...prior.uncertain, progress },
     }));
     await assertOwnerUnchecked();
     await writeRecord(record, { noReplace: false });
@@ -3668,13 +3668,8 @@ async function createLease({
           'Captain session unresolved-effect abandonment must recover before discard',
         );
       }
-      if ((prior.uncertain.progress?.steps.length ?? 0) > 0) {
-        throw new Error('Recorded work must be restored and reported before you choose how to continue; it cannot be discarded');
-      }
-      if (!isDeepStrictEqual(prior.effectLedger, prior.snapshot.effectLedger)) {
-        throw new Error(
-          'Captain session uncertain effect ledger differs from its pre-turn checkpoint and cannot be discarded',
-        );
+      if (!isUncertainTurnDiscardable(prior)) {
+        throw new Error('Recorded work or changed repository evidence must be restored and reported; the turn cannot be discarded');
       }
       await assertOwnerUnchecked();
       if (prior.uncertain.baseUpdatedAt === null) {
@@ -4174,7 +4169,7 @@ function validateCanonicalCaptainSessionRecord(
     );
     if (uncertain.progress !== undefined) {
       const progress = requireRecord(uncertain.progress, 'Captain progress');
-      rejectUnknownOrMissingKeys(progress, ['snapshot', 'steps'], 'Captain progress');
+      exactOptionalKeys(progress, ['snapshot', 'steps'], ['positionStepId'], 'Captain progress');
       if (!Array.isArray(progress.steps)) throw new Error('Captain steps must be an array');
       const ids = new Set();
       for (const step of progress.steps) {
@@ -4186,19 +4181,20 @@ function validateCanonicalCaptainSessionRecord(
         if (!['player', 'captain', 'script', 'preparation', 'completion', 'answer'].includes(step.kind)) throw new Error('Unknown Captain step kind');
         if (['completion', 'answer'].includes(step.kind) && (!step.result || typeof step.result !== 'object' || Array.isArray(step.result))) throw new Error('A recorded completion or answer requires its result');
         if (step.kind === 'completion') {
-          exactOptionalKeys(step.result, ['state'], ['description', 'terminalOutcome'], 'Completed root result');
-          if (step.result.state?.status !== 'done' || step.result.state.stateId !== step.stateId) throw new Error('Completed root result must name its final state');
-          if (step.result.description !== undefined) requireCanonicalNonblank(step.result.description, 'Completed root description');
+          exactOptionalKeys(step.result, ['state'], ['description', 'terminalOutcome', 'retention'], 'Completed root result');
+          if (step.result.retention !== undefined && !['clear', 'keep'].includes(step.result.retention)) throw new Error('Completed root retention must be clear or keep');
+          if (step.result.state?.status !== 'done' || (step.result.state.stateId !== undefined && step.result.state.stateId !== step.stateId)) throw new Error('Completed root result must name its final state');
+          if (step.result.description !== undefined) requireNonblank(step.result.description, 'Completed root description');
           if (step.result.terminalOutcome !== undefined) {
             const terminal = step.result.terminalOutcome;
             exactOptionalKeys(terminal, ['stateId', 'kind'], ['description'], 'Completed root outcome');
             if (terminal.stateId !== step.stateId || !['success', 'failure'].includes(terminal.kind)) throw new Error('Completed root outcome must name its final state and kind');
-            if (terminal.description !== undefined) requireCanonicalNonblank(terminal.description, 'Completed root outcome description');
+            if (terminal.description !== undefined) requireNonblank(terminal.description, 'Completed root outcome description');
           }
         }
         if (step.kind === 'answer') {
           exactOptionalKeys(step.result, ['questions', 'instruction'], [], 'Selected answer');
-          requireCanonicalNonblank(step.result.instruction, 'Selected answer instruction');
+          requireNonblank(step.result.instruction, 'Selected answer instruction');
           if (!Array.isArray(step.result.questions) || !step.result.questions.length) throw new Error('Selected answer requires questions');
           for (const question of step.result.questions) {
             exactOptionalKeys(question, ['asker', 'question'], [], 'Selected answer question');
@@ -4208,16 +4204,19 @@ function validateCanonicalCaptainSessionRecord(
               if (question.asker.kind !== 'role') throw new Error('Unknown selected answer asker');
               requireCanonicalNonblank(question.asker.roleId, 'Selected answer role');
             }
-            requireCanonicalNonblank(question.question, 'Selected answer question');
+            requireNonblank(question.question, 'Selected answer question');
           }
         }
         requireCanonicalNonblank(step.stateId, 'Captain step state');
         if (!Object.hasOwn(structural.catalog, step.playbookId)) throw new Error('Captain step names an unknown playbook');
       }
+      if (progress.positionStepId !== undefined && progress.positionStepId !== null && !ids.has(progress.positionStepId)) throw new Error('Captain progress positionStepId must name a recorded step');
+      if (progress.snapshot === null && progress.positionStepId != null) throw new Error('Captain progress positionStepId requires a saved position');
       if (progress.snapshot !== null) {
         const prepared = assertPlaybookCaptainShellSnapshot(progress.snapshot);
         assertSnapshotMatchesStructure(prepared, structural, artifactSchemas);
-        if (!isDeepStrictEqual(prepared.captain, snapshot.captain) ||
+        if ((Object.hasOwn(progress.snapshot, 'presentedEffectPrefix') && prepared.presentedEffectPrefix !== snapshot.presentedEffectPrefix) ||
+            !isDeepStrictEqual(prepared.captain, snapshot.captain) ||
             !isDeepStrictEqual(prepared.journal, snapshot.journal) ||
             !isDeepStrictEqual(prepared.sequences, snapshot.sequences) ||
             !isPlaybookEffectLedgerMonotonicExtension(snapshot.effectLedger, prepared.effectLedger) ||
@@ -6695,4 +6694,11 @@ async function writePrivateBytes(path, bytes, fs) {
     await handle?.close();
     try { await fs.unlink(temporary); } catch (cause) { if (cause?.code !== 'ENOENT') throw cause; }
   }
+}
+
+/** One shared decision for discard controls and durable rollback. */
+export function isUncertainTurnDiscardable(record) {
+  return record?.state === 'uncertain' && !record.uncertain.abandonment &&
+    (record.uncertain.progress?.steps.length ?? 0) === 0 &&
+    isDeepStrictEqual(record.effectLedger, record.snapshot.effectLedger);
 }

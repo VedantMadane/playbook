@@ -67,7 +67,7 @@ function interfaceProperties(src: string, name: string): string[] {
 }
 
 function normalizeType(type: string): string {
-  return type.replace(/\s+/g, '').replace(/;}/g, '}').replace(/^\|/, '');
+  return type.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, '').replace(/;}/g, '}').replace(/^\|/, '');
 }
 
 function unionMembers(src: string, name: string): string[] {
@@ -206,6 +206,9 @@ function applyMemberSignature(src: string): {
 describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
   // PBRT-35: consistency with the complete link contract.
   it('matches the full link contract on result, resume, session, trace, and runtime shapes', () => {
+    for (const name of ['PlaybookRecoveryCheckpoint', 'PlaybookRecoveryOffer', 'PlaybookStepRecord']) {
+      expect(normalizeType(interfaceBody(runtimeDts, name).replace(/\/\*[\s\S]*?\*\//g, ''))).toEqual(normalizeType(interfaceBody(linkSpec, name).replace(/\/\*[\s\S]*?\*\//g, '')));
+    }
     expect(statusMembers(runtimeDts)).toEqual(['aborted', 'error', 'ok']);
     expect(statusMembers(runtimeDts, 'CaptainResult')).toEqual([
       'aborted',
@@ -496,7 +499,7 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
     expect(
       methodSignature(runtimeDts, 'PlaybookRuntime', 'handleBossInput'),
     ).toEqual({
-      parameters: 'turn:{text:string;signal:AbortSignal}',
+      parameters: 'turn:{text:string;signal:AbortSignal;onAccepted?:()=>void}',
       result: 'PlaybookRunResult',
     });
     expect(

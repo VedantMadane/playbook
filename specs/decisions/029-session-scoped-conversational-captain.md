@@ -5,6 +5,8 @@
 
 ## Status
 
+Amended by [DR-070](070-durable-step-progress.md): automatic work requires a same-turn stop; input acceptance and presented changes are recorded at their source.
+
 Amended by [DR-066](066-captain-prepares-step-recovery.md): ordinary Captain calls remain tool-free; task authorization permits separate bounded prerequisite preparation and automatic continuation.
 
 Accepted.

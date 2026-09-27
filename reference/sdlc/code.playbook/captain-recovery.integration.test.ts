@@ -339,7 +339,7 @@ describe('Captain preparation through a durable session', () => {
     ].map((preparation) => ({ startWithQuestion: false, preparation })),
   ])
     it(
-      `restored ${'nested' in scenario ? 'nested ' : ''}${scenario.startWithQuestion ? 'question' : 'failed step'} with ${scenario.preparation} preparation${'interrupted' in scenario ? ' after preparation interruption' : ''}${'cliRetry' in scenario ? ' from SDK to CLI' : 'cliStart' in scenario ? ' from CLI to SDK' : ''}${'longContinuation' in scenario ? ' during a long continuation' : ''}${'hostRetry' in scenario ? ' after a host retry' : ''}${'interruptContinuation' in scenario ? ' after a committed continuation' : ''}${'alreadyAnswered' in scenario ? ' for an already answered question' : ''}${'admissionFailure' in scenario ? ' after rejected admission' : ''}${'questionReply' in scenario ? ` with check ${scenario.questionReply}` : ''}${'settleAbort' in scenario ? ' with drained cancellation' : ''}${'crashBeforeSave' in scenario ? ' before saving progress' : ''}${'captainAdapter' in scenario ? ` using ${scenario.captainAdapter}` : ''}${'interactive' in scenario ? ' in the interactive pane' : ''}${'composedStart' in scenario ? ' with the agreed handoff' : ''}`,
+      `restored ${'nested' in scenario ? 'nested ' : ''}${'throws' in scenario ? 'throwing ' : ''}${scenario.startWithQuestion ? 'question' : 'failed step'} with ${scenario.preparation} preparation${'interrupted' in scenario ? ' after preparation interruption' : ''}${'cliRetry' in scenario ? ' from SDK to CLI' : 'cliStart' in scenario ? ' from CLI to SDK' : ''}${'longContinuation' in scenario ? ' during a long continuation' : ''}${'hostRetry' in scenario ? ' after a host retry' : ''}${'interruptContinuation' in scenario ? ' after a committed continuation' : ''}${'alreadyAnswered' in scenario ? ' for an already answered question' : ''}${'admissionFailure' in scenario ? ' after rejected admission' : ''}${'questionReply' in scenario ? ` with check ${scenario.questionReply}` : ''}${'settleAbort' in scenario ? ' with drained cancellation' : ''}${'crashBeforeSave' in scenario ? ' before saving progress' : ''}${'captainAdapter' in scenario ? ` using ${scenario.captainAdapter}` : ''}${'interactive' in scenario ? ' in the interactive pane' : ''}${'composedStart' in scenario ? ' with the agreed handoff' : ''}`,
       withFixture('captain-preparation-', async (dir) => {
         const { startWithQuestion, preparation } = scenario;
         const nested = 'nested' in scenario && scenario.nested;
@@ -598,7 +598,7 @@ describe('Captain preparation through a durable session', () => {
               const calls = RecoveryAdapter.calls.length;
               const refused = await runCli(['--session', id, 'Continue']);
               expect(refused.stderr).toContain('restores and reports');
-              expect(refused.stderr).toContain('saved step preserves work from this turn');
+              expect(refused.stderr).toContain('work or repository evidence was recorded');
               expect(refused.stderr).not.toContain('--discard-uncertain');
               const discarded = await runCli(['--session', id, '--discard-uncertain']);
               expect(discarded.code).toBe(2);
@@ -636,6 +636,12 @@ describe('Captain preparation through a durable session', () => {
             RecoveryAdapter.composedStart ? 'Start the agreed task.' : `${nested ? '/wrapper' : '/code'} implement the original task${RecoveryAdapter.alreadyAnswered ? '. Use the small test target.' : ''}`,
           );
           if (automatic) {
+            if ('throws' in scenario) {
+              expect(first.snapshot.frames!.at(-1)!.runtime.state.stateId).toBe('failed');
+              expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'prepare')).toHaveLength(0);
+              expect((await controller.recover('Prepare and continue the original task.')).snapshot.frames!.at(-1)!.runtime.state.stateId).toBe('awaitBossReply');
+              return;
+            }
             if (RecoveryAdapter.alreadyAnswered) {
               expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'prepare')).toHaveLength(0);
               const calls = RecoveryAdapter.calls.filter(({ kind }) => kind === 'player');

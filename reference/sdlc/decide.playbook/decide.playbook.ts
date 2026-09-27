@@ -4856,6 +4856,7 @@ function createDecidePlaybookRuntime(
     async handleBossInput(turn: {
       text: string;
       signal: AbortSignal;
+      onAccepted?: () => void;
     }): Promise<PlaybookRunResult> {
       if (disposalPromise !== undefined) {
         throw new Error('decide runtime: runtime is disposing or disposed');
@@ -4935,6 +4936,8 @@ function createDecidePlaybookRuntime(
                 }
 
                 try {
+                  turn.signal.throwIfAborted();
+                  turn.onAccepted?.();
                   actor.send(event);
                   await driveToQuiescence();
                   await drainBoundaryCallsAndEmissions();

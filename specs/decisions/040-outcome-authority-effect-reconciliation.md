@@ -5,6 +5,8 @@
 
 ## Status
 
+Amended by [DR-070](070-durable-step-progress.md): step results restore only at their saved start; settlement owns retention and reporting, and whole-turn replay is removed.
+
 Amended by [DR-066](066-captain-prepares-step-recovery.md): saved-result assessment and verified read-only restoration permit bounded recovery while preserving immutable physical evidence.
 
 Accepted.
@@ -113,7 +115,7 @@ Every reconciled envelope taking neither that final-disposition exit nor the exa
 
 For a player call governed by this decision, [DR-028](028-empty-ok-result-re-ask.md) and [[playbook-runtime-9](../packages/playbook-runtime.md#playbook-runtime-9)] retain their one identical player re-ask only when the call's complete durable receipt proves `unchanged`; an observed, nonzero, incomplete, or ambiguous receipt takes the reconciliation path instead.
 [DR-034](034-durable-failure-retry-continuity.md)'s entry-event retry shall not be advertised from the unresolved state, whose only retry is reconciliation.
-[DR-031](031-shared-captain-session-front-ends.md)'s uncertain-turn recovery shall reconcile every durably started governed boundary since the snapshot that whole-turn retry would restore and shall permit replay only when every boundary has a complete receipt proving `unchanged`; any nonzero, ambiguous, or incomplete boundary shall enter parked reconciliation.
+Under [DR-070](070-durable-step-progress.md), uncertain recovery reconstructs receipts and reports the saved step without whole-turn replay; nonzero, ambiguous or incomplete evidence retains its reconciliation requirements.
 [DR-038](038-universal-run-resumption.md)'s retained generation shall preserve and reenter an unresolved reconciliation state, prevent adopted work from resuming or exposing ordinary actions until every outstanding effect boundary resolves, and prevent a retained pre-effect generation from bypassing the ledger rather than using its duplicate-effect warning as permission to replay the player; explicit unresolved abandonment shall clear that root instead of retaining a turn-start dismissal candidate.
 
 ### 5. Workflow commit outcomes reconcile semantics with effects

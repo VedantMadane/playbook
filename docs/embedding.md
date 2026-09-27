@@ -418,7 +418,7 @@ Captain may answer a player from the original task when it already answers the q
 
 If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
 
-All applications sharing a session store, including Spex and the CLI, must upgrade together before using these recovery fields. Hosts from 15.1.x cannot read the extended records.
+All applications sharing a session store, including Spex and the CLI, must upgrade together before running this version. Hosts from 15.1.x cannot read the extended records.
 
 A single recovery entry point handles either a paused step or an uncertain attempt:
 
@@ -436,7 +436,7 @@ If a turn fails and leaves this open controller uncertain, dispose it and reopen
 
 Explicit `mode:'retry'` and `retry()` remain supported. Module-free
 `discardSessionUncertain(shared, sessionId)` restores the prior recovery only
-when neither recorded effects nor a recovery point prevents discard.
+only when `isUncertainTurnDiscardable(record)` returns true: no abandonment, no recorded steps, and a ledger equal to the pre-turn snapshot. Use the same exported predicate to enable a Discard control.
 
 `readHistory()` returns readable history and a damaged boundary, including a
 clearly marked synthetic projection when a validated legacy journal has no

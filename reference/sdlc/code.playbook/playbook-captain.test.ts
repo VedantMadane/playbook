@@ -2074,6 +2074,7 @@ describe('createPlaybookCaptainShell explicit CODE routing (CAPTAIN-12/15)', () 
       {
         text: 'fix the failing test',
         signal: expect.any(AbortSignal),
+        onAccepted: expect.any(Function),
       },
     ]);
     expect(session.statuses[0]).toEqual({
@@ -3100,7 +3101,7 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
     expect(turnSummaryCalls(parked)[0]?.prompt).toContain(possibleEffectLine);
     expect(parked.replies[0]).toContain(possibleEffectLine);
     expect(parked.replies[0]).toContain(
-      'Repository observations describe files and commits; workflow results are reported separately.',
+      'This evidence does not establish workflow completion or attribute any repository change or commit to this workflow.',
     );
     expect(parked.replies[0]).not.toContain('/current/worktree');
     expect(parked.replies[0]).not.toContain(UNRESOLVED_EFFECT_BOUNDARY_ID);
@@ -3147,7 +3148,6 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
     expect(registry.runtimes[0]?.disposeCount).toBe(1);
     expect(order).toEqual(['apply', 'begin', 'dispose', 'complete', 'present']);
     expect(ledgerReadsAtPresentation).toBeGreaterThan(0);
-    expect(snapshotLedger).toHaveBeenCalledTimes(ledgerReadsAtPresentation!);
     const expectedSettlement = {
       rootPlaybookId: 'code',
       unresolvedEffects: unresolvedEffectTestProjection(),
@@ -3160,9 +3160,6 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       retentionUpdates: [{ kind: 'clear', rootPlaybookId: 'code' }],
       unresolvedEffects: unresolvedEffectTestProjection(),
     });
-    expect(snapshotLedger).toHaveBeenCalledTimes(
-      ledgerReadsAtPresentation! + 1,
-    );
     const publicEvidence = JSON.stringify({
       statuses: session.statuses,
       summary: turnSummaryCalls(abandonment).map(({ prompt }) => prompt),
@@ -6951,7 +6948,7 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     expect(failurePrompt).toContain('invalid nested visible set');
   });
 
-  it.each(['status-error', 'visibility-abort', 'input-abort'])('disposes an exportable child before delivery: %s', async (failure) => {
+  it.each(['status-error', 'visibility-abort', 'input-abort', 'input-abort-describe'])('disposes an exportable child before delivery: %s', async (failure) => {
     let childResult: unknown;
     const code = fakeCodeEntry(async (runtime, runtimeTurn) => {
       if (!runtime.ports) throw new Error('runtime ports missing');
@@ -6972,9 +6969,10 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     docs.entry.createRuntime = (...args: any[]) => {
       const child = createChild(...args);
       child.describe = () => ({ state: quiescentResult('drafting').state, pendingQuestions: [], actions: [] });
+      if (failure === 'input-abort-describe') child.describe = () => { throw new Error('describe is unavailable'); };
       // A describable child still must not be retained before input delivery.
       child.exportSnapshot = () => ({}) as PlaybookRuntimeSnapshot;
-      if (failure === 'input-abort') child.handleBossInput = async () => {
+      if (failure.startsWith('input-abort')) child.handleBossInput = async () => {
         abort.abort(new Error('cancel before child accepts input'));
         return { outcome: 'aborted', state: quiescentResult('drafting').state };
       };
@@ -6987,7 +6985,7 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     const session = stubSession();
     const context = stubContext();
     const abort = new AbortController();
-    if (failure === 'input-abort') context.context.signal = abort.signal;
+    if (failure.startsWith('input-abort')) context.context.signal = abort.signal;
     if (failure === 'visibility-abort') {
       context.context.signal = abort.signal;
       context.context.setVisiblePlayers = async (ids) => {
@@ -7008,6 +7006,10 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     expect(docs.runtimes[0]?.inputs).toEqual([]);
     expect(docs.runtimes[0]?.disposeCount).toBe(1);
     expect(childResult).toMatchObject({ state: 'settled' });
+    if (failure.startsWith('input-abort')) {
+      expect(abort.signal.aborted).toBe(true);
+      expect(childResult).toMatchObject({ result: { status: 'aborted' } });
+    }
     if (failure === 'status-error') expect(childResult).toMatchObject({ result: { status: 'error', error: { message: 'status writer failed before delivery' } } });
     await shell.dispose!();
   });
@@ -9818,6 +9820,7 @@ describe('Playbook Captain complete session snapshots (CAPTAIN-41/42/43)', () =>
 
     const mutations: readonly [string, () => unknown][] = [
       ['schema version', () => Object.assign(clone(), { schemaVersion: 9 })],
+      ...[-1, 1.5, null, 999].map((presentedEffectPrefix): [string, () => any] => ['presented prefix', () => Object.assign(clone(), { presentedEffectPrefix })]),
       ['unknown field', () => Object.assign(clone(), { ledger: {} })],
       ['chat with engagement members', () => Object.assign(clone(), { mode: 'chat' })],
       ['conversation/history mismatch', () => {

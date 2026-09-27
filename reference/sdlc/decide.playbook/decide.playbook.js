@@ -3384,6 +3384,8 @@ function createDecidePlaybookRuntime(options, deferredEffects) {
                                     suppressInspectionEmissions = true;
                                 }
                                 try {
+                                    turn.signal.throwIfAborted();
+                                    turn.onAccepted?.();
                                     actor.send(event);
                                     await driveToQuiescence();
                                     await drainBoundaryCallsAndEmissions();

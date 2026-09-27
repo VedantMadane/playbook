@@ -395,8 +395,6 @@ export interface PlaybookRuntimeSnapshot {
     };
     /** Interrupted invocation, captured before its external call (DR-066). */
     recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
-    /** Restored work requires an explicit choice before continuation. */
-    interrupted?: true;
     suspendedCall?: PlaybookSuspendedCall;
 }
 export interface PlaybookRecoveryCheckpoint {
@@ -410,7 +408,7 @@ export interface PlaybookRecoveryCheckpoint {
 }
 export interface PlaybookStepRecord {
     readonly id: string;
-    readonly kind: 'player' | 'captain' | 'script' | 'preparation' | 'completion' | 'answer';
+    readonly kind: 'player' | 'captain' | 'script';
     readonly stateId: string;
     readonly result?: JsonValue;
 }
@@ -423,8 +421,6 @@ export interface PlaybookControlAction {
     reason?: PlaybookControlActionReason;
 }
 export interface PlaybookRecoveryOffer {
-    /** This offer must not be selected by automatic recovery. */
-    explicitOnly?: true;
     prompt: string;
     description?: string;
     /** Runtime-owned conditions to satisfy; these never authorize task completion. */
@@ -457,6 +453,7 @@ export type PlaybookControlReceipt = {
 } | {
     disposition: 'failed';
     error: NormalizedError;
+    run?: PlaybookRunResult;
 };
 export interface PlaybookRetainedGenerationMetadata {
     readonly unfinishedFinalStateIds: readonly string[];
@@ -491,6 +488,8 @@ export interface PlaybookRuntime {
     handleBossInput(turn: {
         text: string;
         signal: AbortSignal;
+        /** Called synchronously just before accepting the event, at most once. */
+        onAccepted?: () => void;
     }): Promise<PlaybookRunResult>;
     resumePlaybookCall(input: {
         callId: string;

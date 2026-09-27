@@ -124,7 +124,6 @@ export interface SessionStep {
 export interface SessionProgressChange {
   readonly snapshot?: SessionSnapshot | null;
   readonly step?: SessionStep;
-  readonly retentionUpdates?: readonly SessionRetentionUpdate[];
 }
 export interface SessionRecovery {
   readonly schemaVersion: 6;
@@ -148,7 +147,7 @@ export interface SessionRecovery {
     readonly markedAt: string;
     readonly attemptedExecutionProjection: SessionExecutionProjection;
     readonly abandonment?: Readonly<Record<string, any>>;
-    readonly progress?: { readonly snapshot: SessionSnapshot | null; readonly steps: readonly SessionStep[] };
+    readonly progress?: { readonly snapshot: SessionSnapshot | null; readonly steps: readonly SessionStep[]; readonly positionStepId?: string | null };
   };
 }
 export interface SessionReplayCheckpoint {
@@ -270,3 +269,6 @@ export declare function validateCaptainSessionExecutionProjection(value: unknown
 export declare function validateCaptainSessionStructuralProjection(value: unknown): SessionStructuralProjection;
 export declare function assertCaptainSessionExecutionCompatible(structural: SessionStructuralProjection, execution: SessionExecutionProjection): SessionExecutionProjection;
 export declare function attachSessionHints(snapshot: SessionSnapshot, hints: SessionHints): SessionSnapshot;
+
+/** Whether discarding an uncertain turn restores its untouched baseline. */
+export declare function isUncertainTurnDiscardable(record: SessionRecovery): boolean;

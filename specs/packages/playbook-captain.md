@@ -156,7 +156,7 @@ The closing reply shall not include counts for plan or
 implementation steps, tests-green state ids, other internal states,
 raw state names, transitions, guard names, prompts, tools, hidden
 calls, or reasoning.
-Where the outermost entry actually driven in the counting window declares a summary
+Where the counting owner defined by [[playbook-captain-20](#playbook-captain-20)] declares a summary
 policy, while the turn's counted activity — the saved interruptions,
 saved copy-pastes, and summary-visible rounds counted per
 [[playbook-captain-20](playbook-captain.md#playbook-captain-20)] — is nonzero,
@@ -795,7 +795,7 @@ outcome report and the current complete pending questions.
 While the turn's counted activity — the saved interruptions plus
 saved copy-pastes plus the summary-visible round total — is nonzero,
 the result-phase prompt shall instruct Captain to append the
-outermost entry actually driven in the counting window's `summaryPolicy` saved-counts line verbatim with the supplied
+counting owner defined by [[playbook-captain-20](#playbook-captain-20)]'s `summaryPolicy` saved-counts line verbatim with the supplied
 counts and natural singular forms when a count is one; when that
 counted activity is zero or the entry declares no `summaryPolicy`,
 it shall instruct Captain to append no saved-counts line.
@@ -1125,6 +1125,9 @@ When `exportSnapshot()` is called after initialization and between Boss turns, w
 At any other point, or when an identity, token projection, effect-ledger mirror, retained source lineage or reconciliation checkpoint, frame edge, nested-call descriptor, or runtime safe point is inconsistent, `exportSnapshot()` shall return `undefined` without changing the shell.
 `assertPlaybookCaptainShellSnapshot` shall be a pure boundary that performs all intrinsic closed-schema, JSON, effect-ledger, retained-lineage, retained-reconciliation, conversation, journal, Captain-runtime contribution, identity, frame-topology, suspended-edge, role-question, player-token projection, and leaf-projection validation without reading configuration, importing modules, or constructing runtimes; it shall return a detached recursively frozen snapshot.
 
+The public shell snapshot shall accept optional `presentedEffectPrefix`, a nonnegative integer no greater than the ledger boundary count; older omission means that snapshot's count.
+`projectUnresolvedEffects(ledger,references)` shall export its `PlaybookCaptainUnresolvedEffectReference` input union as `{kind:'boundary',boundaryId:string}` or `{kind:'logical-operation',operationId:string}`, returning ordered bounded evidence [[playbook-captain-58](#playbook-captain-58)].
+
 #### playbook-captain-42
 
 Where a fresh unused Playbook Captain shell was constructed from the authoritative stored catalog and the compatible current settings projection already checked against the durable session record under [[playbook-cli-23](playbook-cli.md#playbook-cli-23)], when `restore(session, snapshot)` receives a `PlaybookCaptainShellSnapshot`, the shell shall first apply [[playbook-captain-41](#playbook-captain-41)]'s pure intrinsic validator before reading configuration, importing a module, or constructing a runtime.
@@ -1240,6 +1243,8 @@ When a Boss turn settles after a physical receipt completed during that turn pro
 - the report supplements the unresolved-effect report and names no other path, content, or identity;
 - the same commit and paths join that turn's settlement facts, so its result-phase prompt reads them;
 - a turn whose completed receipts carry no such path appends nothing.
+
+The shell shall report receipts after `presentedEffectPrefix` and advance that prefix only when its reply is accepted without cancellation; progress and aborted settlements preserve the previous prefix, so the next reply carries any unpresented report [[playbook-captain-41](#playbook-captain-41)].
 
 #### playbook-captain-67
 
@@ -1458,7 +1463,7 @@ action's ordered status and telemetry emissions settle, whose prompt
 carries the settlement's outcome-report facts verbatim, the exact
 saved counts, and the instruction to compose the closing reply only
 from that outcome report; the validated closing reply is the turn's
-only summary; and, when the active registry entry declares a
+only summary; and, when the counting owner as defined by [[playbook-captain-20](#playbook-captain-20)] declares a
 `summaryPolicy` and the turn's counted activity is nonzero, the
 prompt carries the exact supplied saved-counts line
 `Saved you X interruptions and Y copy-pastes across Z rounds of reviews/rebuttals.`
@@ -1909,6 +1914,8 @@ When the retained-generation integration suite captures and installs ordinary an
 The matrix shall exercise an incomplete boundary owned by a later-created child absent from a retained nested stack and a root-wide fence; it shall fail unless no other frame or leaf bypasses the fence, the input generation remains byte-exact, and later receipt completion alone does not clear the fence (verifying [[playbook-captain-54](#playbook-captain-54)]).
 Where a safely adopted generation retaining an older original source identity is later fenced under a fresh source-generation identity, the suite shall fail unless the shell, runtime, and recaptured generation all preserve the older identity and original checkpoint through settlement (verifying [[playbook-captain-54](#playbook-captain-54)]).
 After explicit reconciliation proves the root safe, the suite shall fail unless the shell routes the applicable action once, keeps ordinary Boss input out until the marker clears, exports the current ledger and original source lineage without a fence, and only then permits ordinary runtime input; during unsafe adoption it shall publish no retained question or player visibility and shall expose only the reconciliation and abandonment actions (verifying [[playbook-captain-54](#playbook-captain-54)]).
+
+A fenced adoption shall show the active leaf's players while preserving the same reconciliation fence.
 
 #### playbook-captain-57
 

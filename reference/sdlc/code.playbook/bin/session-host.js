@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import { randomUUID } from 'node:crypto';
-import { createCaptainSessionStore, projectCaptainSessionStructure } from './session-store.js';
+import { createCaptainSessionStore, isUncertainTurnDiscardable, projectCaptainSessionStructure } from './session-store.js';
 import { createCaptainSessionHost, executionConfigFromPlan, installRetainedGenerationsForLaunch, validateFrozenExecutionConfig } from './run.js';
 import { createReplayRecordObserver } from './replay-observer.js';
 
@@ -24,7 +24,7 @@ export async function openSessionHost(options) {
     if (options.mode === 'recover') retryPending = record?.state === 'uncertain';
     if (options.mode === 'new' && record !== undefined) throw new Error('session already exists');
     if (options.mode !== 'new' && options.sessionId && record === undefined) throw new Error('session does not exist');
-    if (record?.state === 'uncertain' && !retryPending) throw new Error(record.uncertain.progress?.steps.length ? 'session has recorded work; select Retry to restore and report it' : 'session has an uncertain turn; select Retry or Discard');
+    if (record?.state === 'uncertain' && !retryPending) throw new Error(isUncertainTurnDiscardable(record) ? 'session has an uncertain turn; select Retry or Discard' : 'session has recorded work or repository evidence; select Retry to restore and report it');
     if (retryPending && record?.state !== 'uncertain') throw new Error('session has no uncertain turn to retry');
     const cwd = options.cwd ?? record?.cwd ?? process.cwd();
     const selected = retryPending ? record.uncertain.attemptedExecutionProjection : options.config ?? (options.plan ? executionConfigFromPlan(options.plan) : record?.lastAppliedExecutionProjection);

@@ -184,6 +184,8 @@ interface PlaybookRuntime {
   handleBossInput(turn: {
     text: string;
     signal: AbortSignal;
+    /** Called synchronously just before accepting the event, at most once. */
+    onAccepted?: () => void;
   }): Promise<PlaybookRunResult>;
   resumePlaybookCall(input: {
     callId: string;
@@ -467,7 +469,7 @@ interface PlaybookRecoveryCheckpoint {
 
 interface PlaybookStepRecord {
   readonly id: string;
-  readonly kind: 'player' | 'captain' | 'script' | 'preparation';
+  readonly kind: 'player' | 'captain' | 'script';
   readonly stateId: string;
   readonly result?: JsonValue;
 }
@@ -504,8 +506,6 @@ interface PlaybookRuntimeSnapshot {
   };
   /** Interrupted invocation, captured before its external call (DR-066). */
   recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
-  /** Restored work requires an explicit choice before continuation. */
-  interrupted?: true;
   suspendedCall?: PlaybookSuspendedCall;
 }
 
@@ -2135,7 +2135,7 @@ interface PlaybookControlView {
 type PlaybookControlReceipt =
   | { disposition: 'rejected'; reason: string }          // before any effect
   | { disposition: 'executed'; run: PlaybookRunResult }
-  | { disposition: 'failed'; error: NormalizedError };   // effects may exist
+  | { disposition: 'failed'; error: NormalizedError; run?: PlaybookRunResult };   // effects may exist
 
 // Optional PlaybookRuntime members — both or neither:
 describe?(): PlaybookControlView;
@@ -2282,9 +2282,10 @@ Recorded control receipts are process-local. Invocation checkpoints retain the o
 
 The optional `PlaybookPorts.recordStep(step, position?)` lets a durable host save ordinary work without understanding machine internals.
 The shared runtime records player, direct-Captain and script starts before execution and their actor results before advancing.
-The runtime owns the complete stopped position, including accepted Boss input; the host joins nested frames and atomically stores starts, results and retention updates.
+The runtime owns the complete stopped position, including accepted Boss input; the host joins nested frames and atomically stores starts and results; retention changes wait for settlement.
 A custom runtime that cannot provide that position remains runnable, but a crash returns it to Captain with recorded work preserved.
-An `interrupted:true` snapshot makes its recovery offer `explicitOnly:true`, preserved across restore and adoption; the host must exclude that offer from automatic preparation or retry.
+Automatic recovery requires a failed or quiescent outcome produced by an operation in the same turn; resuming or adopting an older stop starts no preparation.
+The store identifies the step that owns a saved position, so a consumed result cannot be attached to a later stopped snapshot.
 Only internal step-start capture creates a synthetic failed position; public snapshot capture returns the actual stopped state.
 Opening or reporting an interrupted run executes no work; Boss chooses the next action after checking outside effects and stopping any surviving worker.
 

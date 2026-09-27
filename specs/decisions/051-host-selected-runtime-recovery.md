@@ -5,7 +5,9 @@
 
 ## Status
 
-Amended by [DR-066](066-captain-prepares-step-recovery.md): host-selected actions receive the same continuation points and bounded automatic recovery as model-selected actions.
+Amended by [DR-070](070-durable-step-progress.md): host-selected actions use step progress; saved continuation points and whole-turn replay are removed.
+
+Amended by [DR-066](066-captain-prepares-step-recovery.md): host-selected actions receive the same bounded automatic recovery as model-selected actions; DR-070 replaces continuation points and whole-turn replay with normal step progress.
 
 Accepted.
 Amends [DR-029](029-session-scoped-conversational-captain.md) in one scope: a `runtime` turn may be decided by the embedding host instead of the hidden decision call, preserving every validation and effect rule that decision carries.
@@ -33,5 +35,5 @@ The list cannot be reconstructed outside the shell: it is computed per call from
 - A host can draw one control per action the leaf actually offers, rather than one guess, and draws none where nothing is advertised.
 - The recovery path spends no model call, so a provider refusal cannot block the recovery from a refused call.
 - Read and write stay honest about time: the answer is read live between turns and enters no snapshot, so a stale list cannot outlive what the leaf offers.
-- The durable turn is an ordinary Boss turn carrying the action's label, so an uncertain-turn retry replays that text rather than the selection; a replay reaching the decision call again is decided from the same advertised list, one model call later than the original.
+- The durable turn carries the action's label; under [DR-070](070-durable-step-progress.md), uncertain retry restores and reports progress without replaying the text or a saved continuation selection.
 - The closed action set and its effect rules are untouched: nothing new executes, and nothing executes by a new route.

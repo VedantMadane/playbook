@@ -12,7 +12,8 @@ Save work before execution, restore interrupted runs without repeating work, and
 ### recovery-1
 
 Before starting a player, direct-Captain or script invocation, the shared runtime shall capture a detached checkpoint containing its source state, complete composed prompt or command, persisted invocation machine including accepted Boss input, and current effect-ledger boundary prefix.
-The optional `recordStep(step, position?)` port shall receive a fresh UUID start and a runtime-owned restorable failed position marked `interrupted:true` before execution, then the same start with its JSON actor result before the next transition.
+The runtime's `PlaybookStepRecord` shall contain `id`, `kind:'player'|'captain'|'script'`, `stateId` and optional JSON `result`.
+The optional `recordStep(step, position?)` port shall receive a fresh UUID start and a runtime-owned restorable failed position before execution, then the same start with its JSON actor result before the next transition.
 A failed start save shall start no work; a failed result save shall stop further work while retaining the known output for drained settlement.
 While failed or waiting for Boss, the runtime shall export its checkpoint as optional `recoveryCheckpoint` and restore without execution [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)].
 A non-JSON context shall remain executable with an explicit unavailable position; no checkpoint shall be invented.
@@ -39,8 +40,6 @@ A missing or unsafe checkpoint, including an old failed snapshot or a failed nes
 ### recovery-5
 
 While a leaf has an invocation checkpoint and either a pending Boss question or a ready step retry, verified-restoration retry, or saved-result assessment, its control view shall offer `recovery` containing the captured `prompt`, optional source-state `description`, optional `preparation` text stating the conditions the runtime will verify, optional JSON `evidence` containing saved player text, declared result choices and repository receipts, and a runtime-owned `continuation` of exactly `{kind:'reply'}` or `{kind:'runtime',actionId}`.
-A restored interrupted runtime shall add `explicitOnly:true`, preserved through export and adoption until accepted input or an explicit continuation starts work.
-The controller digest shall explain that unrelated Boss text grants no repeat permission and that unfinished work requires checking surviving workers and outside actions.
 
 ### recovery-6
 
@@ -72,7 +71,7 @@ The preparation and continuation shall settle as one `recover` turn through the 
 
 ### recovery-10
 
-While the failed invocation checkpoint identifies exactly one owned standalone boundary with a complete single-commit receipt, saved nonempty player text, no spent correction budget, and either no semantic candidate or an already resolved one, the runtime shall advertise `retry:adjudication` as `Retry assessment of the saved result`, provided no other unresolved boundary or retained or deferred fence exists.
+While the failed invocation checkpoint has no saved actor result and identifies exactly one owned standalone boundary with a complete single-commit receipt, saved nonempty player text, no spent correction budget, and either no semantic candidate or an already resolved one, the runtime shall advertise `retry:adjudication` as `Retry assessment of the saved result`, provided no other unresolved boundary or retained or deferred fence exists.
 The action shall adjudicate the saved text once through the ordinary tool-free judge only when its semantic candidate is missing, require that candidate to reconcile as resolved against the existing receipt, and durably append every valid candidate without replacing physical evidence, including a candidate that remains unresolved.
 A blocked candidate shall replace the old failure explanation, remain unresolved and remove the saved-assessment retry; it shall authorize no invented transition [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)].
 It shall then deliver the acknowledged result to the checkpoint's invocation through ordinary reconstruction, without calling the player or creating another physical boundary; a failed judgment shall leave the invocation parked, and restoration after acknowledgement shall consume the saved resolved candidate without another judge call.
@@ -88,8 +87,9 @@ The effect-ledger validators shall reject restoration on a writable, cohort, def
 
 ### recovery-14
 
-After a start, resume, switch, answer, or runtime action leaves a recoverable leaf, the host shall attempt the same preparation-and-continuation operation without another Boss turn, at most twice per turn and once for the same leaf, recovery offer, and failure.
-An `explicitOnly` offer, blocked preparation, cancellation, unavailable offer, or unsuccessful continuation shall end automatic recovery; a conversation-only request or explicit stop shall trigger none.
+When an operation of this turn returns `failed` or `quiescent`, the shell shall record that frame's stop and consume it before automatic preparation and continuation, at most twice per turn.
+The operations are input delivery, return to a parent, and an accepted runtime action's recorded `run` result, including a failed receipt with that result; a thrown operation without a result authorizes no automatic recovery.
+A resumed or adopted old stop, refused input, blocked preparation, cancellation, unavailable offer, or unsuccessful continuation shall trigger no further automatic recovery; a conversation-only request or explicit stop shall trigger none.
 For a pending question, the host shall first make one fresh tool-free check on the same serialized Captain queue, without a repository claim or step record, using the hidden-control envelope of [[playbook-captain-31](playbook-captain.md#playbook-captain-31)].
 The root frame shall retain its exact handed-off request as optional nonempty `request`, through capture, restore and adoption; the root shall also retain optional `inputs`, an array of nonempty exact texts subsequently delivered to this engagement, while a child shall carry neither member; older snapshots omitting them remain valid.
 The check shall receive only that request as `{label:"Current engagement request",instruction:<exact request>}`, or an empty list when no request was saved or that exact request has already been delivered again.
@@ -101,23 +101,28 @@ A selected existing instruction may be delivered once under the same continuatio
 
 ### recovery-16
 
-When an unexpected child-runtime exception or cancellation after delivery of its initial request leaves an exportable parked leaf, the host shall preserve that leaf and its suspended parents for a later valid reply or recovery instead of treating the exception as an authored completed child result; initialization, visibility and pre-delivery failures shall retain ordinary child disposal [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)].
+When an unexpected child-runtime exception or cancellation after the runtime accepts its initial request leaves an exportable parked leaf, the host shall preserve that leaf and its suspended parents for a later valid reply or recovery instead of treating the exception as an authored completed child result; initialization, visibility and pre-acceptance failures shall retain ordinary child disposal [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)].
+
+The runtime shall call the optional `handleBossInput.onAccepted` synchronously immediately before sending its accepted event, at most once; the shared runtime and DECIDE shall cover ordinary and deferred answers [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)].
+The shell shall record starts, delivery and root inputs at this callback, pausing parent cancellation only when its child accepts input.
+For a runtime that does not call it, a returned outcome other than `no-action` or `aborted` shall count as acceptance.
 
 ### recovery-18
 
-Before external work, a durable host shall atomically save the uncertain attempt's progress as exactly `{snapshot,steps}` ([DR-070](../decisions/070-durable-step-progress.md)):
+Before external work, a durable host shall atomically save the uncertain attempt's progress as `{snapshot,steps,positionStepId}` ([DR-070](../decisions/070-durable-step-progress.md)):
 
 - `snapshot` is the runtime-owned full working stack, or `null` when a frame cannot represent its position; the shell joins parent/child identities without interpreting machine context;
 - the snapshot retains the preceding settled Captain, journal and sequences, the current ledger, player ledger, issued identities, and accepted runtime input;
+- `positionStepId` names the new unfinished step saved with a non-null snapshot, or is null for every other snapshot write; result-only writes preserve it; older omission means null, and a non-null value must name an existing step;
 - `steps` contains unique UUID starts with exactly `id`, `kind:'player'|'captain'|'script'|'preparation'|'completion'|'answer'`, `stateId`, `runtimeSessionId`, `playbookId`, and optional JSON `result`; external work requires a start before its result, identities never change, and an acknowledged result is immutable;
-- `completion` stores the final root state, optional authored description and terminal outcome; `answer` stores the pending asker/question objects and exact selected instruction; these known facts are written once with their results;
+- `completion` stores the final root state, optional authored description and terminal outcome, and the runtime's retention decision (`clear` or `keep`, with older omission meaning `clear`); `answer` stores the pending asker/question objects and exact selected instruction; these known facts are written once with their results;
 - preparation saves its parked position before tools; custom runtime calls without a supplied position record starts and returned status with an unavailable position;
 - a result save does not move the saved position; after work drains, an optional save advances to the actual stopped stack or completed root without changing the action result on failure;
-- pending retention changes and progress save together; the record remains token-free [[session-storage-7](session-storage.md#session-storage-7)]; all lease writes serialize;
+- progress changes no durable retained generations, unresolved effects or presented prefix; pending retention updates affect only the in-memory offer catalog until settlement; the record remains token-free [[session-storage-7](session-storage.md#session-storage-7)]; all lease writes serialize;
 - required save failure stops further work; atomic write loss preserves either the previous complete record or the next complete record;
-- discard refuses recorded steps or changed ledger evidence, and retry never chooses discard automatically; a stopped snapshot alone does not forbid discard.
+- the shared exported `isUncertainTurnDiscardable(record)` shall allow an uncertain turn only with no abandonment, no recorded steps and a ledger equal to its pre-turn snapshot; store discard, CLI/SDK guidance and no-work restoration shall use it; retry never chooses discard automatically, and a stopped snapshot alone does not forbid discard.
 
-The shell shall export `ProgressChange` for `recordProgress`, containing optional `snapshot`, `step` and `retentionUpdates`, with the same shapes defined above; `abortPreparation(reason?)` shall cancel the active turn on a preparation deadline or required save failure.
+The shell shall export `ProgressChange` for `recordProgress`, containing optional `snapshot` and `step`, with the same shapes defined above; `abortPreparation(reason?)` shall cancel the active turn on a preparation deadline or required save failure.
 
 The host shall store no continuation selection or copied report.
 
@@ -143,8 +148,9 @@ When explicit uncertain retry opens an interrupted attempt, the shared host shal
 
 - reconstruct incomplete receipts and require monotonic ledger evidence before restoration; a failed check retains uncertainty [[playbook-cli-23](playbook-cli.md#playbook-cli-23)];
 - when no step is recorded and the ledger is unchanged, restore the exact pre-turn stack and pending questions, explaining that the last message was not processed;
-- otherwise restore a saved supported stack with the current ledger, attaching a completed result only to an unconsumed interrupted position with its exact step, runtime, playbook and source identity; restored recovery offers require explicit choice even on later turns;
+- otherwise restore a saved supported stack with the current ledger, attaching a completed result and rebuilding the causal attempt only for the checkpoint named by `positionStepId`, with matching step, runtime, playbook and source identity; every other frame keeps its position unchanged;
 - absent a supported position, restore Captain conversation in chat, preserve files and repository evidence, and clear only retained generations containing current or adopted-source identities owning the attempt's changed evidence or steps;
+- derive retained-root clears from completion records that decided `clear` and from the lost-position owner rule above, applying them only in the report settlement; an unfinished final state that decided `keep` preserves its preceding generation;
 - admit the recorded attempt and report through the shell without a Captain decision, player, script or preparation call, and without writing progress; the Captain conversation shall catch up on its next ordinary turn;
 - report changed boundaries and logical operations in ledger order, counting logical chains once, through the bounded evidence projection [[playbook-captain-58](playbook-captain.md#playbook-captain-58)];
 - derive carried Boss edits from the ledger and completed roots, unfinished calls, preparation and selected answers from the journal; preserve complete pending questions, omit nonessential counts, and validate no host-written evidence as model prose;
@@ -152,7 +158,7 @@ When explicit uncertain retry opens an interrupted attempt, the shared host shal
 - explain the restored position or lost-position limit, publish available controls, and require Boss to check outside actions and stop any surviving worker before repeating unfinished work;
 - only a later explicit Boss input or action may continue; a second crash follows the same rule.
 
-The shell shall export `InterruptedReport` for `selectInterruptedReport(input, report)`, containing `text`, ordered `effects`, `boundaryPrefix`, and optional `retentionUpdates` and `unresolvedEffects`; the host selects it before admitting the exact recorded input.
+The shell shall export `InterruptedReport` for `selectInterruptedReport(input, report)`, containing `text`, ordered `effects`, and optional `retentionUpdates` and `unresolvedEffects`; the host selects it before admitting the exact recorded input.
 A missing result shall mean unfinished work, never evidence of no effect; a repository observation shall not prove that an outside action did not occur or that a worker has stopped.
 
 ## Verification
@@ -163,19 +169,32 @@ When integration tests interrupt preparation, they shall reopen the store and re
 
 ### recovery-23
 
-When integration tests cancel or fail a turn with saved progress, they shall verify drained settlement through CLI, interactive and SDK, including immediate disposal, completed results and retained-root changes surviving closing cancellation, mandatory carried-changes reports, settlement failure preserving both errors, and no report of an earlier attempt [[recovery-20](#recovery-20)] [[recovery-21](#recovery-21)].
+When integration tests cancel or fail a turn with saved progress, they shall verify drained settlement through CLI, interactive and SDK, including immediate disposal, completed results and retained-root changes surviving closing cancellation, carried-changes reports on the next presented reply after cancellation (SDK and headless), settlement failure preserving both errors, and no report of an earlier attempt [[recovery-20](#recovery-20)] [[recovery-21](#recovery-21)].
 
 ### recovery-24
 
-When system tests kill real hosts during ordinary and nested player or script work, before receipts, before and after atomic publication, during preparation, after completion, before the first step from a pending question, and during a second recovery, they shall verify no calls on reopen or reporting, accepted input preservation, reuse of saved outputs without duplicated effects, explicit-only later recovery, reserved words in questions, completed-root reporting, and mandatory change reports without copied counts [[recovery-1](#recovery-1)] [[recovery-18](#recovery-18)] [[recovery-27](#recovery-27)].
+When system tests kill real hosts during ordinary and nested player or script work, before receipts, before and after atomic publication, during preparation, after completion, before the first step from a pending question, and during a second recovery, they shall verify no calls on reopen or reporting, accepted input preservation, reuse of saved outputs without duplicated effects, no automatic recovery from an old stop, reserved words in questions, completed-root reporting, configured command names, exact answer and completion text, unchanged-attempt input acceptance, consumed-result controls, report loss at settlement, owned and adopted-source clears, byte-exact discard after give-up, and mandatory change reports without copied counts [[recovery-1](#recovery-1)] [[recovery-18](#recovery-18)] [[recovery-27](#recovery-27)].
 
 ### recovery-28
 
 When system tests kill a root or nested bespoke runtime with parallel work and no supported position, they shall verify preserved commits and evidence, no stale runtime or player execution, and an explained safe exit to Captain [[recovery-27](#recovery-27)].
 
+The bounded policy model shall check the following rules, with integration or system tests executing the corresponding implementation and deliberate violations rejected [[recovery-1](#recovery-1)] [[recovery-14](#recovery-14)] [[recovery-16](#recovery-16)] [[recovery-18](#recovery-18)] [[recovery-27](#recovery-27)]:
+
+| Rule | Executable evidence |
+| --- | --- |
+| Only a same-turn operation permits automatic recovery | `durable-progress.integration.test.ts`: cancelled-stop, old-stop, resume-stop; `captain-recovery-progress.integration.test.ts`: answer-failure |
+| Input acceptance is an event | `playbook-captain.test.ts`: input-abort and unavailable description; `captain-recovery-progress.integration.test.ts`: child-cancel |
+| Starts and results survive atomic loss | `durable-progress.integration.test.ts`: player-before-change, script-before-rename, script-after-rename |
+| A consumed result is not attached again | `durable-progress.integration.test.ts`: consumed-result |
+| Reporting writes no progress and starts no work | `durable-progress.integration.test.ts`: second-crash, lost-position-second-crash |
+| Unsupported work has a safe exit | `captain-process-loss.integration.test.ts`: root and nested DECIDE |
+
+The model shall omit duplicate script and preparation scenarios whose kind had no meaning; real script, preparation, nesting and cancellation behavior remains covered by the system tests above.
+
 ### recovery-25
 
-When integration tests validate progress, they shall isolate controller, journal, identity, current-ledger and immutable-result checks with otherwise-valid snapshots and verify that failed optional stopped-position saves preserve the action result [[recovery-18](#recovery-18)].
+When integration tests validate progress, they shall isolate controller, journal, identity, current-ledger, monotonic extension, step kind, playbook id, completion and answer shape, position-step identity and immutable-result checks with otherwise-valid snapshots and verify that failed optional stopped-position saves preserve the action result [[recovery-18](#recovery-18)].
 
 ### recovery-26
 

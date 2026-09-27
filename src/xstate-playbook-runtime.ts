@@ -5598,7 +5598,6 @@ export function createXStatePlaybookRuntime<
       );
     }
 
-    let interruptedWork = false;
     let acceptedStepResult: PlaybookRuntimeSnapshot['recoveryCheckpoint'];
     let requiredRecoveryBaseline: PlaybookRepositoryReceipt['baseline'] | undefined;
 
@@ -5773,7 +5772,6 @@ export function createXStatePlaybookRuntime<
     }
 
     async function resumeCheckpoint(checkpoint: NonNullable<PlaybookRuntimeSnapshot['recoveryCheckpoint']>): Promise<void> {
-      interruptedWork = false;
       acceptedStepResult = checkpoint;
       try {
         stopActor();
@@ -5867,7 +5865,6 @@ export function createXStatePlaybookRuntime<
             : undefined;
         return {
           schemaVersion: 4,
-          ...(interrupted || interruptedWork ? { interrupted: true as const } : {}),
           playbookId: session.playbookId,
           machine: machineSnapshot,
           roleResumeTokens: snapshotRoleResumeTokens(),
@@ -5915,7 +5912,6 @@ export function createXStatePlaybookRuntime<
       signal: AbortSignal,
       execute: () => Promise<PlaybookActorOutput>,
     ): Promise<PlaybookActorOutput> {
-      interruptedWork = false;
       const saved = acceptedStepResult;
       if (saved?.stateId === input.stateId && saved.result !== undefined) {
         acceptedStepResult = undefined;
@@ -7989,7 +7985,6 @@ export function createXStatePlaybookRuntime<
       const initTask = (async () => {
         session = boundSession;
         recoveryCheckpoint = boundSnapshot.recoveryCheckpoint;
-        interruptedWork = boundSnapshot.interrupted === true;
         syncDeferredReconciliationOverlay();
         refreshUnresolvedSemanticReconciliation(effectLedgerMirror);
         prepareReconstructedGovernedDelivery(
@@ -8224,6 +8219,7 @@ export function createXStatePlaybookRuntime<
       signal: AbortSignal,
       turnId: number,
       classificationLine?: string,
+      onAccepted?: () => void,
     ): Promise<'continued' | 'unresolved'> {
       if (repositoryCapability === undefined) {
         throw new Error(
@@ -8274,6 +8270,7 @@ export function createXStatePlaybookRuntime<
               effectBoundary.roleId, boundPlayerId,
             );
             continuationStarted = true;
+            onAccepted?.();
             actor!.send(event);
             // The host has durably started this boundary and the FSM has
             // moved: publish the buffered classification line and the
@@ -8685,7 +8682,6 @@ export function createXStatePlaybookRuntime<
             .filter((boundary) => runtimeBoundaryIsOwned(boundary) && boundary.sourceStateId === recoveryCheckpoint!.stateId).at(-1);
         const recovery = recoveryCheckpoint === undefined ||
           (pending === undefined && retry === undefined) ? undefined : {
-            ...(interruptedWork ? { explicitOnly: true as const } : {}),
             prompt: recoveryCheckpoint.prompt,
             ...(stoppedBoundary === undefined ? {} : { evidence: snapshotJsonValue({
               declaredResults: stoppedBoundary.sourceOutcomeSchema,
@@ -8972,6 +8968,7 @@ export function createXStatePlaybookRuntime<
                   run.outcome === 'failed' || run.outcome === 'aborted'
                     ? {
                         disposition: 'failed',
+                        run,
                         error:
                           ('error' in run ? run.error : undefined) ??
                           normalizeError(
@@ -9084,9 +9081,11 @@ export function createXStatePlaybookRuntime<
       async handleBossInput({
         text,
         signal,
+        onAccepted,
       }: {
         text: string;
         signal: AbortSignal;
+        onAccepted?: () => void;
       }): Promise<PlaybookRunResult> {
         if (!actor || !savedPorts) {
           throw new Error(
@@ -9231,6 +9230,7 @@ export function createXStatePlaybookRuntime<
                   signal,
                   turnId,
                   statusLine,
+                  onAccepted,
                 );
                 if (continuation === 'continued') {
                   if (controlPlaneError !== undefined) {
@@ -9282,7 +9282,7 @@ export function createXStatePlaybookRuntime<
                 suppressInspectionEmissions = false;
                 actor.start();
               }
-              interruptedWork = false;
+              onAccepted?.();
               actor.send(event);
               await waitForPlaybookQuiescence(actor, {
                 pendingCalls: nestedBridge,

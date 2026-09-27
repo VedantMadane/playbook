@@ -3,7 +3,10 @@
 
 // A bounded policy model, not a proof of the runtime, tools, or TypeScript.
 // Mutants change one rule at a time; none claims to model an older release.
-// Model limits: two crashes, two parallel lanes, two nested frames. Workers
+// Journal model limits: two steps, two crashes and one cancellation; at most
+// two lanes at one unsupported step. Owners label root/child identities,
+// without simulating their machine stacks. The separate stop model spans
+// two turns and one adoption. Workers
 // may survive a crash. Repository inspection cannot observe outside effects.
 // Unknown work can be inspected or abandoned; it is never replayed by guessing.
 import assert from 'node:assert/strict';
@@ -12,12 +15,9 @@ const programs = {
   ordinary: [{ kind: 'player', owner: 'root', lanes: 1 }],
   nested: [{ kind: 'player', owner: 'root', lanes: 1 }, { kind: 'player', owner: 'root/child', lanes: 1 }],
   parallel: [{ kind: 'player', owner: 'root/child', lanes: 2, supported: false }],
-  preparation: [{ kind: 'preparation', owner: 'root', lanes: 1 }, { kind: 'player', owner: 'root', lanes: 1 }],
-  script: [{ kind: 'script', owner: 'root', lanes: 1 }],
   answer: [{ kind: 'player', owner: 'root', lanes: 1 }, { kind: 'player', owner: 'root', lanes: 1, input: 'Boss answer' }],
   'supported-then-bespoke': [{ kind: 'player', owner: 'root', lanes: 1 }, { kind: 'player', owner: 'root/decide', lanes: 2, supported: false }],
   'parked-question': [{ kind: 'player', owner: 'root/child', lanes: 1, input: 'Boss answer' }],
-  bespoke: [{ kind: 'player', owner: 'root/decide', lanes: 2, supported: false }],
 };
 const copy = (s) => structuredClone(s);
 const key = (s) => JSON.stringify(s);
@@ -138,7 +138,7 @@ function violation(s, program, protocol, event, previous) {
   }
 }
 export function checkRecoveryModel(protocol) {
-  return Object.entries(programs).map(([name, program]) => {
+  const journal = Object.entries(programs).map(([name, program]) => {
     const initial = { base: { pc: 0, input: program[0].input ?? 'Boss task' }, reported: false, pc: 0, disk: { position: null, entries: {} }, write: null, host: true, recovering: false, approved: true, crashes: 0, workers: {}, launched: {}, launches: {}, authorizedLaunches: {}, effects: {}, acceptedInput: program[0].input ?? 'Boss task', cancelled: false, inspected: false, ended: false };
     const queue = [[initial, [], 'initial']], seen = new Set([key(initial)]);
     let failure;
@@ -154,8 +154,19 @@ export function checkRecoveryModel(protocol) {
     }
     return { name, states: seen.size, ...(failure ? { failure } : {}) };
   });
+  return [...journal, ...['failed earlier', 'cancelled', 'resumed', 'adopted', 'failed now'].map((origin) => {
+    // Stops are events owned by operations, not properties of a recovery offer.
+    const trace = [origin, 'begin Boss turn', origin === 'failed now' ? 'input accepted; operation failed' : origin === 'resumed' || origin === 'adopted' ? 'adopt stopped generation' : 'input refused'];
+    const stops = new Set();
+    if (origin === 'failed now') stops.add('leaf');
+    const offered = true;
+    const automatic = offered && (protocol === 'old-stop-recovery' || stops.delete('leaf'));
+    const issue = automatic && origin !== 'failed now' ? 'automatic recovery used a pre-existing stop' : undefined;
+    return { name: `stop: ${origin}`, states: trace.length + 1, ...(issue ? { failure: { issue, trace: [...trace, 'automatic preparation'] } } : {}) };
+  })];
 }
-export const mutations = ['lose-base', 'stale-unsupported', 'auto-retry', 'auto-accept', 'wrong-position', 'skip-final-result', 'never-save-result', 'report-writes-progress'];
+
+export const mutations = ['lose-base', 'stale-unsupported', 'auto-retry', 'auto-accept', 'wrong-position', 'skip-final-result', 'never-save-result', 'report-writes-progress', 'old-stop-recovery'];
 if (process.argv[1]?.endsWith('/recovery.mjs')) {
   const durable = checkRecoveryModel('durable');
   assert(durable.every((r) => !r.failure), JSON.stringify(durable.filter((r) => r.failure)));

@@ -13,7 +13,8 @@ import {
   createXStatePlaybookRuntime,
   emptyPlaybookEffectLedger,
 } from '../../../src/xstate-runtime.js';
-import { createSessionStore } from './session-store.js';
+import { runPlaybookCli } from './bin/playbook.js';
+import { createSessionStore, isUncertainTurnDiscardable } from './session-store.js';
 import { openSessionHost } from './session-host.js';
 import { executionConfigFromPlan } from './bin/run.js';
 import { loadLaunchPlan } from './bin/launch-config.js';
@@ -187,11 +188,13 @@ function entry(id: string, commit: boolean, child = false, counts = false) {
 it.each([
   'step',
   'adjudication',
+  'adjudication-discard',
   'restored',
   'adopted-assessment',
   'vanished',
   'counts',
   'auto-child',
+  'answer-failure',
   'start-prepares-question',
   'child-cancel',
   'child-later-cancel',
@@ -204,7 +207,7 @@ it.each([
     const git = (...args: string[]) =>
       execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
     let controller: Awaited<ReturnType<typeof openSessionHost>> | undefined;
-    let allow = false,
+    let allow = kind === 'answer-failure',
       failLeaf = true,
       judgeFailed = false,
       loseAcknowledgement = false;
@@ -215,10 +218,11 @@ it.each([
     const players: string[] = [];
     const closings: string[] = [];
     const questionChecks: string[] = [];
+    const preparations: string[] = [];
     let failedFinish = kind === 'auto-child';
     let leafCalls = 0;
     const records: any[] = [];
-    const committed = kind === 'adjudication' || kind === 'adopted-assessment';
+    const committed = ['adjudication', 'adjudication-discard', 'adopted-assessment'].includes(kind);
     class Adapter {
       readonly agent = 'claude-code';
       async *run(prompt: string) {
@@ -231,6 +235,7 @@ it.each([
         } else if (
           prompt.includes('You are Captain preparing an interrupted playbook')
         ) {
+          preparations.push(prompt);
           if (kind === 'start-prepares-question') allow = true;
           if (allow) await rm(join(dir, 'stray'), { force: true });
           result = JSON.stringify({
@@ -255,7 +260,7 @@ it.each([
           closings.push(prompt);
           result = 'Work has stopped at the next step.';
         } else if (prompt.includes('This is hidden control work.')) {
-          if (['auto-child', 'child-later-cancel', 'child-only-counts', 'start-prepares-question'].includes(kind) && prompt.includes('needsBossReply') && (leafCalls === 1 || kind === 'child-only-counts')) result = JSON.stringify({ guard: 'needsBossReply' });
+          if (['answer-failure', 'auto-child', 'child-later-cancel', 'child-only-counts', 'start-prepares-question'].includes(kind) && prompt.includes('needsBossReply') && (leafCalls === 1 || kind === 'child-only-counts')) result = JSON.stringify({ guard: 'needsBossReply' });
           if (committed && !judgeFailed) {
             judgeFailed = true;
             throw new Error('assessment network interruption');
@@ -277,15 +282,16 @@ it.each([
               failedFinish = true;
               throw new Error('parent needs recovery');
             }
-          } else if (['auto-child', 'child-later-cancel', 'child-only-counts', 'start-prepares-question'].includes(kind)) {
+          } else if (['answer-failure', 'auto-child', 'child-later-cancel', 'child-only-counts', 'start-prepares-question'].includes(kind)) {
             leafCalls++;
+            if (kind === 'answer-failure' && leafCalls === 2) throw new Error('answer accepted, then failed');
             if (kind === 'child-later-cancel' && leafCalls === 2) { controller!.host.abortActiveTurn('cancel later child turn'); throw new Error('cancel later child'); }
           } else if (kind === 'child-cancel' && !interrupted) {
             interrupted = true;
             controller!.host.abortActiveTurn('cancel active child');
             throw new Error('child cancelled');
           } else if (failLeaf) throw new Error('downstream interruption');
-          result = ['auto-child', 'child-later-cancel', 'child-only-counts', 'start-prepares-question'].includes(kind) && (leafCalls === 1 || kind === 'child-only-counts') ? QUESTION : 'Work complete.';
+          result = ['answer-failure', 'auto-child', 'child-later-cancel', 'child-only-counts', 'start-prepares-question'].includes(kind) && (leafCalls === 1 || kind === 'child-only-counts') ? QUESTION : 'Work complete.';
         }
         yield createEvent(
           'done',
@@ -316,7 +322,7 @@ it.each([
       git('add', 'config.yaml', '.gitignore');
       git('commit', '-qm', 'config');
       const flow = entry('flow', committed, true, ['counts', 'auto-child', 'child-only-counts'].includes(kind)),
-        leaf = ['auto-child', 'child-later-cancel', 'child-only-counts', 'start-prepares-question'].includes(kind) ? { ...questionRegistry, id: 'leaf', command: 'leaf', summaryPolicy: { stateCountLabels: { consult: 'child step' }, copyPasteGuardNames: [], savedCountsLine: () => 'Leaf saved counts' } } : entry('leaf', false);
+        leaf = ['answer-failure', 'auto-child', 'child-later-cancel', 'child-only-counts', 'start-prepares-question'].includes(kind) ? { ...questionRegistry, id: 'leaf', command: 'leaf', summaryPolicy: { stateCountLabels: { consult: 'child step' }, copyPasteGuardNames: [], savedCountsLine: () => 'Leaf saved counts' } } : entry('leaf', false);
       const loadModule = async (id: string) => ({
         default: id.endsWith('leaf')
           ? leaf
@@ -423,6 +429,7 @@ it.each([
                 )
               ) {
                 loseAcknowledgement = false;
+                if (kind === 'adjudication-discard') crash = true;
                 throw new Error('assessment saved but acknowledgement lost');
               }
               return mirror;
@@ -440,6 +447,17 @@ it.each([
         expect(questionChecks[0]).toContain('Later Boss input (context only): []');
         expect(closings.at(-1)).toContain('Delivered the existing task instruction');
         expect(closings.at(-1)).not.toContain('Delivered the saved instruction');
+        return;
+      }
+      if (kind === 'answer-failure') {
+        expect(first.snapshot.frames.at(-1).runtime.state.stateId).toBe('awaitBossReply');
+        expect(preparations).toHaveLength(0);
+        allow = false;
+        const next = await controller.handleBossTurn('Answer child');
+        expect(preparations).toHaveLength(1);
+        const facts = JSON.stringify(next.snapshot.journal.filter((e: any) => e.kind === 'outcome' && e.turnId === next.snapshot.sequences.turn));
+        expect(facts).toContain('Delivered the Boss text');
+        expect(facts).not.toContain('did not accept');
         return;
       }
       if (kind === 'auto-child') {
@@ -474,6 +492,24 @@ it.each([
         return;
       }
 
+      if (kind === 'adjudication-discard') {
+        loseAcknowledgement = true;
+        await expect(controller.submitRuntimeAction('retry:adjudication')).rejects.toThrow();
+        const uncertain = await controller.read();
+        expect(uncertain.state).toBe('uncertain');
+        expect(uncertain.uncertain.progress.steps).toEqual([]);
+        expect(isUncertainTurnDiscardable(uncertain)).toBe(false);
+        await expect(controller.lease.discard({ attemptId: uncertain.uncertain.attemptId })).rejects.toThrow(/cannot be discarded/);
+        const sessionId = controller.sessionId;
+        await controller.dispose(); controller = undefined;
+        await expect(openSessionHost({ ...options, mode: 'resume', sessionId })).rejects.toThrow('select Retry to restore and report');
+        let stderr = '';
+        const cli = await runPlaybookCli({ argv: ['run', '--session', sessionId, 'continue'], cwd: dir, userConfigPath: configPath, sessionStore: wrappedStore, loadModule, adapterImports: { claude: async () => Adapter }, probeAdapterSdk: async () => true, env: { ANTHROPIC_API_KEY: 'fixture' }, stderr: { write: (text: string) => { stderr += text; } }, stdout: { write() {} } });
+        expect(cli.code, stderr).toBe(1);
+        expect(stderr).toContain('--retry-uncertain');
+        expect(stderr).not.toContain('--discard-uncertain');
+        return;
+      }
       if (kind === 'adopted-assessment') {
         await controller.handleBossTurn('Stop flow');
         const adopted = await controller.handleBossTurn('Resume flow');

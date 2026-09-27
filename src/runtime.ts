@@ -782,8 +782,6 @@ export interface PlaybookRuntimeSnapshot {
   };
   /** Interrupted invocation, captured before its external call (DR-066). */
   recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
-  /** Restored work requires an explicit choice before continuation. */
-  interrupted?: true;
   suspendedCall?: PlaybookSuspendedCall;
 }
 
@@ -799,7 +797,7 @@ export interface PlaybookRecoveryCheckpoint {
 
 export interface PlaybookStepRecord {
   readonly id: string;
-  readonly kind: 'player' | 'captain' | 'script' | 'preparation' | 'completion' | 'answer';
+  readonly kind: 'player' | 'captain' | 'script';
   readonly stateId: string;
   readonly result?: JsonValue;
 }
@@ -833,8 +831,6 @@ export interface PlaybookControlAction {
 // internal and is absent from it whenever the runtime's source declares
 // no description for the state it is in.
 export interface PlaybookRecoveryOffer {
-  /** This offer must not be selected by automatic recovery. */
-  explicitOnly?: true;
   prompt: string;
   description?: string;
   /** Runtime-owned conditions to satisfy; these never authorize task completion. */
@@ -861,7 +857,7 @@ export interface PlaybookControlView {
 export type PlaybookControlReceipt =
   | { disposition: 'rejected'; reason: string }
   | { disposition: 'executed'; run: PlaybookRunResult }
-  | { disposition: 'failed'; error: NormalizedError };
+  | { disposition: 'failed'; error: NormalizedError; run?: PlaybookRunResult };
 
 // DR-038 §2: link-authored metadata the Captain uses to decide whether a
 // quiescent generation is eligible for retention and whether a root terminal
@@ -920,6 +916,8 @@ export interface PlaybookRuntime {
   handleBossInput(turn: {
     text: string;
     signal: AbortSignal;
+    /** Called synchronously just before accepting the event, at most once. */
+    onAccepted?: () => void;
   }): Promise<PlaybookRunResult>;
   resumePlaybookCall(input: {
     callId: string;

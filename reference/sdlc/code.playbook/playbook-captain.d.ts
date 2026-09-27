@@ -36,16 +36,15 @@ type SnapshotAgentEnvelope = DeepReadonly<Omit<SessionAgent, 'model' | 'effort' 
 type PlayerLedgerSnapshotEntry = DeepReadonly<PlayerLedgerEntry>;
 export interface ProgressChange {
     snapshot?: PlaybookCaptainShellSnapshot | null;
-    step?: PlaybookStepRecord & {
+    step?: Omit<PlaybookStepRecord, 'kind'> & {
+        kind: PlaybookStepRecord['kind'] | 'preparation' | 'completion' | 'answer';
         runtimeSessionId: string;
         playbookId: string;
     };
-    retentionUpdates?: readonly PlaybookCaptainRetentionUpdate[];
 }
 export interface InterruptedReport {
     text: string;
     effects: readonly PlaybookCaptainUnresolvedEffect[];
-    boundaryPrefix: number;
     retentionUpdates?: readonly PlaybookCaptainRetentionUpdate[];
     unresolvedEffects?: readonly PlaybookCaptainUnresolvedEffect[];
 }
@@ -164,6 +163,7 @@ export interface PlaybookCaptainFrameSnapshot {
 interface PlaybookCaptainShellSnapshotFields {
     readonly schemaVersion: 4;
     readonly effectLedger: DeepReadonly<PlaybookEffectLedger>;
+    readonly presentedEffectPrefix?: number;
     readonly captain: {
         readonly sessionId: string;
         readonly runtime: DeepReadonly<PlaybookRuntimeSnapshot>;
@@ -268,13 +268,13 @@ export interface PlaybookCaptainShell extends Captain {
 export declare function assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[];
 /** Validate, detach, and freeze one untrusted shell snapshot. */
 export declare function assertPlaybookCaptainShellSnapshot(value: unknown): PlaybookCaptainShellSnapshot;
-type UnresolvedEnvelopeReference = {
+export type PlaybookCaptainUnresolvedEffectReference = {
     readonly kind: 'boundary';
     readonly boundaryId: string;
 } | {
     readonly kind: 'logical-operation';
     readonly operationId: string;
 };
-export declare const projectUnresolvedEffects: (ledger: PlaybookEffectLedger, references: readonly UnresolvedEnvelopeReference[]) => readonly PlaybookCaptainUnresolvedEffect[];
+export declare const projectUnresolvedEffects: (ledger: PlaybookEffectLedger, references: readonly PlaybookCaptainUnresolvedEffectReference[]) => readonly PlaybookCaptainUnresolvedEffect[];
 export declare function createPlaybookCaptainShell(options: unknown, deps?: PlaybookCaptainDeps): PlaybookCaptainShell;
 export default createPlaybookCaptainShell;

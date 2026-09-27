@@ -69,7 +69,6 @@ it.each(['result', 'unacknowledged-result', 'refused-start', 'authored-failure']
     expect(await readFile(join(dir, 'calls'), 'utf8')).toBe('work\n');
     const action = second.describe!().actions.find((item) => item.id.startsWith('retry:'))!;
     expect(action.label).toContain('saved result');
-    if (failure === 'result') expect(second.describe!().recovery?.explicitOnly).toBe(true);
     expect((second.exportSnapshot as any)({ interrupted: true })).toBeDefined();
     const outcome = await second.apply!({ actionId: action.id, key: 'Boss accepts', signal: new AbortController().signal });
     expect(outcome.disposition).toBe(failure === 'authored-failure' ? 'failed' : 'executed');

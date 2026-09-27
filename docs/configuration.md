@@ -274,8 +274,7 @@ compatible ordinary reopen. A selected session keeps its stored catalog,
 player roster, role bindings, adapter, instruction, permissions, and working
 directory; only model, effort, and fast mode may change. The next call reapplies
 both complete model and effort selections and the optional effective fast-mode
-boolean. An uncertain retry accepts no tuning overlay and uses the exact
-attempted settings already stored with that turn.
+boolean. An uncertain retry accepts no tuning overlay and only restores and reports the recorded attempt. Later turns use the current compatible settings.
 
 ## Session storage
 
