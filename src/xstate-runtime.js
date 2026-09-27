@@ -1895,7 +1895,7 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         if ((state.stateId !== 'failed' && pendingBossQuestions.length === 0) || !isRecord(checkpoint)) {
             throw new TypeError('runtime recoveryCheckpoint requires an interrupted state and an object');
         }
-        rejectUnknownKeys(checkpoint, ['stateId', 'prompt', 'machine', 'boundaryPrefix', 'result', 'id'], 'runtime recoveryCheckpoint');
+        rejectUnknownKeys(checkpoint, ['stateId', 'prompt', 'machine', 'boundaryPrefix', 'result', 'id', 'delivered'], 'runtime recoveryCheckpoint');
         const stateId = requireNonEmptyString(checkpoint.stateId, 'recoveryCheckpoint.stateId');
         const prompt = requireNonEmptyString(checkpoint.prompt, 'recoveryCheckpoint.prompt');
         const boundaryPrefix = checkpoint.boundaryPrefix;
@@ -1905,7 +1905,10 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
             checkpoint.machine.value !== stateId) {
             throw new TypeError('runtime recoveryCheckpoint has an invalid machine or boundary prefix');
         }
-        recoveryCheckpoint = Object.freeze({ stateId, prompt, boundaryPrefix, machine: snapshotJsonValue(checkpoint.machine), ...(own(checkpoint, 'id') ? { id: effectUuid(checkpoint.id, 'recoveryCheckpoint.id') } : {}), ...(own(checkpoint, 'result') ? { result: snapshotJsonValue(checkpoint.result) } : {}) });
+        if (own(checkpoint, 'delivered') && checkpoint.delivered !== true) {
+            throw new TypeError('recoveryCheckpoint.delivered must be true');
+        }
+        recoveryCheckpoint = Object.freeze({ stateId, prompt, boundaryPrefix, machine: snapshotJsonValue(checkpoint.machine), ...(own(checkpoint, 'id') ? { id: effectUuid(checkpoint.id, 'recoveryCheckpoint.id') } : {}), ...(own(checkpoint, 'result') ? { result: snapshotJsonValue(checkpoint.result) } : {}), ...(checkpoint.delivered === true ? { delivered: true } : {}) });
     }
     const fields = {
         playbookId,

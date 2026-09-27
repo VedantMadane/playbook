@@ -1174,7 +1174,7 @@ export async function createCaptainSessionHost({
     }
     if (
       sourceSnapshot !== undefined &&
-      !isDeepStrictEqual(snapshot, sourceSnapshot)
+      !isDeepStrictEqual(snapshot, assertPlaybookCaptainShellSnapshot(sourceSnapshot))
     ) {
       throw new Error("restored Captain snapshot changed before the Boss turn");
     }
@@ -1252,7 +1252,9 @@ function captainHostBoundary(shell, restoreSnapshot, sessionLease, onInterrupted
     async handleBossTurn(turn, context) {
       onInterrupted(undefined);
       try {
-        return await shell.handleBossTurn(turn, context);
+        const result = await shell.handleBossTurn(turn, context);
+        context.signal.throwIfAborted();
+        return result;
       } catch (error) {
         try { onInterrupted(await settleInterruptedRecovery(shell, sessionLease)); }
         catch (settlementError) {

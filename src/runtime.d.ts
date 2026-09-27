@@ -405,6 +405,7 @@ export interface PlaybookRecoveryCheckpoint {
     readonly boundaryPrefix: number;
     /** Completed actor output supplied by the execution journal on restore. */
     readonly result?: JsonValue;
+    readonly delivered?: true;
 }
 export interface PlaybookStepRecord {
     readonly id: string;

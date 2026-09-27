@@ -7,7 +7,7 @@
 
 Accepted after bounded model exploration, real process-loss tests and a smaller production implementation.
 Replaces the saved-continuation mechanism of [DR-068](068-interrupted-continuation-settlement.md) and narrows [DR-069](069-host-owned-interrupted-work-settlement.md) to unsupported positions.
-Amends [DR-066](066-captain-prepares-step-recovery.md), [DR-029](029-session-scoped-conversational-captain.md), [DR-031](031-shared-captain-session-front-ends.md), [DR-040](040-outcome-authority-effect-reconciliation.md), [DR-049](049-portable-session-contract.md), and [DR-051](051-host-selected-runtime-recovery.md).
+Amends [DR-066](066-captain-prepares-step-recovery.md), [DR-029](029-session-scoped-conversational-captain.md), [DR-031](031-shared-captain-session-front-ends.md), [DR-040](040-outcome-authority-effect-reconciliation.md), [DR-049](049-portable-session-contract.md), [DR-051](051-host-selected-runtime-recovery.md), and [DR-062](062-pre-existing-changes-are-context.md) §5.
 Supersedes the whole-playbook retry fallback of [DR-034](034-durable-failure-retry-continuity.md).
 
 ## Context
@@ -30,6 +30,8 @@ Scripts and preparation also need start and result records.
 - Automatic recovery consumes only a failed or quiescent outcome produced by an operation in this turn; resuming or adopting stopped work does not authorize preparation.
   Refused input leaves old stops unchanged; an accepted action retains its known run result even in a failed receipt, while a thrown operation without a settled result authorizes no automatic work.
 - The runtime reports acceptance immediately before sending the event; the shell uses that callback for delivery facts and child cancellation ownership.
+- An invocation whose output was delivered to the machine records that fact on its checkpoint and is not offered for assessment again.
+- Every recovery fact has one owner; a derived copy — the in-memory resume catalog, the presented-changes prefix, a stored snapshot under comparison — changes only through the owner's update path or is recomputed from it, never by a second writer.
 - The store records which unfinished step owns the saved position; only that checkpoint receives its saved result and reconstructed attempt evidence on restore.
 - Whole-playbook retry is deliberately removed: an absent invocation checkpoint, including an old failed snapshot or a failed nested call, cannot justify repeating earlier work.
 - The journal also records completed root outcomes and answers selected from the existing task; reports read these facts and preparation results without copying presentation text.
@@ -37,11 +39,12 @@ Scripts and preparation also need start and result records.
 - Progress stores facts and positions only; retained generations and unresolved effects change at settlement.
   Root completion records the runtime's existing keep-or-clear decision, preserving saved work for authored unfinished final states.
   One shared discard predicate requires no abandonment, no steps and unchanged repository evidence.
-- Save the prefix of repository changes already presented to Boss only at a non-aborted reply settlement.
-  Cancellation and crashes leave it unchanged so the next reply repeats any mandatory carried-changes report.
+- Advance the prefix of repository changes already presented to Boss only when the presented reply carried the report and was emitted without cancellation.
+  Cancellation, crashes and progress writes leave it unchanged, so the next reply that is shown carries the mandatory carried-changes report.
 - Remove saved `reply`, `runtime` and `settle` selections and their copied report format; keep checkpoint-based runtime recovery offers, bounded live preparation and explicit unsupported-position exit.
-- Check a bounded recovery-policy model and require deliberate rule violations to fail; map each checked rule to executable evidence in [[recovery-28](../packages/recovery.md#recovery-28)].
-  The model covers saved positions, results and Boss choices, not the full machines, tools or implementation; its mutants do not claim to reproduce an entire historical protocol.
+- Check a bounded recovery-policy model and require deliberate rule violations to fail; map each checked rule to executable evidence in [[recovery-30](../packages/recovery.md#recovery-30)].
+  The model explores durable starts and results, progress after completed work, reporting without progress writes or execution, restoration to the saved position or a safe exit, and Boss choice before accepting a saved result or repeating unfinished work.
+  Same-turn stops, input acceptance, consumed results, full machines and tools remain outside the model; its mutants do not claim to reproduce an entire historical protocol.
 
 ## Consequences
 

@@ -95,7 +95,7 @@ accept a `PlaybookSession` whose optional `roleBindings` maps each local role to
 the members `callPlayer`,
 `callCaptain`, `callJudge`, `callPlaybook`, `emitStatus`, and
 `emitTelemetry`, and optional `recordStep(step: PlaybookStepRecord, position?: PlaybookRuntimeSnapshot): Promise<void>` for durable invocation progress [[recovery-1](recovery.md#recovery-1)].
-`PlaybookRuntime.handleBossInput` shall accept exactly `{ text, signal }`:
+`PlaybookRuntime.handleBossInput` shall accept exactly `{ text, signal, onAccepted? }`, calling the optional `onAccepted` synchronously immediately before sending the accepted event, at most once and never on refused input:
 no FSM event, parsed decision, or other host-decided input shall enter a
 runtime through it, so a host's per-turn resolution of a Boss turn reaches a
 compiled runtime only as a linker-exposed option member whose type the
@@ -125,7 +125,7 @@ runtime-published `stateDescription` naming what that state means
 [[playbook-runtime-97](#playbook-runtime-97)]), and `PlaybookControlReceipt`
 shall discriminate exactly `rejected` (with `reason`, before any
 effect), `executed` (with the `run` result), and `failed` (with the
-normalized `error`, after effects may exist).
+normalized `error` and, when the action produced a settled run result, that `run`, after effects may exist).
 `PlaybookTraceType` shall include the paired `apply.started` and
 `apply.finished` members alongside the existing boundary pairs.
 The module shall import no CODE or FSM types, directly or
@@ -535,7 +535,7 @@ Each registry shall publish only the summary labels and handoff guards its curre
 #### playbook-runtime-16
 
 Where CODE, REVIEW, or DECIDE runs through composed config, the host Captain module shall be `@sublang/playbook/playbook-captain` and the enabled entry shall use the matching public `@sublang/playbook/<id>/registry` module per [[playbook-captain-16](playbook-captain.md#playbook-captain-16)] and [[playbook-captain-17](playbook-captain.md#playbook-captain-17)].
-Each registry shall map a dispatched Boss turn to `runtime.handleBossInput({ text, signal })` and shall expose no direct tmux-play adapter.
+Each registry shall map a dispatched Boss turn to `runtime.handleBossInput` with the input of [[playbook-runtime-34](#playbook-runtime-34)] and shall expose no direct tmux-play adapter.
 
 #### playbook-runtime-30
 
@@ -763,7 +763,7 @@ state descriptor, the governed failure-attempt member of [[playbook-runtime-71](
 A question shall count as pending only while the machine awaits its reply in an authored reply-wait state, under one pendingness shared with the state telemetry a host ledger mirrors, so the ledger and this snapshot cannot disagree about the same fact: for a runtime the shared factory constructs that wait is the singular canonical `awaitBossReply` state, and a context question a later state retains — the recoverable failure a resumed player reached included — shall export as no pending question, while a bespoke runtime counts the questions awaiting replies in its own authored wait states, DECIDE's parallel branch waits included.
 Where exactly one nested playbook call is suspended, that snapshot shall also carry its bridge-owned `callId`, `stateId`, `playbookId`, exact `text`, and `childSessionId`, enriched with the matching call-to-turn owner when present and the governed replay prefix of [[playbook-runtime-71](#playbook-runtime-71)] when applicable; export shall return `undefined` if the pending bridge identity, complete descriptor, or recorded call-to-turn ownership is absent or inconsistent.
 Where no nested playbook call is suspended, the schema-version-4 snapshot shall omit `suspendedCall`; at any other unsafe capture point `exportSnapshot` shall return `undefined`.
-Only the internal step-start capture shall synthesize a failed invocation position [[recovery-1](recovery.md#recovery-1)]; public `exportSnapshot({child})` shall capture an exact bridge-owned child call during startup as well as suspension, without running the actor.
+Public `exportSnapshot({child})` shall capture an exact bridge-owned child call during startup as well as suspension, without running the actor.
 A direct-Captain-capable runtime shall persist the `captainCall` member of `sequences` in every exported schema-version-4 snapshot.
 The public `PlaybookRuntimeSnapshot` contract shall admit only schema version `4`, shall require `effectLedger`, shall name its token member `roleResumeTokens`, shall permit `failedEffectAttempt` only on the failed state as an exact `{ boundaryPrefix, attemptId }` object whose nonnegative prefix does not exceed the ledger and whose suffix is either nonempty and wholly owned by its canonical UUID attempt id or empty for an explicit `null`, shall permit `retainedEffectSourceSessionId` only as the canonical UUID of the original adopted source runtime, shall permit `retainedEffectReconciliation` only as an exact `{ sourceSessionId, checkpoint }` object whose source identity equals that separately retained lineage and whose valid checkpoint is a monotonic baseline of `effectLedger`, shall permit the optional invocation checkpoint [[recovery-1](recovery.md#recovery-1)] validated before restoration [[recovery-2](recovery.md#recovery-2)], and shall permit an optional `suspendedCall` descriptor carrying `callId`, `stateId`, `playbookId`, exact `text`, `childSessionId`, optional positive `turnId`, and optional nonnegative-or-null `effectBoundaryPrefixSequence` that does not exceed the ledger; schemas `1` and `2` shall reject before binding because their token and pending-question identities are ambiguous under [DR-032](../decisions/032-explicit-roles-session-players.md), while schema `3` shall reject because it cannot prove effect-ledger authority.
 The shared snapshot validator shall capture the complete supplied value once as detached frozen JSON and reject accessors and undeclared snapshot, sequence, pending-question, asker, or suspended-call fields.
@@ -786,9 +786,6 @@ whose restored actor is not `active`, a persisted/actual state mismatch, an uncl
 disposing, or disposed runtime, following the same failed-start cleanup
 as `init` so provisional nested ownership rolls back without a duplicate start or finish and `dispose` remains callable.
 The compiled default Captain runtime shall expose the shared factory's snapshot methods, while the Playbook Captain shell shall embed and restore that runtime snapshot only as part of its complete logical-session snapshot ([[playbook-captain-41](playbook-captain.md#playbook-captain-41)], [[playbook-captain-42](playbook-captain.md#playbook-captain-42)], [DR-031](../decisions/031-shared-captain-session-front-ends.md)).
-
-The runtime shall accept optional `handleBossInput({text,signal,onAccepted})`, calling `onAccepted` synchronously immediately before sending the accepted event, at most once and never on refused input.
-The optional `recordStep(step,position?)` port shall receive runtime records of kind `player|captain|script`; preparation, completion and answer belong only to the host's session journal [[recovery-18](recovery.md#recovery-18)].
 
 ### Retained-snapshot adoption
 
@@ -929,7 +926,6 @@ through the same actor drive, boundaries, and emissions as a Boss turn,
 and settle `executed` with the projected run result or `failed` with
 the normalized error when the run parks in the failure state, aborts,
 or a post-acceptance control-plane error lands (effects may exist).
-A failed receipt shall include optional `run` when the action produced a settled run result; a control-plane exception with no settled result shall carry no invented result.
 The receipt shall be recorded under its key at acceptance, before the
 settlement emissions, and a repeated key shall return the recorded
 receipt verbatim with no revalidation, no execution, and no new trace

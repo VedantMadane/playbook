@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
 const exec = promisify(execFile);
 const fixture = fileURLToPath(new URL('./fixtures/durable-progress-loss.mjs', import.meta.url));
-it.each(['completed-unfinished', 'validation-matrix', 'consumed-result', 'completed-exact', 'player-before-change', 'exact-answer', 'command-override', 'give-up', 'later-step', 'player-result', 'player-before-receipt', 'script-result', 'script-before-result', 'nested-player', 'nested-script', 'preparation', 'completed', 'completed-terminal-only', 'automatic-answer', 'script-before-rename', 'script-after-rename', 'carried', 'accepted-answer', 'waiting-question', 'reserved-question', 'before-first-step', 'retention-switch', 'retention-lost-switch', 'retention-lost-same-root'])(
+it.each(['completed-clear', 'completed-unfinished', 'validation-matrix', 'consumed-result', 'completed-exact', 'player-before-change', 'exact-answer', 'command-override', 'give-up', 'later-step', 'player-result', 'player-before-receipt', 'script-result', 'script-before-result', 'nested-player', 'nested-script', 'preparation', 'completed', 'completed-terminal-only', 'automatic-answer', 'script-before-rename', 'script-after-rename', 'carried', 'accepted-answer', 'waiting-question', 'reserved-question', 'before-first-step', 'retention-switch', 'retention-lost-switch', 'retention-lost-same-root'])(
   'restores %s after SIGKILL without repeating work', async (scenario) => {
     const dir = await mkdtemp(join(tmpdir(), 'durable-progress-'));
     try {
@@ -32,7 +32,7 @@ it.each(['second-crash', 'player-second-crash', 'lost-position-second-crash', 'c
   } finally { await rm(dir, { recursive: true, force: true }); }
 }, 30_000);
 
-it.each(['parent-accepted-child-failed', 'carried-cancel', 'carried-cancel-cli', 'cancelled-stop', 'old-stop', 'resume-stop', 'no-work-discard'])('settles %s without losing work', async (scenario) => {
+it.each(['live-retain-none', 'live-retain-earlier', 'carried-cancel-command', 'carried-cancel-decision-error', 'carried-cancel-malformed', 'carried-cancel-cli-command', 'carried-cancel-cli-decision-error', 'carried-cancel-cli-malformed', 'carried-after-reply', 'parent-accepted-child-failed', 'carried-cancel', 'carried-cancel-cli', 'cancelled-stop', 'old-stop', 'resume-stop', 'no-work-discard'])('settles %s without losing work', async (scenario) => {
   const dir = await mkdtemp(join(tmpdir(), 'durable-settle-'));
   try {
     if (scenario === 'no-work-discard') {

@@ -117,8 +117,7 @@ six members, the port arriving as a linker-exposed option member
 That same port shall carry the turn's inbound direction: the shell's
 deterministic parse resolution ([[playbook-captain-7](playbook-captain.md#playbook-captain-7)])
 shall reach the runtime only as the port's resolution member, which the
-runtime shall consult during `handleBossInput` — whose `{ text, signal }`
-shape is unchanged ([[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)]) — and map to the
+runtime shall consult during `handleBossInput` — whose input [[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)] defines — and map to the
 machine's hub entry: an unresolved turn, a parse-resolved `respond`, a
 parse-resolved acting decision carrying the injected decision object, or the
 shell's teardown, each carrying the exact Boss text on the runtime-owned

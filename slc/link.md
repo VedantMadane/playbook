@@ -465,6 +465,7 @@ interface PlaybookRecoveryCheckpoint {
   readonly machine: JsonValue;
   readonly boundaryPrefix: number;
   readonly result?: JsonValue;
+  readonly delivered?: true;
 }
 
 interface PlaybookStepRecord {
@@ -2210,7 +2211,7 @@ nested call); anywhere else `actions` is empty while the rest of the view
 still describes the state.
 While effect-possible outcome evidence remains unresolved, the view shall omit its pending Boss questions and state description and shall replace every ordinary action with exactly `reconcile:unresolved-effect` labeled `Retry unresolved effect reconciliation` and `abandon:unresolved-effect` labeled `Abandon unresolved workflow attempt`.
 A valid invocation checkpoint is the only source of a retry: it retries only the stopped invocation after its effect checks, using `retry:<EVENT_TYPE>` for the same entry target or `retry:step` otherwise.
-Saved-result assessment (`retry:adjudication`) never repeats the player, and verified read-only restoration (`retry:restored-step`) records an exact baseline check before replay.
+Saved-result assessment (`retry:adjudication`) never repeats the player and is not offered for an output the machine has already received (checkpoint `delivered: true`), and verified read-only restoration (`retry:restored-step`) records an exact baseline check before replay.
 These retries have standing `ready`; an unsafe checkpoint grants no replay. Saved-result assessment withholds ordinary state jumps. Reconciliation and abandonment remain available whenever effects are unresolved, even alongside an eligible assessment or restoration.
 Ordinary retry and jump actions use source state descriptions and require assessment and unresolved-effect fences to be absent:
 

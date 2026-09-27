@@ -3,10 +3,10 @@
 
 // A bounded policy model, not a proof of the runtime, tools, or TypeScript.
 // Mutants change one rule at a time; none claims to model an older release.
-// Journal model limits: two steps, two crashes and one cancellation; at most
-// two lanes at one unsupported step. Owners label root/child identities,
-// without simulating their machine stacks. The separate stop model spans
-// two turns and one adoption. Workers
+// Model limits: two steps, two crashes and one cancellation; at most two lanes
+// at one unsupported step. Owners label root/child identities, without
+// simulating their machine stacks. Same-turn stops, input acceptance and
+// consumed results are checked by integration tests, not this model. Workers
 // may survive a crash. Repository inspection cannot observe outside effects.
 // Unknown work can be inspected or abandoned; it is never replayed by guessing.
 import assert from 'node:assert/strict';
@@ -154,19 +154,10 @@ export function checkRecoveryModel(protocol) {
     }
     return { name, states: seen.size, ...(failure ? { failure } : {}) };
   });
-  return [...journal, ...['failed earlier', 'cancelled', 'resumed', 'adopted', 'failed now'].map((origin) => {
-    // Stops are events owned by operations, not properties of a recovery offer.
-    const trace = [origin, 'begin Boss turn', origin === 'failed now' ? 'input accepted; operation failed' : origin === 'resumed' || origin === 'adopted' ? 'adopt stopped generation' : 'input refused'];
-    const stops = new Set();
-    if (origin === 'failed now') stops.add('leaf');
-    const offered = true;
-    const automatic = offered && (protocol === 'old-stop-recovery' || stops.delete('leaf'));
-    const issue = automatic && origin !== 'failed now' ? 'automatic recovery used a pre-existing stop' : undefined;
-    return { name: `stop: ${origin}`, states: trace.length + 1, ...(issue ? { failure: { issue, trace: [...trace, 'automatic preparation'] } } : {}) };
-  })];
+  return journal;
 }
 
-export const mutations = ['lose-base', 'stale-unsupported', 'auto-retry', 'auto-accept', 'wrong-position', 'skip-final-result', 'never-save-result', 'report-writes-progress', 'old-stop-recovery'];
+export const mutations = ['lose-base', 'stale-unsupported', 'auto-retry', 'auto-accept', 'wrong-position', 'skip-final-result', 'never-save-result', 'report-writes-progress'];
 if (process.argv[1]?.endsWith('/recovery.mjs')) {
   const durable = checkRecoveryModel('durable');
   assert(durable.every((r) => !r.failure), JSON.stringify(durable.filter((r) => r.failure)));

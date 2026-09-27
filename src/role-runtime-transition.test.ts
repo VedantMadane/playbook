@@ -1540,6 +1540,73 @@ const bossTurn = (text: string) => ({
 });
 
 describe('DR-032 shared role runtime transition', () => {
+  it.each(['journalled', 'without recordStep', 'saved result'] as const)(
+    'never reassesses delivered output on the %s path',
+    async (path) => {
+      const machine = createMachine({
+        context: { task: '' }, initial: 'ready', states: {
+          ready: {
+            meta: stateMeta('ready', 'Waiting for a task.'), tags: ['playbook.parked'],
+            on: { START: { target: 'work', actions: assign({ task: ({ event }) => (event as { task: string }).task }) } },
+          },
+          work: {
+            meta: roleMeta('work', 'coder', 'Implement the task.'), tags: ['playbook.busy'],
+            invoke: {
+              src: 'player',
+              input: ({ context }) => ({ stateId: 'work', role: 'coder', sourceItem: 'ROLE-1', prompt: `Implement ${context.task}.`, result: { complete: 'The task is complete.' } }),
+              // An authored failure after a valid committing output must not
+              // offer that same output for assessment again.
+              onDone: 'failed', onError: 'failed',
+            },
+          },
+          failed: { meta: stateMeta('failed', 'The task failed.'), tags: ['playbook.parked'], on: { START: 'work' } },
+        },
+      });
+      const hostCapabilities = emptyLedgerHostCapabilities({ classifications: ['one-descendant-commit'] });
+      const callPlayer = vi.fn<PlaybookPorts['callPlayer']>(async () => ({ status: 'ok', finalText: 'Implemented and committed.' }));
+      const recordStep = vi.fn<NonNullable<PlaybookPorts['recordStep']>>(async (step) => {
+        if (path === 'saved result' && step.result !== undefined) throw new Error('Lost result acknowledgement');
+      });
+      const boundSession = session({ ...recordingPorts(callPlayer), ...(path === 'without recordStep' ? {} : { recordStep }) });
+      const createRuntime = () => createXStatePlaybookRuntime<EmptyOptions, object>(machine, retrySchema3Spec({ outcomeAuthority: effectAuthorizedRepeatOutcomeAuthority }))({ configuredOptions: {}, hostCapabilities });
+      let runtime = createRuntime();
+      try {
+        await runtime.init(boundSession);
+        expect(await runtime.handleBossInput(bossTurn('the task'))).toMatchObject({ outcome: 'failed', state: { stateId: 'failed' } });
+        if (path === 'saved result') {
+          const saved = runtime.exportSnapshot!()!;
+          expect(saved.recoveryCheckpoint).toHaveProperty('result');
+          expect(saved.recoveryCheckpoint).not.toHaveProperty('delivered');
+          await runtime.dispose();
+          runtime = createRuntime();
+          await runtime.restore!(boundSession, saved);
+          const retry = runtime.describe!().actions.find(({ label }) => label.includes('saved result'))!;
+          expect(retry).toBeDefined();
+          expect(await runtime.apply!({ actionId: retry.id, key: 'Accept saved output', signal: new AbortController().signal })).toMatchObject({ disposition: 'failed' });
+        }
+        const snapshot = runtime.exportSnapshot!()!;
+        expect(snapshot.recoveryCheckpoint).toMatchObject({ stateId: 'work', delivered: true });
+        expect(snapshot.recoveryCheckpoint).not.toHaveProperty('result');
+        expect(runtime.describe!().actions).toEqual([]);
+        await runtime.dispose();
+        runtime = createRuntime();
+        await runtime.restore!(boundSession, snapshot);
+        expect(runtime.describe!().actions).toEqual([]);
+        expect(runtime.exportSnapshot!()!.recoveryCheckpoint).toEqual(snapshot.recoveryCheckpoint);
+        expect(callPlayer).toHaveBeenCalledOnce();
+        expect(recordStep).toHaveBeenCalledTimes(path === 'without recordStep' ? 0 : 2);
+        for (const delivered of ['yes', false, null, 1]) {
+          const invalid = structuredClone(snapshot) as any;
+          invalid.recoveryCheckpoint.delivered = delivered;
+          const rejected = createRuntime();
+          try { await expect(rejected.restore!(boundSession, invalid)).rejects.toThrow('recoveryCheckpoint.delivered must be true'); }
+          finally { await rejected.dispose(); }
+        }
+        expect(callPlayer).toHaveBeenCalledOnce();
+      } finally { await runtime.dispose(); }
+    },
+  );
+
   it('advertises artifact schema 3 and rejects legacy declarations', () => {
     expect(SUPPORTED_ARTIFACT_SCHEMAS).toEqual([3]);
     expect(Object.isFrozen(SUPPORTED_ARTIFACT_SCHEMAS)).toBe(true);
@@ -4987,14 +5054,19 @@ describe('DR-040 deferred Boss continuation', () => {
       state: { stateId: 'awaitBossReply' },
     });
     harness.telemetry.length = 0;
+    const onAccepted = vi.fn();
 
     await expect(
-      runtime.handleBossInput(bossTurn('markdown')),
+      runtime.handleBossInput({ ...bossTurn('markdown'), onAccepted }),
     ).resolves.toMatchObject({
       outcome: 'suspended',
       state: { stateId: 'child' },
     });
     expect(callPlaybook).toHaveBeenCalledOnce();
+    expect(onAccepted).toHaveBeenCalledOnce();
+    expect(onAccepted.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.callPlayer.mock.invocationCallOrder[1]!,
+    );
 
     // PBRT-37: a trace precedes the boundary call it describes, and the
     // sequence is the observed total order. Each cause must be sequenced

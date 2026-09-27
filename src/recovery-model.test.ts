@@ -8,9 +8,9 @@ import { expect, it } from 'vitest';
 it('checks recovery policy and rejects every deliberately broken rule', async () => {
   const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('../scripts/models/recovery.mjs', import.meta.url))]);
   const result = JSON.parse(stdout);
-  expect(result.durable).toHaveLength(11);
+  expect(result.durable).toHaveLength(6);
   expect(result.durable.every((row: any) => !row.failure)).toBe(true);
-  expect(result.rejected).toHaveLength(9);
+  expect(result.rejected).toHaveLength(8);
   expect(Object.fromEntries(result.rejected.map((row: any) => [row.mutation, row.failure.issue]))).toEqual({
     'lose-base': 'restored the wrong position',
     'stale-unsupported': 'restored the wrong position',
@@ -20,7 +20,6 @@ it('checks recovery policy and rejects every deliberately broken rule', async ()
     'skip-final-result': 'finished without durable results',
     'never-save-result': 'completed work cannot make durable progress',
     'report-writes-progress': 'report changed progress',
-    'old-stop-recovery': 'automatic recovery used a pre-existing stop',
   });
   expect(result.rejected.every((row: any) => row.failure.trace.length > 0)).toBe(true);
 }, 60_000);

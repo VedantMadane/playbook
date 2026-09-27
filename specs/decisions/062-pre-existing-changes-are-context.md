@@ -9,6 +9,8 @@ Accepted (2026-09-17).
 Amends [DR-040](040-outcome-authority-effect-reconciliation.md) §2 in one scope: how a receipt treats the baseline projection entries a governed call absorbs into its one commit, alters, or loses.
 The observation itself, the exclusive claim, the exclusively-`unchanged` and cohort rules, and the fail-closed treatment of residual, multiple-commit, rewritten, foreign, and unstable evidence stand.
 
+Amended by [DR-070](070-durable-step-progress.md): a carried-changes report not presented because the turn was cancelled or lost is presented with the next reply that is shown.
+
 ## Context
 
 - A `/code` run in an embedding host started on a working tree holding four modified files and three untracked seeds that a scaffold update had left.

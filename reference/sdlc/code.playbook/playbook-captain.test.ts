@@ -1347,6 +1347,7 @@ function makeShell(
     hostCapabilities?: PlaybookCaptainDeps['hostCapabilities'];
     unresolvedEffectSettlement?: PlaybookCaptainDeps['unresolvedEffectSettlement'];
     continuity?: PlaybookCaptainDeps['continuity'];
+    recordProgress?: PlaybookCaptainDeps['recordProgress'];
   } = {},
 ) {
   const list = Array.isArray(entries) ? entries : [entries];
@@ -1442,6 +1443,7 @@ function makeShell(
         );
       },
       hostCapabilities,
+      ...(opts.recordProgress ? { recordProgress: opts.recordProgress } : {}),
       ...(opts.continuity ? { continuity: opts.continuity } : {}),
       ...(opts.unresolvedEffectSettlement
         ? {
@@ -3124,7 +3126,9 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       () => {
         order.push('present');
         ledgerReadsAtPresentation = snapshotLedger.mock.calls.length;
-        authoritativeLedger = emptyPlaybookEffectLedger();
+        // Authoritative history cannot shrink after presentation. The disposed
+        // runtime exposes no live envelope; its frozen report must still survive.
+        authoritativeLedger = { ...authoritativeLedger, revision: authoritativeLedger.revision + 1 };
         return {
           status: 'ok',
           turnId: 2,
@@ -11452,6 +11456,59 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
       ]),
     });
     await shell.dispose?.();
+  });
+
+  it.each([false, true])('preserves a decided clear through progress=%s and repeated settlements', async (progress) => {
+    const code = fakeCodeEntry(
+      async (runtime) => {
+        const state = playbookState('editing');
+        runtime.snapshot = runtimeSnapshot('code', state, { turn: 1 });
+        return { outcome: 'quiescent', state };
+      }, undefined,
+      async (runtime) => { runtime.snapshot = runtimeSnapshot('code', playbookState('ready')); },
+    );
+    enableGenerationRetention(code);
+    let supportsRetention = false;
+    const createCode = code.entry.createRuntime;
+    code.entry.createRuntime = (options, capabilities) => {
+      const runtime = createCode(options, capabilities) as FakeRuntime;
+      if (!supportsRetention) delete runtime.retainedGenerationMetadata;
+      return runtime;
+    };
+    const docs = fakePlaybookEntry('docs', 'docs', async (runtime) => {
+      const state = playbookState('drafting');
+      runtime.snapshot = runtimeSnapshot('docs', state, { turn: 1 });
+      return { outcome: 'quiescent', state };
+    }, undefined, async (runtime) => { runtime.snapshot = runtimeSnapshot('docs', playbookState('ready')); });
+    enableGenerationRetention(docs);
+    const recordProgress = vi.fn<NonNullable<PlaybookCaptainDeps['recordProgress']>>(async () => {});
+    const shell = makeShell([code, docs], { ...(progress ? { recordProgress } : {}) });
+    await shell.init!(stubSession(roster).session);
+    await shell.installRetainedGenerations({ code: retainedRootGeneration('code', SOURCE_ROOT_ID, 'retainedCode') });
+    try {
+      await shell.handleBossTurn(turn('/docs draft'), stubContext([
+        { status: 'ok', turnId: 1, finalText: 'The draft is ready to continue.' },
+      ]).context);
+      if (progress) expect(recordProgress).toHaveBeenCalled();
+      const cleared = shell.exportSettlement();
+      expect(cleared?.retentionUpdates).toContainEqual({ kind: 'clear', rootPlaybookId: 'code' });
+      expect(shell.exportSettlement()).toEqual(cleared);
+
+      // A new capable runtime can retain work after the old generation was
+      // cleared; neither another export nor the next turn revives the clear.
+      supportsRetention = true;
+      await shell.handleBossTurn(turn('/code new task', 2), stubContext([
+        { status: 'ok', turnId: 2, finalText: 'The new work is ready to continue.' },
+      ]).context);
+      const retained = shell.exportSettlement();
+      expect(retained?.retentionUpdates).toContainEqual(expect.objectContaining({ kind: 'retain', rootPlaybookId: 'code' }));
+      expect(retained?.retentionUpdates).not.toContainEqual({ kind: 'clear', rootPlaybookId: 'code' });
+      expect(shell.exportSettlement()).toEqual(retained);
+      await shell.handleBossTurn(turn('status', 3), stubContext([
+        captainJson({ action: 'respond', text: 'The work remains ready to continue.' }),
+      ]).context);
+      expect(shell.exportSettlement()?.retentionUpdates).toContainEqual(expect.objectContaining({ kind: 'retain', rootPlaybookId: 'code' }));
+    } finally { await shell.dispose?.(); }
   });
 
   it('keeps retained playbook ids available as repeatable Boss prose', async () => {

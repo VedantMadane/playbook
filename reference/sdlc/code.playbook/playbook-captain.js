@@ -2178,16 +2178,18 @@ export function createPlaybookCaptainShell(options, deps = {}) {
     };
     /**
      * DR-062 §5: one deterministic Boss-visible report, once per turn, for the
-     * pre-existing changes the commits completed during this turn carried, and
+     * pre-existing changes not yet presented to Boss, and
      * the same information as settlement facts the closing-reply prompt reads.
      * It supplements the unresolved-effect report and enters no run result.
      */
     const reportCarriedPreExistingChanges = (turn) => {
-        if (turn.carriedPreExistingReported)
+        if (turn.carriedEffectPrefix !== undefined)
             return;
         let carried;
         try {
-            carried = carriedPreExistingChanges(assertPlaybookEffectLedger(currentEffectLedger()), presentedEffectPrefix);
+            const ledger = assertPlaybookEffectLedger(currentEffectLedger());
+            carried = carriedPreExistingChanges(ledger, presentedEffectPrefix);
+            turn.carriedEffectPrefix = ledger.boundaries.length;
         }
         catch {
             return;
@@ -2195,7 +2197,6 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         const report = carriedPreExistingReport(carried);
         if (report === undefined)
             return;
-        turn.carriedPreExistingReported = true;
         appendMandatoryPresentationSuffix(turn, report);
         const facts = carriedPreExistingFacts(carried);
         turn.settlementFacts.push(...facts);
@@ -2454,11 +2455,14 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         retiredRetainedRuntimes.push(...offer.runtimes);
     };
     const applyRetentionUpdateToCatalog = (update) => {
+        // Applying a catalog projection must not consume its settlement decision.
+        if (retainedGenerationRootClears.delete(update.rootPlaybookId)) {
+            pendingRetentionUpdates.set(update.rootPlaybookId, update);
+        }
         if (update.kind === 'clear') {
             retireRetainedOffer(update.rootPlaybookId);
             retainedGenerations.delete(update.rootPlaybookId);
             ineligibleRetainedGenerations.delete(update.rootPlaybookId);
-            retainedGenerationRootClears.delete(update.rootPlaybookId);
             return;
         }
         const prior = retainedGenerations.get(update.rootPlaybookId);
@@ -2467,7 +2471,6 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         retireRetainedOffer(update.rootPlaybookId);
         retainedGenerations.set(update.rootPlaybookId, update.generation);
         ineligibleRetainedGenerations.delete(update.rootPlaybookId);
-        retainedGenerationRootClears.delete(update.rootPlaybookId);
     };
     const drainRetiredRetainedRuntimes = async () => {
         if (retiredRetainedRuntimes.length === 0)
@@ -4460,8 +4463,10 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             turn.presentationError = error;
             throw error;
         }
-        if (turn)
+        if (turn) {
             turn.presentationAttempted = true;
+            reportCarriedPreExistingChanges(turn);
+        }
         // A rejected presentation cannot prove whether Boss saw none, some, or
         // all of this prose. Preserve the exact attempt before crossing the
         // boundary; the uncertainty record below keeps recovery from pretending
@@ -4471,11 +4476,11 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             ? settlement.text
             : `${settlement.text.trimEnd()}\n\n${suffix}`;
         appendJournal('reply', visibleText);
-        const presentedPrefix = currentEffectLedger().boundaries.length;
         try {
             await trackTurnCall(settlement.context.emitReply(visibleText));
-            if (!settlement.context.signal.aborted)
-                presentedEffectPrefix = presentedPrefix;
+            if (!settlement.context.signal.aborted && turn?.carriedEffectPrefix !== undefined) {
+                presentedEffectPrefix = turn.carriedEffectPrefix;
+            }
         }
         catch (error) {
             conversation = { kind: 'needsSeeding' };
@@ -5432,7 +5437,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             });
             // Save start/position together. A result never moves the saved position.
             // The closing digest sees pending changes; durable retention waits for settlement.
-            const updates = snapshot && !starting ? captureRetentionUpdates(snapshot) : [...pendingRetentionUpdates.values()];
+            const updates = decidedRetentionUpdates();
             await recordProgress({ snapshot, ...(step ? { step } : {}) });
             for (const update of updates)
                 applyRetentionUpdateToCatalog(update);
@@ -6695,11 +6700,15 @@ export function createPlaybookCaptainShell(options, deps = {}) {
             return undefined;
         }
     };
-    const captureRetentionUpdates = (snapshot) => {
+    const decidedRetentionUpdates = () => {
         const updates = new Map(pendingRetentionUpdates);
         for (const rootPlaybookId of retainedGenerationRootClears) {
             updates.set(rootPlaybookId, { kind: 'clear', rootPlaybookId });
         }
+        return [...updates.values()];
+    };
+    const captureRetentionUpdates = (snapshot) => {
+        const updates = new Map(decidedRetentionUpdates().map((update) => [update.rootPlaybookId, update]));
         const root = rootFrame();
         if (root !== undefined) {
             const rootPlaybookId = root.entry.id;
@@ -7246,9 +7255,6 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                             playerTransactions.delete(playerId);
                         }
                     }
-                }
-                if (context.signal.aborted && activeTurn?.progressBase) {
-                    presentedEffectPrefix = activeTurn.progressBase.presentedEffectPrefix ?? activeTurn.progressBase.effectLedger.boundaries.length;
                 }
                 await saveStoppedProgress();
                 activeTurn = undefined;

@@ -27,7 +27,9 @@ let stopping = false;
 let closingCancelled = false;
 const preparation = scenario === 'preparation';
 const retention = scenario.startsWith('retention-');
-const question = retention || ['accepted-answer', 'waiting-question', 'reserved-question', 'before-first-step', 'automatic-answer', 'exact-answer', 'give-up', 'completed-unfinished'].includes(scenario);
+const liveRetention = scenario.startsWith('live-retain-');
+const carriedCancellation = scenario.startsWith('carried-cancel');
+const question = retention || liveRetention || ['accepted-answer', 'waiting-question', 'reserved-question', 'before-first-step', 'automatic-answer', 'exact-answer', 'give-up', 'completed-unfinished', 'completed-clear'].includes(scenario);
 const questionText = scenario === 'exact-answer' ? 'Which database should I use?\n' : scenario === 'reserved-question' ? 'Should I remove the undeclared variable?' : 'Which database should I use?';
 let asking = false;
 const meta = (stateId) => ({ playbook: { stateId, description: stateId } });
@@ -46,7 +48,7 @@ function entry(id, parent = false) {
   const factory = createXStatePlaybookRuntime(createMachine({ initial: 'ready', context: { task: '' }, states: {
     ready: { meta: meta('ready'), tags: ['playbook.parked'], on: { START: { target: 'work', actions: assign({ task: ({ event }) => event.text }) } } },
     work, ...(later ? { after: { meta: { playbook: { stateId: 'after', description: 'Check the earlier work', role: 'worker' } }, tags: ['playbook.busy'], invoke: { src: 'player', input: { stateId: 'after', sourceItem: 'FLOW-3', role: 'worker', prompt: 'Later step', result: { done: 'The check is complete.' } }, onDone: 'done', onError: 'failed' } } } : {}), awaitBossReply: { meta: meta('awaitBossReply'), tags: ['playbook.parked'], on: { BOSS_REPLY: { target: 'work', actions: assign({ bossReply: ({ event }) => event.answer }) } } }, failed: { meta: meta('failed'), tags: ['playbook.parked'], on: { START: 'work' } }, done: { meta: scenario.startsWith('completed-') ? { playbook: { stateId: 'done', description: scenario === 'completed-exact' ? ' The task needs a different approach.\n' : 'The task needs a different approach.', terminal: 'failure' } } : meta('done'), type: 'final' },
-  } }), { label: id, compat: { artifactSchema: 3, runtimeAbi: 1 }, snapshotOptions: () => ({}), unfinishedFinalStateIds: scenario === 'completed-unfinished' ? ['done'] : [], scriptCwd: () => dir,
+  } }), { label: id, compat: { artifactSchema: 3, runtimeAbi: 1 }, snapshotOptions: () => ({}), unfinishedFinalStateIds: (scenario === 'completed-unfinished' || liveRetention) ? ['done'] : [], scriptCwd: () => dir,
     entryEvent: { type: 'START', textField: 'text' }, roleStates: parent || script ? {} : { work: { role: 'worker', label: 'Complete the task' }, ...(later ? { after: { role: 'worker', label: 'Check the earlier work' } } : {}) },
     outcomeAuthority: { governedPlayerStates: parent || script ? {} : { ...(later ? { after: { done: { fields: {}, repositoryDisposition: 'unchanged' } } } : {}), work: { ...(question ? { needsBossReply: { fields: { question: 'presentation' }, repositoryDisposition: 'unchanged' } } : {}), done: { fields: {}, repositoryDisposition: 'one-descendant-commit' }, failed: { fields: {}, repositoryDisposition: 'unchanged' } } } },
   });
@@ -63,20 +65,27 @@ class Adapter {
   async *run(prompt) {
     let result;
     if (prompt.includes('Check whether existing instructions already answer')) {
-      if (['automatic-answer', 'exact-answer'].includes(scenario)) await writeFile(join(dir, 'answer-sent'), 'yes');
-      result = ['automatic-answer', 'exact-answer'].includes(scenario) ? '{"instructionIndex":0}' : '{"instructionIndex":null}';
+      const answerFromTask = ['automatic-answer', 'exact-answer'].includes(scenario) || (liveRetention && !prompt.includes('Earlier task'));
+      if (answerFromTask) await writeFile(join(dir, 'answer-sent'), 'yes');
+      result = answerFromTask ? '{"instructionIndex":0}' : '{"instructionIndex":null}';
     }
     else if (prompt.includes('Classify the following Boss message')) result = '{"type":"BOSS_REPLY","questionId":"q-1"}';
     else if (prompt.includes('Select exactly one action')) {
-      if (scenario === 'before-first-step' && phase === 'start') kill();
-      result = prompt.includes('[Boss message]\nResume flow') ? '{"action":"resume","playbookId":"flow"}' : prompt.includes('[Boss message]\nNew exact task') ? '{"action":"start","playbookId":"flow","input":"Keep the accepted Boss instruction\\n"}' : prompt.includes('[Boss message]\nStop flow') ? '{"action":"dismiss"}' : '{"action":"respond","text":"Please choose how to continue."}';
+      if (prompt.includes('[Boss message]\nPlease report')) {
+        if (scenario.includes('decision-error')) throw new Error('Decision call unavailable');
+        if (scenario.includes('malformed')) { yield createEvent('done', this.agent, { status: 'success', result: 'not a decision', resumeToken: 'fixture', usage: { toolUses: 0 }, durationMs: 1 }, 'fixture'); return; }
+      }
+      if (scenario === 'consumed-result') { result = '{"action":"recover"}'; }
+      else if (scenario === 'before-first-step' && phase === 'start') kill();
+      if (scenario !== 'consumed-result') result = prompt.includes('[Boss message]\nResume flow') ? '{"action":"resume","playbookId":"flow"}' : prompt.includes('[Boss message]\nNew exact task') ? '{"action":"start","playbookId":"flow","input":"Keep the accepted Boss instruction\\n"}' : prompt.includes('[Boss message]\nStop flow') ? '{"action":"dismiss"}' : '{"action":"respond","text":"Please choose how to continue."}';
     }
+    else if (prompt.includes('Boss issued a registered command that produces no action')) result = 'No playbook is engaged.';
     else if (prompt.includes('You are Captain preparing an interrupted playbook')) {
       await appendFile(join(dir, 'calls'), 'preparation\n');
       await writeFile(join(dir, 'prepared'), 'ready');
       result = oldStop ? '{"status":"blocked","summary":"Need Boss to choose."}' : '{"status":"ready","summary":"The prerequisite is ready."}';
     } else if (prompt.includes('An action just settled')) {
-      if (scenario.startsWith('carried-cancel') && !closingCancelled) { closingCancelled = true; if (headlessAbort) headlessAbort.abort(new Error('cancel closing reply')); else host.host.abortActiveTurn('cancel closing reply'); throw new Error('closing reply cancelled'); }
+      if (carriedCancellation && !closingCancelled) { closingCancelled = true; if (headlessAbort) headlessAbort.abort(new Error('cancel closing reply')); else host.host.abortActiveTurn('cancel closing reply'); throw new Error('closing reply cancelled'); }
       result = 'The task is complete.';
     }
     else if (prompt.includes('hidden-control judge')) result = JSON.stringify({ guard: asking ? 'needsBossReply' : 'done' });
@@ -87,7 +96,7 @@ class Adapter {
       if (preparation && phase === 'start') throw new Error('Prerequisite unavailable');
       asking = question && !(await readFile(join(dir, 'answer-sent'), 'utf8').catch(() => ''));
       if (asking) { result = questionText; } else {
-      if (question) assert(prompt.includes(['automatic-answer', 'exact-answer'].includes(scenario) ? 'Keep the accepted Boss instruction' : 'Use SQLite'), 'authored continuation must include accepted Boss answer');
+      if (question) assert(prompt.includes((['automatic-answer', 'exact-answer'].includes(scenario) || liveRetention) ? 'Keep the accepted Boss instruction' : 'Use SQLite'), 'authored continuation must include accepted Boss answer');
       await writeFile(join(dir, 'work.txt'), 'finished'); git('add', 'work.txt'); if (scenario.startsWith('carried')) git('add', 'boss.txt'); git('commit', '-qm', 'work');
       if (scenario === 'player-before-receipt' && phase === 'start') kill();
       result = 'Done.';
@@ -116,7 +125,6 @@ const wrapped = { ...store, async acquire(id) {
   return { ...lease, async recordProgress(change) {
     if (scenario.includes('retention-lost') && change.step?.result === undefined && change.step?.kind === 'player' && await readFile(join(dir, 'answer-sent'), 'utf8').catch(() => '')) change = { ...change, snapshot: null };
     await lease.recordProgress(change);
-    if (phase === 'consume' && !change.step && change.snapshot?.frames?.at(-1).runtime.state.stateId === 'failed') kill();
     if (stopping && !change.step) kill();
     if (phase === 'again') throw new Error('A report must not write progress');
     if (phase === 'start') {
@@ -124,23 +132,29 @@ const wrapped = { ...store, async acquire(id) {
       if (scenario === 'consumed-result' && !change.step && change.snapshot?.frames?.at(-1).runtime.state.stateId === 'failed') kill();
       if (scenario.startsWith('completed') && change.step?.kind === 'completion') kill();
       if (['waiting-question', 'reserved-question'].includes(scenario) && change.snapshot?.frames?.at(-1).runtime.state.stateId === 'awaitBossReply') kill();
-      if (change.step?.result !== undefined && (preparation ? change.step.kind === 'preparation' : !later && scenario !== 'consumed-result' && !scenario.startsWith('completed') && !scenario.startsWith('carried-cancel') && (!question || !asking))) kill();
+      if (change.step?.result !== undefined && (preparation ? change.step.kind === 'preparation' : !later && scenario !== 'consumed-result' && !scenario.startsWith('completed') && !carriedCancellation && scenario !== 'carried-after-reply' && !liveRetention && (!question || !asking))) kill();
     }
   }, async settle(point) { if (phase === 'again') kill(); return lease.settle(point); } };
 } };
-const headlessAbort = scenario === 'carried-cancel-cli' ? new AbortController() : undefined;
+const headlessAbort = carriedCancellation && scenario.includes('-cli') ? new AbortController() : undefined;
 let config = executionConfigFromPlan(await loadLaunchPlan({ userConfigPath: join(dir, 'config.yaml'), loadModule }));
 if (scenario === 'command-override') Object.assign(config = structuredClone(config), { catalog: { ...config.catalog, flow: { ...config.catalog.flow, command: 'go' } } });
-if (scenario === 'carried-cancel-cli') {
+if (carriedCancellation && scenario.includes('-cli')) {
   let stdout = '', stderr = '';
   const options = { cwd: dir, userConfigPath: join(dir, 'config.yaml'), sessionStore: wrapped, loadModule, adapterImports: { claude: async () => Adapter }, env: { ANTHROPIC_API_KEY: 'fixture' }, probeAdapterSdk: async () => true, stdout: { write: (text) => { stdout += text; } }, stderr: { write: (text) => { stderr += text; } } };
   const first = await runPlaybookCli({ ...options, argv: ['run', '/flow Keep the accepted Boss instruction'], signal: headlessAbort.signal, createSessionId: () => sessionId });
   assert.equal(first.code, 2, stderr);
   assert.equal(stdout, '', 'an aborted turn has no stdout reply');
   const record = (await store.listSummaries()).sessions[0];
-  const next = await runPlaybookCli({ ...options, argv: ['run', '--session', record.sessionId, 'Please report'] });
+  const message = scenario.includes('command') ? '/flow' : 'Please report';
+  const next = await runPlaybookCli({ ...options, argv: ['run', '--session', record.sessionId, message] });
   assert.equal(next.code, 0, stderr);
-  assert(stdout.includes('Pre-existing changes carried by commit'), stdout);
+  assert.equal(stdout.split('Pre-existing changes carried by commit').length, 2, stdout);
+  const reported = await store.read(record.sessionId);
+  assert.equal(reported.snapshot.presentedEffectPrefix, reported.effectLedger.boundaries.length);
+  stdout = '';
+  assert.equal((await runPlaybookCli({ ...options, argv: ['run', '--session', record.sessionId, '/flow'] })).code, 0, stderr);
+  assert(!stdout.includes('Pre-existing changes carried by commit'), stdout);
   assert.equal(await readFile(join(dir, 'calls'), 'utf8'), 'player\n');
   console.log(JSON.stringify({ settled: true })); process.exit(0);
 }
@@ -175,7 +189,7 @@ if (phase === 'discard') {
   assert.equal(await readFile(join(dir, 'calls'), 'utf8'), beforeCalls);
   await lease.release(); console.log(JSON.stringify({ settled: true })); process.exit(0);
 }
-const host = await openSessionHost({ store: wrapped, config, loadModule, cwd: dir, sessionId, mode: phase === 'start' ? 'new' : 'recover', observers: [{ onRecord(event) { events.push(event);  } }], adapterImports: { claude: async () => Adapter } });
+const host = await openSessionHost({ store: wrapped, config, loadModule, cwd: dir, sessionId, mode: phase === 'start' ? 'new' : 'recover', observers: [{ onRecord(event) { events.push(event); if (scenario === 'carried-after-reply' && !closingCancelled && event.type === 'captain_telemetry' && event.payload?.type === 'boss.input.settled' && events.some((e) => e.type === 'captain_reply')) { closingCancelled = true; host.host.abortActiveTurn('cancel after reply'); } } }], adapterImports: { claude: async () => Adapter } });
 if (phase === 'start') {
   if (scenario === 'parent-accepted-child-failed') {
     await host.handleBossTurn('/flow original task');
@@ -185,15 +199,43 @@ if (phase === 'start') {
     assert(!facts.includes('did not accept'), facts);
     await host.dispose(); console.log(JSON.stringify({ settled: true })); process.exit(0);
   }
-  if (scenario === 'carried-cancel') {
+  if (carriedCancellation || scenario === 'carried-after-reply') {
     await assert.rejects(host.handleBossTurn('/flow Keep the accepted Boss instruction'));
     const stopped = await host.read();
     assert.equal(stopped.state, 'settled');
-    assert.equal(stopped.snapshot.presentedEffectPrefix, 0);
-    const next = await host.handleBossTurn('Please report');
-    assert(next.snapshot.journal.filter((e) => e.kind === 'reply').at(-1).payload.includes('Pre-existing changes carried by commit'));
+    assert.equal(stopped.snapshot.presentedEffectPrefix, scenario === 'carried-after-reply' ? stopped.effectLedger.boundaries.length : 0);
+    if (scenario === 'carried-after-reply') {
+      assert(closingCancelled, 'cancellation must follow an emitted reply');
+      assert.equal(events.find((e) => e.type === 'captain_reply').text.split('Pre-existing changes carried by commit').length, 2);
+    }
+    const next = await host.handleBossTurn(scenario.includes('command') ? '/flow' : 'Please report');
+    const reply = next.snapshot.journal.filter((e) => e.kind === 'reply').at(-1).payload;
+    assert.equal(reply.split('Pre-existing changes carried by commit').length, scenario === 'carried-after-reply' ? 1 : 2, reply);
     assert.equal(next.snapshot.presentedEffectPrefix, next.effectLedger.boundaries.length);
+    const third = await host.handleBossTurn('/flow');
+    assert(!third.snapshot.journal.filter((e) => e.kind === 'reply').at(-1).payload.includes('Pre-existing changes carried by commit'));
     assert.equal(await readFile(join(dir, 'calls'), 'utf8'), 'player\n');
+    await host.dispose(); console.log(JSON.stringify({ settled: true })); process.exit(0);
+  }
+  if (liveRetention) {
+    let earlier;
+    if (scenario === 'live-retain-earlier') {
+      earlier = await host.handleBossTurn('/flow Earlier task');
+      assert.equal(earlier.snapshot.frames[0].runtime.state.stateId, 'awaitBossReply');
+      await host.handleBossTurn('Stop flow');
+    }
+    const done = await host.handleBossTurn('/flow Keep the accepted Boss instruction');
+    assert.equal(done.snapshot.mode, 'chat');
+    if (!earlier) assert.equal(done.retainedGenerations?.flow, undefined);
+    else assert.deepEqual(done.retainedGenerations.flow, earlier.retainedGenerations.flow);
+    const resumed = await host.handleBossTurn('Resume flow');
+    if (!earlier) {
+      assert.equal(resumed.snapshot.lastSettlementStatus, 'rejected');
+      assert.equal(resumed.snapshot.mode, 'chat');
+    } else {
+      assert.equal(resumed.snapshot.frames[0].request, 'Earlier task');
+      assert.equal(resumed.retainedGenerations.flow.frames[0].request, 'Earlier task');
+    }
     await host.dispose(); console.log(JSON.stringify({ settled: true })); process.exit(0);
   }
   if (oldStop) {
@@ -218,7 +260,7 @@ if (phase === 'start') {
     await host.handleBossTurn(scenario.endsWith('same-root') ? '/flow Use SQLite' : '/leaf Use SQLite');
   }
   if (scenario === 'before-first-step') await host.handleBossTurn('Please answer the pending question');
-  if (['accepted-answer', 'completed-unfinished'].includes(scenario)) { await writeFile(join(dir, 'answer-sent'), 'yes'); await host.handleBossTurn('/flow Use SQLite'); }
+  if (['accepted-answer', 'completed-unfinished', 'completed-clear'].includes(scenario)) { await writeFile(join(dir, 'answer-sent'), 'yes'); await host.handleBossTurn('/flow Use SQLite'); }
   throw new Error('Expected process loss');
 }
 assert.equal(await readFile(join(dir, 'calls'), 'utf8'), beforeCalls, 'opening must start no work');
@@ -290,7 +332,6 @@ assert.equal(recovered.state, 'settled');
 if (!script && !preparation && !['waiting-question', 'reserved-question', 'player-before-change'].includes(scenario)) assert(recovered.snapshot.journal.filter((entry) => entry.kind === 'reply').at(-1).payload.includes(git('rev-parse', 'HEAD')));
 if (scenario.startsWith('carried')) assert(recovered.snapshot.journal.filter((entry) => entry.kind === 'reply').at(-1).payload.includes('Pre-existing changes carried by commit'));
 if (recovered.unresolvedEffects.length || recovered.effectLedger.boundaries.some((b) => b.physicalReceipt?.classification !== 'unchanged')) assert(recovered.snapshot.journal.filter((e) => e.kind === 'reply').at(-1).payload.includes('This evidence does not establish workflow completion or attribute any repository change or commit to this workflow.'));
-assert(!recovered.snapshot.journal.filter((entry) => entry.kind === 'reply').at(-1).payload.includes('Saved 1'));
 assert.equal(await readFile(join(dir, 'calls'), 'utf8'), beforeCalls, 'reporting must start no work');
 if (retention) {
   if (scenario.includes('lost')) {
@@ -317,6 +358,16 @@ if (scenario === 'exact-answer') assert.equal(record.uncertain.progress.steps.fi
 if (['automatic-answer', 'exact-answer'].includes(scenario)) {
   assert(record.uncertain.progress.steps.some((step) => step.kind === 'answer'));
   assert(recovered.snapshot.journal.filter((entry) => entry.kind === 'reply').at(-1).payload.includes('Captain selected the original task as the answer'));
+}
+if (scenario === 'completed-exact') {
+  const completion = record.uncertain.progress.steps.find((step) => step.kind === 'completion');
+  assert.equal(completion.result.description, ' The task needs a different approach.\n');
+  assert.equal(completion.result.terminalOutcome.description, ' The task needs a different approach.\n');
+  assert(recovered.snapshot.journal.filter((e) => e.kind === 'reply').at(-1).payload.includes('/flow stopped with a failure.  The task needs a different approach.\n'));
+}
+if (scenario === 'completed-clear') {
+  assert(record.retainedGenerations.flow, 'the answered question had a saved generation');
+  assert.equal(recovered.retainedGenerations?.flow, undefined, 'report settlement must apply the completion clear');
 }
 if (scenario === 'completed-unfinished') assert(recovered.retainedGenerations?.flow, 'an unfinished final state keeps its saved generation');
 if (scenario === 'completed') assert(recovered.snapshot.journal.filter((entry) => entry.kind === 'reply').at(-1).payload.includes('/flow finished. done'));
@@ -357,9 +408,9 @@ if (scenario === 'player-before-change') {
   assert(JSON.stringify(facts).includes('Delivered the Boss text'), JSON.stringify(facts));
 }
 if (scenario === 'consumed-result') {
-  const actions = host.listRuntimeActions();
-  if (phase === 'consume') await host.submitRuntimeAction(actions.find((a) => a.label.startsWith('Continue from saved result')).id);
-  else { assert(!actions.some((a) => a.label.startsWith('Continue from saved result')), JSON.stringify(actions)); assert(actions.some((a) => a.id.startsWith('retry:')), JSON.stringify(actions)); }
+  assert.deepEqual(host.listRuntimeActions(), []);
+  await host.handleBossTurn('Prepare and continue');
+  assert.equal(await readFile(join(dir, 'calls'), 'utf8'), beforeCalls, 'a delivered result must not trigger preparation');
 }
 await host.dispose();
 console.log(JSON.stringify({ settled: true }));

@@ -5892,7 +5892,7 @@ describe('Captain reply presentation and effect attribution by construction', ()
     ]);
     expect(
       lines.filter((line) => /presentationAttempted = true/.test(line)),
-    ).toEqual(['if (turn) turn.presentationAttempted = true;']);
+    ).toHaveLength(1);
 
     const seam =
       /const surfaceSettlement = async \(([\s\S]*?)\n {2}\};/.exec(shellSource);

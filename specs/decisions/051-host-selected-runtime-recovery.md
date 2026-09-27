@@ -5,9 +5,8 @@
 
 ## Status
 
-Amended by [DR-070](070-durable-step-progress.md): host-selected actions use step progress; saved continuation points and whole-turn replay are removed.
-
-Amended by [DR-066](066-captain-prepares-step-recovery.md): host-selected actions receive the same bounded automatic recovery as model-selected actions; DR-070 replaces continuation points and whole-turn replay with normal step progress.
+Amended by [DR-066](066-captain-prepares-step-recovery.md): host-selected actions receive the same bounded automatic recovery as model-selected actions.
+Amended by [DR-070](070-durable-step-progress.md): host-selected actions use normal step progress; saved continuation points and whole-turn replay are removed.
 
 Accepted.
 Amends [DR-029](029-session-scoped-conversational-captain.md) in one scope: a `runtime` turn may be decided by the embedding host instead of the hidden decision call, preserving every validation and effect rule that decision carries.

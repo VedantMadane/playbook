@@ -5674,7 +5674,7 @@ export function createXStatePlaybookRuntime<
     // tool-free judgment. Never repeat the player to recover that evidence.
     function recoverableJudgment(): PlaybookEffectBoundary | undefined {
       if (
-        !recoveryCheckpoint || recoveryCheckpoint.result !== undefined ||
+        !recoveryCheckpoint || recoveryCheckpoint.result !== undefined || recoveryCheckpoint.delivered ||
         retainedEffectReconciliationRequired ||
         deferredReconciliationOperationId !== undefined
       )
@@ -5913,34 +5913,42 @@ export function createXStatePlaybookRuntime<
       execute: () => Promise<PlaybookActorOutput>,
     ): Promise<PlaybookActorOutput> {
       const saved = acceptedStepResult;
+      let output: PlaybookActorOutput;
       if (saved?.stateId === input.stateId && saved.result !== undefined) {
         acceptedStepResult = undefined;
-        const { result: _result, ...start } = saved;
-        recoveryCheckpoint = start;
-        return snapshotJsonValue(saved.result) as PlaybookActorOutput;
+        recoveryCheckpoint = saved;
+        output = snapshotJsonValue(saved.result) as PlaybookActorOutput;
+      } else {
+        const record = savedPorts?.recordStep;
+        await drainEmissions();
+        signal.throwIfAborted();
+        try {
+          captureRecoveryCheckpoint(input.stateId, 'command' in input ? input.command : 'role' in input ? composeBoundPlayerPrompt(input) : composeCaptainPrompt(input));
+        } catch (error) {
+          if (!isAbortFailure(error, signal)) controlPlaneError ??= error;
+          throw error;
+        }
+        if (record) {
+          const id = randomUUID();
+          if (recoveryCheckpoint) recoveryCheckpoint = { ...recoveryCheckpoint, id };
+          const step = { id, kind, stateId: input.stateId };
+          await record(step, exportRuntimeSnapshot({ interrupted: true }));
+          signal.throwIfAborted();
+          const result = snapshotJsonValue(await execute());
+          // Keep the known output if its save loses acknowledgement. A drained
+          // failure can then preserve it without treating the call as unexecuted.
+          if (recoveryCheckpoint?.id === id) recoveryCheckpoint = { ...recoveryCheckpoint, result };
+          await record({ ...step, result });
+          output = result as PlaybookActorOutput;
+        } else {
+          output = await execute();
+        }
       }
-      const record = savedPorts?.recordStep;
-      await drainEmissions();
-      signal.throwIfAborted();
-      try {
-        captureRecoveryCheckpoint(input.stateId, 'command' in input ? input.command : 'role' in input ? composeBoundPlayerPrompt(input) : composeCaptainPrompt(input));
-      } catch (error) {
-        if (!isAbortFailure(error, signal)) controlPlaneError ??= error;
-        throw error;
+      if (recoveryCheckpoint?.stateId === input.stateId) {
+        const { result: _result, ...start } = recoveryCheckpoint;
+        recoveryCheckpoint = { ...start, delivered: true };
       }
-      if (!record) return execute();
-      const id = randomUUID();
-      if (recoveryCheckpoint) recoveryCheckpoint = { ...recoveryCheckpoint, id };
-      const step = { id, kind, stateId: input.stateId };
-      await record(step, exportRuntimeSnapshot({ interrupted: true }));
-      signal.throwIfAborted();
-      const result = snapshotJsonValue(await execute());
-      // Keep the known output if its save loses acknowledgement. A drained
-      // failure can then preserve it without treating the call as unexecuted.
-      if (recoveryCheckpoint?.id === id) recoveryCheckpoint = { ...recoveryCheckpoint, result };
-      await record({ ...step, result });
-      if (recoveryCheckpoint?.id === id) { const { result: _result, ...start } = recoveryCheckpoint; recoveryCheckpoint = start; }
-      return result as PlaybookActorOutput;
+      return output;
     }
 
     function validateRecoveryCheckpoint(

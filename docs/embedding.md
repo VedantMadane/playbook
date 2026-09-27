@@ -435,7 +435,7 @@ For uncertainty it restores the saved position and reports the recorded work usi
 If a turn fails and leaves this open controller uncertain, dispose it and reopen with `mode:'recover'` before calling `recover()` without new input.
 
 Explicit `mode:'retry'` and `retry()` remain supported. Module-free
-`discardSessionUncertain(shared, sessionId)` restores the prior recovery only
+`discardSessionUncertain(shared, sessionId)` restores the prior recovery
 only when `isUncertainTurnDiscardable(record)` returns true: no abandonment, no recorded steps, and a ledger equal to the pre-turn snapshot. Use the same exported predicate to enable a Discard control.
 
 `readHistory()` returns readable history and a damaged boundary, including a

@@ -18,3 +18,12 @@ it.each(['root', 'nested'])('settles loss through the maintained DECIDE runtime 
     expect(JSON.parse(result.stdout)).toEqual({ settled: true });
   } finally { await rm(dir, { recursive: true, force: true }); }
 }, 30_000);
+
+it('keeps real DECIDE under its parent when the first accepted proposal is cancelled', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'captain-decide-acceptance-'));
+  const bespoke = fileURLToPath(new URL('./fixtures/recovery-bespoke-loss.mjs', import.meta.url));
+  try {
+    const result = await exec(process.execPath, [bespoke, dir, 'acceptance-cancel', 'start']);
+    expect(JSON.parse(result.stdout)).toEqual({ settled: true });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}, 30_000);

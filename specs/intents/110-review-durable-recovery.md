@@ -25,25 +25,105 @@ Resolve the final branch review while preserving simple restore, report and expl
 
 ## Verification
 
-The final review decisions and checks follow.
-Earlier review decisions and checks are preserved under Previous review record.
+The closing review decisions and checks follow.
+Earlier rounds remain below as historical verification.
 
-### Final review decisions
+### Closing review decisions
+
+Review scope: Playbook `693abbc`, SLC `00ea868`.
+Every open finding is accepted; the settled design and earlier fixes remain in place.
+SLC has no new changes.
+
+| Finding | Disposition and evidence |
+| --- | --- |
+| #62 | Accept: compare validated snapshots in the shared host. Five real SDK/CLI paths reopen stored snapshots without the optional prefix, including both no-work recovery paths. [Host](../../reference/sdlc/code.playbook/bin/run.js), [tests](../../reference/sdlc/code.playbook/session-snapshot-compatibility.integration.test.ts). |
+| #29 | Accept: every reply prepares the carried-edit report at the common presentation boundary; only successful presentation advances the exact count that was read. Remove the cancellation reset. SDK and CLI tests cover command replies, failed decisions, malformed decisions, and cancellation after a shown reply. [Shell](../../reference/sdlc/code.playbook/playbook-captain.ts), [process tests](../../reference/sdlc/code.playbook/durable-progress.integration.test.ts). |
+| #63 | Accept: progress applies only already-decided retention changes; settlement captures the live root. Applying a clear to the live list preserves the decision until settlement, including repeated exports and later replacement by new retained work. [Shell](../../reference/sdlc/code.playbook/playbook-captain.ts), [shell tests](../../reference/sdlc/code.playbook/playbook-captain.test.ts), [live SDK cases](../../reference/sdlc/code.playbook/durable-progress.integration.test.ts). |
+| #51 | Accept: all three output paths record delivery through one return. A delivered output cannot be offered for assessment again; ordinary step retries and questions keep their existing rules. Validation, live/restore tests and the exact consumed-result action list cover this. [Runtime](../../src/xstate-playbook-runtime.ts), [tests](../../src/role-runtime-transition.test.ts). |
+| #53 | Accept: remove the hardcoded stop rows and their self-fulfilling mutation. The model now reports only six explored scenarios and eight checked violations; real integration tests own the other claims. [Model](../../scripts/models/recovery.mjs), [test](../../src/recovery-model.test.ts). |
+| #64 | Accept: rewrite contradictory clauses in place, remove duplicates, repair decision links, and place each verification requirement with its owning behavior. The complete forbidden-text search has no matches. |
+| #65 | Accept: add real DECIDE acceptance, deferred callback ordering, completion-clear settlement, and exact saved/report text assertions. Remove the dead consume branches and ineffective saved-count assertion. [DECIDE tests](../../reference/sdlc/code.playbook/captain-process-loss.integration.test.ts), [runtime tests](../../src/role-runtime-transition.test.ts), [crash fixture](../../reference/sdlc/code.playbook/fixtures/durable-progress-loss.mjs). |
+| #66 | Accept: correct the SDK wording, changelog and this record; the earlier #6, #44 and #47 completion claims are corrected below. No claim of testing a historical released-version record is made: the compatibility test removes the optional field from otherwise-valid current records. |
+
+Two implementation details complete the accepted fixes:
+
+- The post-reply cancellation case exposed a shared-host gap: a shell could return normally with an aborted signal, bypassing drained settlement. The host now checks that signal after return and uses its existing interrupted-settlement path; reversing this leaves the record `uncertain` instead of `settled`.
+- Updating the live retention list must not consume a clear awaiting settlement. The clear moves into the existing pending decisions before its temporary marker is removed; repeated export and later replacement are tested.
+
+Reject the literal #64 phrase promising a ready runtime retry for interrupted DECIDE: its bespoke runtime cannot save that position.
+Two exploratory runs of `pnpm exec vitest run reference/sdlc/code.playbook/captain-process-loss.integration.test.ts -t 'first accepted proposal'` each failed one test with that added assertion; the diagnostic showed `actions: []`, a parked failed state, and the ready shell control `give-up` / `Stop /outer`.
+The requested DECIDE acceptance test confirms the preserved parent and child and truthful delivery facts; the shared-runtime child tests retain their retry assertions.
+No numbered finding is rejected, and no settled item is reopened.
+
+### Closing review verification
+
+Tests use the declared published Cligent 0.26 dependency, with the original local link restored afterward.
+The unchanged dependency-capability check is not repeated; the changed model is checked separately and excluded from the later broad run.
+No live provider run, SLC check, merge or release is repeated for this review.
+
+| Command | Result |
+| --- | --- |
+| `pnpm build` | Both runs passed; the second includes the final TypeScript changes. The four unrelated generated FSM declaration reorderings were restored. |
+| `pnpm exec vitest run --exclude src/recovery-model.test.ts --exclude src/cligent-release-capabilities.test.ts` | 2,212 passed, two stale tests failed, 23 skipped; 90 files passed. All 50 durable-progress cases and 81 package-surface checks passed. The two corrected files passed below; unchanged files were not rerun. |
+| `pnpm exec vitest run reference/sdlc/captain.playbook/captain.playbook.integration.test.ts reference/sdlc/code.playbook/playbook-captain.test.ts` | 406 passed after correcting both stale tests. |
+| `pnpm exec vitest run src/recovery-model.test.ts` | One passed: six explored scenarios and eight rejected violations. |
+| `pnpm exec vitest run reference/sdlc/code.playbook/session-snapshot-compatibility.integration.test.ts` | Five passed. |
+| `pnpm exec vitest run src/role-runtime-transition.test.ts -t 'never reassesses delivered output\|traces a continued transition'` | Four passed. |
+| `pnpm exec vitest run reference/sdlc/code.playbook/playbook-captain.test.ts -t 'preserves a decided clear'` | Two passed, with and without progress writes. |
+| `pnpm exec vitest run reference/sdlc/code.playbook/captain-process-loss.integration.test.ts -t 'first accepted proposal'` | One passed. |
+| `pnpm exec vitest run reference/sdlc/code.playbook/durable-progress.integration.test.ts -t carried-after-reply` | One passed after fixing the shared late-cancellation boundary. |
+| `pnpm exec spex lint` | Zero errors. |
+| `node scripts/check-links.mjs` | All checked relative links resolve. |
+
+Earlier feedback, all addressed before the final check:
+
+- Snapshot fixture: two runs each passed three and failed two; one diagnostic run failed one selected case. The fake adapter lacked a continuation token; fixed.
+- First extended process run: 13 passed and one failed. Three later selected runs failed while establishing the post-reply cancellation point; they exposed the host's normal-return cancellation gap. The corrected case passed.
+- DECIDE fixture: three setup failures from an incorrect parent-classifier reply; corrected. Two exploratory ready-action assertions failed and were removed because the real interrupted bespoke runtime has no checkpoint for retry.
+- The broad run found two stale tests: a source-text check required the old formatting, and an abandonment fixture replaced the authoritative ledger with empty history during presentation. The source check now asserts one writer without depending on formatting; the fixture keeps history monotonic while checking that the disposed runtime’s evidence remains in the report. Both affected suites passed all 406 tests afterward.
+- The first reversal harness stopped before its second mutation because its text anchor had the wrong indentation. The first case had failed as expected, its bytes were restored, and the remaining cases ran after correcting the anchor.
+
+### Closing review reversal evidence
+
+Each check below temporarily removed the named fix or introduced the stated defect, ran the exact command, and restored the implementation bytes.
+All 15 final reversal checks failed for the intended reason.
+The older T7 position-source mutation was rerun against the new exact empty action-list assertion.
+Completion storage trimming and report trimming are separate checks.
+
+| Finding / case | Reversal | Observed failure | Command |
+| --- | --- | --- | --- |
+| #62 | Compare the canonical export to the raw stored snapshot. | All five cases fail with `restored Captain snapshot changed before the Boss turn`. | `pnpm exec vitest run reference/sdlc/code.playbook/session-snapshot-compatibility.integration.test.ts` |
+| #29 replies | Remove report preparation from the common presentation boundary. | All six SDK/CLI variants fail: one split segment instead of two; no carried-edit report. | `pnpm exec vitest run reference/sdlc/code.playbook/durable-progress.integration.test.ts -t 'carried-cancel.*(command\|decision-error\|malformed)'` |
+| #29 shown reply | Restore the aborted-turn prefix reset. | Saved prefix is `0` instead of `1` after a shown reply. | `pnpm exec vitest run reference/sdlc/code.playbook/durable-progress.integration.test.ts -t carried-after-reply` |
+| #29 late cancellation | Remove the shared host's signal check after normal shell return. | Record remains `uncertain` instead of `settled`. | `pnpm exec vitest run reference/sdlc/code.playbook/durable-progress.integration.test.ts -t carried-after-reply` |
+| #63 live list | Capture the live root during progress. | No-earlier-work case returns `ok` instead of `rejected`; earlier-work case adopts the new task instead of `Earlier task`. | `pnpm exec vitest run reference/sdlc/code.playbook/durable-progress.integration.test.ts -t live-retain` |
+| #63 clear | Delete the root-clear marker without retaining its pending decision. | Two failures: clear absent from the first or second settlement export. | `pnpm exec vitest run reference/sdlc/code.playbook/playbook-captain.test.ts -t 'preserves a decided clear'` |
+| #51 delivery | Remove the single delivery write. | All three return paths export no `delivered: true`. | `pnpm exec vitest run src/role-runtime-transition.test.ts -t 'never reassesses delivered output'` |
+| #51 assessment | Ignore delivery when offering assessment. | All three paths advertise `retry:adjudication` instead of `[]`. | `pnpm exec vitest run src/role-runtime-transition.test.ts -t 'never reassesses delivered output'` |
+| #51 validation | Remove literal-true validation. | All three cases accept the invalid snapshot instead of rejecting it. | `pnpm exec vitest run src/role-runtime-transition.test.ts -t 'never reassesses delivered output'` |
+| T7 position source | Attach results to any matching checkpoint. | Exact action list contains `retry:START` / `Continue from saved result` instead of `[]`. | `pnpm exec vitest run reference/sdlc/code.playbook/durable-progress.integration.test.ts -t consumed-result` |
+| #65 DECIDE | Remove DECIDE's acceptance callback. | Stack is `['outer']` instead of `['outer','decide']`. | `pnpm exec vitest run reference/sdlc/code.playbook/captain-process-loss.integration.test.ts -t 'first accepted proposal'` |
+| #65 deferred | Remove the bound deferred-continuation callback. | Callback called zero times instead of once. | `pnpm exec vitest run src/role-runtime-transition.test.ts -t 'traces a continued transition'` |
+| #65 completion clear | Ignore the report's retained-root clears. | The completed root's retained generation remains present. | `pnpm exec vitest run reference/sdlc/code.playbook/durable-progress.integration.test.ts -t completed-clear` |
+| T9 completion text | Trim the shell's saved completion description. | Saved description loses its leading space and trailing newline. | `pnpm exec vitest run reference/sdlc/code.playbook/durable-progress.integration.test.ts -t completed-exact` |
+| #65 report text | Trim the description while composing the recovery report. | The exact `/flow stopped with a failure.  The task needs a different approach.\n` line is absent. | `pnpm exec vitest run reference/sdlc/code.playbook/durable-progress.integration.test.ts -t completed-exact` |
+
+### Prior review decisions
 
 All numbered findings are accepted; two implementation details in the proposed recipe are rejected below because they would lose known behavior.
 The previous review record below is historical and is superseded by these decisions.
 
 | Finding | Decision and result |
 | --- | --- |
-| #6 | Accept: one count owner, defined by playbook-captain-20. |
+| #6 | Accept: the earlier change defined one count owner, but left item 19 contradictory; that remaining clause is corrected in the closing review. |
 | #15 | Accept: real process tests cover the missing inputs, consumed results, repeat crashes, validation and generation ownership. |
 | #29 | Accept D5: report carried edits after the last accepted, non-aborted reply; cancellation leaves that prefix unchanged. |
 | #30 | Accept D2: child lifetime begins at the runtime's input-acceptance callback, including cancellation and an unavailable description. |
 | #36 | Accept: every application sharing the store must upgrade before running this version. |
 | #42 | Accept: correct the decision links in both projects; withdraw the earlier SLC rebuttal. SLC's fallback acceptance rules are amended by its controller-discrimination decision. |
-| #44 | Accept: the specification now requires fenced adoption to show the leaf's players; existing code and adoption tests already do so. |
+| #44 | Accept: existing code and tests showed the players, but items 47, 54 and 55 remained contradictory; they are rewritten in the closing review. |
 | #45 | Accept P5: publish the bounded effect-reference union and the shared discard predicate. |
-| #47 | Accept D3/D4: progress writes facts and positions, never durable retained generations; all discard decisions use one predicate. |
+| #47 | Accept D3/D4: durable retention and discard were corrected; progress still predicted live retention offers. Closing-review #63 removes that prediction and preserves pending clears. |
 | #48 | Accept D1/D3: remove the interruption marker; record the source step at the store write. |
 | #50 | Accept P4: reports name the configured command. |
 | #51 | Accept D3: attach output only to the position saved at that step's start. |
@@ -69,7 +149,7 @@ R7 is applied to the last change to each check's inputs, not unrelated later edi
 The model and dependency-capability checks are therefore excluded from repeated broad runs; their unchanged earlier results are identified separately.
 No live provider run is repeated because these tests exercise the changed host and persistence boundaries directly.
 
-### Final verification
+### Prior verification
 
 The final production build used the declared Cligent 0.26 dependency; the original local dependency link is restored after verification.
 No merge, release or existing-commit rewrite is performed.
@@ -100,7 +180,7 @@ Earlier feedback during this revision:
 - First broad run: 2,186 passed, seven failed, 23 skipped. It exposed the discarded failed-action result and stale expectations for thrown operations, messages, exports, snapshot defaults and internal read counts. The final broad run above passes all of these.
 - First spec check after moving the old review: four citation errors; corrected before the final check.
 
-### Reversal evidence
+### Prior reversal evidence
 
 Each row temporarily changed the stated behavior, ran the exact command, then restored the implementation bytes.
 These were local reversals or injected violations of existing protections, not additional committed implementations.
