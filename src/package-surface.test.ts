@@ -1298,6 +1298,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       '_internal',
       'assertPlaybookCaptainUnresolvedEffects',
       'assertPlaybookCaptainShellSnapshot',
+      'projectUnresolvedEffects',
       'createPlaybookCaptainShell',
       'default',
     ],
@@ -1306,6 +1307,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'assertCaptainSessionExecutionCompatible',
       'attachSessionHints',
       'createSessionStore',
+      'isUncertainTurnDiscardable',
       'defaultSessionsDir',
       'openSessionStore',
       'projectCaptainSessionStructure',
@@ -1418,6 +1420,8 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookFailureErrorEvidence',
       'PlaybookFailureEvidence',
       'PlaybookFailurePaths',
+      'PlaybookRecoveryCheckpoint',
+      'PlaybookRecoveryOffer',
       'PlaybookPendingBossQuestion',
       'PlaybookPendingCall',
       'PlaybookPorts',
@@ -1432,6 +1436,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookRepositoryPreExistingChanges',
       'PlaybookRepositoryReceipt',
       'PlaybookSession',
+      'PlaybookStepRecord',
       'PlaybookState',
       'PlaybookStateValue',
       'PlaybookSuspendedCall',
@@ -1627,6 +1632,8 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
     './playbook-captain': [
       '_internal',
       'PlaybookCaptainDeps',
+      'ProgressChange',
+      'InterruptedReport',
       'PlaybookCaptainFrameSnapshot',
       'PlaybookCaptainRegistryEntry',
       'PlaybookCaptainRegistryEntryV3',
@@ -1637,9 +1644,11 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCaptainShell',
       'PlaybookCaptainShellSnapshot',
       'PlaybookCaptainUnresolvedEffect',
+      'PlaybookCaptainUnresolvedEffectReference',
       'PlaybookHostConstructionCapabilities',
       'assertPlaybookCaptainUnresolvedEffects',
       'assertPlaybookCaptainShellSnapshot',
+      'projectUnresolvedEffects',
       'createPlaybookCaptainShell',
       'default',
     ],
@@ -1666,6 +1675,8 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'SessionHistory',
       'SessionManifest',
       'SessionRecovery',
+      'SessionStep',
+      'SessionProgressChange',
       'SessionReplayCheckpoint',
       'SessionRetentionUpdate',
       'SessionSnapshot',
@@ -1678,6 +1689,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'assertCaptainSessionExecutionCompatible',
       'attachSessionHints',
       'createSessionStore',
+      'isUncertainTurnDiscardable',
       'defaultSessionsDir',
       'openSessionStore',
       'projectCaptainSessionStructure',
@@ -2292,8 +2304,9 @@ async function consume(): Promise<void> {
     await observeGitRepository('/repo');
   // @ts-expect-error a receipt classification is not a declared disposition
   await captureRepositoryReceipt(observation, { allowedDispositions: ['multiple-commits'] });
-  // @ts-expect-error the facade carries no lease acquisition
-  capabilities.repository.acquire;
+  const claim = await capabilities.repository.acquire({ signal });
+  await claim.assertOwner();
+  await claim.release();
   // @ts-expect-error the facade carries no cohort transaction
   capabilities.repository.runCohort;
   // @ts-expect-error the facade carries no session lease

@@ -215,14 +215,17 @@ before registry import, host creation, or agent work.
 
 ## Choosing the Captain agent
 
-Every session-Captain call and adjudication call is hidden and runs
-tool-free, which is what keeps the Captain deciding and reporting
-instead of doing the work itself. Claude and Gemini enforce that at the
+Ordinary Captain decisions, replies, question checks and adjudication are hidden and tool-free.
+Claude and Gemini enforce the tool restriction at the
 provider level. The Codex, Kimi, and OpenCode adapters cannot — they
 reject any tool list — so a `captain:` using one of them falls back to a
 prompt-level restriction
 ([DR-013](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/013-routing-only-captain-control.md) A1).
 Those adapters remain good choices for *players*, where full tools are wanted.
+
+Recovery preparation is separate: Captain may use its configured tools and permissions to repair prerequisites for the paused step, within the existing task.
+It may not finish the specialist’s task or invent a decision; discarding work or rewriting history requires your explicit instruction.
+Preparation has a 150-second limit.
 
 Adapter readiness is intentionally light: `claude` is ready with local
 Claude Code auth or `ANTHROPIC_API_KEY`; `codex` with local Codex CLI
@@ -271,8 +274,7 @@ compatible ordinary reopen. A selected session keeps its stored catalog,
 player roster, role bindings, adapter, instruction, permissions, and working
 directory; only model, effort, and fast mode may change. The next call reapplies
 both complete model and effort selections and the optional effective fast-mode
-boolean. An uncertain retry accepts no tuning overlay and uses the exact
-attempted settings already stored with that turn.
+boolean. An uncertain retry accepts no tuning overlay and only restores and reports the recorded attempt. Later turns use the current compatible settings.
 
 ## Session storage
 

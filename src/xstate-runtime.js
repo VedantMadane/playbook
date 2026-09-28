@@ -351,6 +351,7 @@ export function snapshotPlaybookSession(session) {
         callPlaybook: capturedPort(portDescriptors, 'callPlaybook'),
         emitStatus: capturedPort(portDescriptors, 'emitStatus'),
         emitTelemetry: capturedPort(portDescriptors, 'emitTelemetry'),
+        ...(portDescriptors.recordStep === undefined ? {} : { recordStep: capturedPort(portDescriptors, 'recordStep') }),
     });
     const playerSessions = hasPlayerSessions
         ? capturedSessionStore(sessionDescriptors)
@@ -1102,6 +1103,20 @@ function unresolvedSemanticEvidence(reason, evidence, cause = assertPlaybookFail
  * repository fact is inferred from that prose or from the semantic candidate.
  */
 export function reconcilePlaybookSemanticEvidence(input) {
+    let report;
+    try {
+        report = snapshotJsonValue(input.semanticCandidate, 'semantic candidate');
+    }
+    catch (error) {
+        semanticCandidateStructureError(`must be detached plain JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (isRecord(report) && Object.keys(report).length === 1 &&
+        typeof report.blocked === 'string' && report.blocked.trim().length > 0) {
+        return unresolvedSemanticEvidence('no-matching-outcome', retainedSemanticEvidence(report, input.finalText), assertPlaybookFailureCause({
+            code: 'runtime-defect',
+            evidence: { reason: `No declared outcome matches: ${report.blocked}` },
+        }));
+    }
     const { candidate, outcome } = snapshotSemanticCandidate(input.semanticCandidate, input.outcomes);
     const evidence = retainedSemanticEvidence(candidate, input.finalText);
     const finalText = typeof input.finalText === 'string' ? input.finalText.trim() : undefined;
@@ -1256,6 +1271,7 @@ function effectBoundary(value, index) {
         'baseline',
         'after',
         'physicalReceipt',
+        'restored',
         'finalText',
         'semanticCandidate',
         'initialSemanticCandidate',
@@ -1314,6 +1330,15 @@ function effectBoundary(value, index) {
     }
     if (own(value, 'finalText') && typeof value.finalText !== 'string') {
         throw new TypeError(`${path}.finalText must be a string`);
+    }
+    if (own(value, 'restored')) {
+        const restored = effectObservation(value.restored, `${path}.restored`);
+        if (!jsonValuesEqual(restored, baseline) ||
+            !isRecord(value.physicalReceipt) || after?.head !== baseline.head ||
+            value.dispositions.some((item) => item !== 'unchanged') ||
+            value.cohortId !== undefined || value.logicalOperationId !== undefined) {
+            throw new TypeError(`${path}.restored requires a standalone read-only call restored exactly without commit movement`);
+        }
     }
     if (own(value, 'initialSemanticCandidate')) {
         if (!own(value, 'semanticCandidate') ||
@@ -1578,6 +1603,7 @@ export function isPlaybookEffectLedgerMonotonicExtension(baselineValue, currentV
     const boundaryEvidenceKeys = [
         'after',
         'physicalReceipt',
+        'restored',
         'finalText',
         'initialSemanticCandidate',
     ];
@@ -1698,6 +1724,7 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         'retainedEffectSourceSessionId',
         'retainedEffectReconciliation',
         'failedEffectAttempt',
+        'recoveryCheckpoint',
         'suspendedCall',
     ], 'runtime snapshot');
     let suspendedCall;
@@ -1862,6 +1889,27 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         }
         failedEffectAttempt = Object.freeze({ boundaryPrefix, attemptId });
     }
+    let recoveryCheckpoint;
+    if (own(snapshot, 'recoveryCheckpoint')) {
+        const checkpoint = snapshot.recoveryCheckpoint;
+        if ((state.stateId !== 'failed' && pendingBossQuestions.length === 0) || !isRecord(checkpoint)) {
+            throw new TypeError('runtime recoveryCheckpoint requires an interrupted state and an object');
+        }
+        rejectUnknownKeys(checkpoint, ['stateId', 'prompt', 'machine', 'boundaryPrefix', 'result', 'id', 'delivered'], 'runtime recoveryCheckpoint');
+        const stateId = requireNonEmptyString(checkpoint.stateId, 'recoveryCheckpoint.stateId');
+        const prompt = requireNonEmptyString(checkpoint.prompt, 'recoveryCheckpoint.prompt');
+        const boundaryPrefix = checkpoint.boundaryPrefix;
+        if (!Number.isSafeInteger(boundaryPrefix) || typeof boundaryPrefix !== 'number' ||
+            boundaryPrefix < 0 || boundaryPrefix > effectLedger.boundaries.length ||
+            !isRecord(checkpoint.machine) || checkpoint.machine.status !== 'active' ||
+            checkpoint.machine.value !== stateId) {
+            throw new TypeError('runtime recoveryCheckpoint has an invalid machine or boundary prefix');
+        }
+        if (own(checkpoint, 'delivered') && checkpoint.delivered !== true) {
+            throw new TypeError('recoveryCheckpoint.delivered must be true');
+        }
+        recoveryCheckpoint = Object.freeze({ stateId, prompt, boundaryPrefix, machine: snapshotJsonValue(checkpoint.machine), ...(own(checkpoint, 'id') ? { id: effectUuid(checkpoint.id, 'recoveryCheckpoint.id') } : {}), ...(own(checkpoint, 'result') ? { result: snapshotJsonValue(checkpoint.result) } : {}), ...(checkpoint.delivered === true ? { delivered: true } : {}) });
+    }
     const fields = {
         playbookId,
         machine,
@@ -1879,6 +1927,7 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         ...(failedEffectAttempt === undefined
             ? {}
             : { failedEffectAttempt }),
+        ...(recoveryCheckpoint === undefined ? {} : { recoveryCheckpoint }),
     };
     return Object.freeze({
         schemaVersion: 4,
@@ -2718,6 +2767,9 @@ export function createNestedPlaybookBridge(options) {
         actorLogic,
         getPendingCall: () => pendingIdentity(current),
         getSuspendedCall: () => suspendedIdentity(current),
+        checkpointCall: (child) => current && current.callId === child.callId && current.input.playbookId === child.playbookId
+            ? { ...child, stateId: current.input.stateId, text: current.input.text, ...(current.turnId === undefined ? {} : { turnId: current.turnId }) }
+            : undefined,
         prepareRestore(call) {
             // Capture the complete host-owned descriptor before observing or
             // mutating bridge state, so a rejected preparation cannot leave state.

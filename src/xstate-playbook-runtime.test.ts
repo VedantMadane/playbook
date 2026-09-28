@@ -8,7 +8,7 @@
 // defaults (entry event, parked-state classifier, prompt composition,
 // adjudication, statuses).
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -28,6 +28,7 @@ import type {
   PlaybookRuntime,
   PlaybookRuntimeSnapshot,
   PlaybookSession,
+  PlaybookStepRecord,
   PlaybookTraceEvent,
   PlayerSessionStore,
   PlayerResult,
@@ -1897,9 +1898,10 @@ describe('player + script workflow over the shared factory', () => {
     expect(suspended.state.stateId).toBe('awaitBossReply');
     expect(statuses.slice(-3)).toEqual([
       { message: '→ needsBossReply' },
-      { message: 'coder asks: Which database should I use?' },
+      { message: 'coder asks: Which database should I use?', data: { kind: 'boss-question' } },
       {
         message: '◆ awaiting Boss reply · implement · coder · WF-1',
+        data: { kind: 'boss-question' },
       },
     ]);
 
@@ -6299,6 +6301,7 @@ describe('parked-session snapshot over the shared factory', () => {
     const playerScript: PlayerResult[] = [
       { status: 'error', error: 'source failed' },
       { status: 'error', error: 'source retry failed' },
+      { status: 'error', error: 'adopted retry failed' },
     ];
     const { ports, telemetry } = makeRecordingPorts({
       callPlayer: async () => {
@@ -6367,7 +6370,8 @@ describe('parked-session snapshot over the shared factory', () => {
         key: 'target-retry',
         signal: new AbortController().signal,
       }),
-    ).toMatchObject({ disposition: 'rejected' });
+    ).toMatchObject({ disposition: 'failed', error: { message: 'adopted retry failed' } });
+    expect(playerScript).toHaveLength(0);
     const targetApplyTraces = telemetry
       .map(({ payload }) => payload as PlaybookTraceEvent)
       .filter(
@@ -7317,29 +7321,6 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       },
     );
 
-    // DR-034's companion standing guard. A recoverable failure state whose
-    // artifact names no retry source is recoverable only while its process
-    // lives, and the engine cannot say so for a third-party artifact — so
-    // the repository says it for the artifacts it maintains, and a re-link
-    // that drops the declaration fails here rather than in a continued
-    // session. The source is a member of the deterministic entry event, so
-    // this binds an artifact that declares one; a controller playbook whose
-    // parked entry is a mapped union has no such event and no host that
-    // reads its actions.
-    it.each(artifacts)('%s declares its retry source where it can fail', (
-      path,
-      source,
-    ) => {
-      if (!source.includes('createXStatePlaybookRuntime(')) return;
-      if (!source.includes('entryEvent:')) return;
-      const fsmSource = readFileSync(
-        new URL(path.replace('.playbook.ts', '.fsm.ts'), root),
-        'utf8',
-      );
-      if (!/\n\s{4}failed: \{/.test(fsmSource)) return;
-      expect(source).toContain('contextField:');
-    });
-
     // The `_internal` clause of link.md §Output, matched to what each machine
     // actually does: a playbook that calls players exposes the player
     // composer; a controller that calls none exposes no stub under that name.
@@ -7558,7 +7539,42 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it('advertises no retry when the failure state refuses the recorded event', async () => {
+  // Non-JSON in-memory context intentionally has no invocation checkpoint.
+  const eventOnlyMachine = (source: typeof workflowMachine) => createMachine({
+    ...source.config,
+    context: (...args: any[]) => ({
+      ...(typeof source.config.context === 'function' ? (source.config.context as Function)(...args) : source.config.context),
+      ephemeral: () => undefined,
+    }),
+  } as any, source.implementations);
+  const eventOnlyFactory = createXStatePlaybookRuntime(eventOnlyMachine(workflowMachine), workflowSpec);
+  const eventOnlyRuntime = (options: WorkflowOptions) => eventOnlyFactory(governedRuntimeConstruction(options, 'factory-test', []));
+
+  it('keeps foreign completed work out of a pending question recovery offer', async () => {
+    const construction = governedRuntimeConstruction({}, 'factory-test');
+    const capabilities = construction.hostCapabilities!;
+    let ledgerOverride: PlaybookEffectLedger | undefined;
+    const runtime = createWorkflowRuntimeFactory({ ...construction, hostCapabilities: {
+      ...capabilities,
+      effectLedger: { ...capabilities.effectLedger, snapshot: () => ledgerOverride ?? capabilities.effectLedger.snapshot() },
+    } });
+    const { ports } = makeRecordingPorts({
+      callPlayer: async () => ({ status: 'ok', finalText: 'Which database should I use?' }),
+      callJudge: async () => '{"guard":"needsBossReply"}',
+    });
+    await runtime.init(makeSession(ports));
+    await runtime.handleBossInput(turn('build storage'));
+    const ledger = capabilities.effectLedger.snapshot();
+    const { logicalOperationId, ...own } = ledger.boundaries.at(-1)!;
+    ledgerOverride = assertPlaybookEffectLedger({ ...ledger, revision: ledger.revision + 1, boundaries: [...ledger.boundaries, {
+      ...own, sequence: own.sequence + 1, boundaryId: randomUUID(), runtimeSessionId: randomUUID(), playbookId: 'foreign', sourceStateId: 'foreign-step', callId: 'foreign-call', finalText: 'Foreign private result',
+    }] });
+    expect(runtime.describe!().recovery?.evidence).toMatchObject({ savedPlayerText: 'Which database should I use?' });
+    expect(JSON.stringify(runtime.describe!().recovery)).not.toContain('Foreign private result');
+    await runtime.dispose();
+  });
+
+  it.each([true, false])('offers a retry for a refused event only with a captured step (checkpoint=%s)', async (checkpoint) => {
     let playerCalls = 0;
     const { ports } = makeRecordingPorts({
       callPlayer: async () => {
@@ -7574,18 +7590,18 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
         return '{"guard":"needsBossReply"}';
       },
     });
-    const runtime = createWorkflowRuntime({});
+    const runtime = checkpoint ? createWorkflowRuntime({}) : eventOnlyRuntime({});
     await runtime.init(makeSession(ports));
     await runtime.handleBossInput(turn('build storage'));
     const failedRun = await runtime.handleBossInput(turn('use sqlite'));
     expect(failedRun.outcome).toBe('failed');
 
-    // The recorded last classified event is BOSS_REPLY, which the failure
-    // state does not accept — no retry entry, no invented substitute.
+    // The recorded BOSS_REPLY is refused by failed; the captured invocation
+    // still retries the exact continuation, including its answer.
     const view = runtime.describe!();
     expect(view.state.stateId).toBe('failed');
     expect(view.lastError).toMatchObject({ message: 'resume crashed' });
-    expect(view.actions.map(({ id }) => id)).toEqual(['jump:implement']);
+    expect(view.actions.map(({ id }) => id)).toEqual(checkpoint ? ['retry:START', 'jump:implement'] : ['jump:implement']);
     await runtime.dispose();
   });
 
@@ -7614,8 +7630,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       { id: 'jump:implement', label: 'Resume from: implement state', standing: 'ready' },
     ]);
 
-    // The recovery input rides the machine snapshot the host already
-    // persists, so nothing is added to the snapshot for it.
+    // DR-069 adds the interrupted invocation beside the parked machine.
     const snapshot = source.exportSnapshot!()!;
     expect(Object.keys(snapshot).sort()).toEqual([
       'effectLedger',
@@ -7623,6 +7638,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       'machine',
       'pendingBossQuestions',
       'playbookId',
+      'recoveryCheckpoint',
       'roleResumeTokens',
       'schemaVersion',
       'sequences',
@@ -7649,7 +7665,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await restored.dispose();
   });
 
-  it('recovers a failure reached after a Boss reply, which the recorded event cannot', async () => {
+  it.each([true, false])('recovers a failure reached after a Boss reply, which the recorded event cannot (checkpoint=%s)', async (checkpoint) => {
     const makePorts = () => {
       let playerCalls = 0;
       return makeRecordingPorts({
@@ -7672,27 +7688,27 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       });
     };
 
-    // The recorded event is the reply that resumed the work, which the
-    // failure state refuses — so the recorded source advertises no retry at
-    // all, in its own live process.
+    // The invocation checkpoint recovers even when the recorded reply is
+    // not accepted by the failure state.
     const { ports: recordedPorts } = makePorts();
-    const recorded = createWorkflowRuntime({});
+    const recorded = checkpoint ? createWorkflowRuntime({}) : eventOnlyRuntime({});
     await recorded.init(makeSession(recordedPorts));
     await recorded.handleBossInput(turn('build storage'));
     // At the wait the question is pending on every surface.
     expect(recorded.describe!().pendingQuestions).toHaveLength(1);
-    expect(recorded.exportSnapshot!()!.pendingBossQuestions).toHaveLength(1);
+    if (checkpoint) expect(recorded.exportSnapshot!()!.pendingBossQuestions).toHaveLength(1);
     expect((await recorded.handleBossInput(turn('use sqlite'))).outcome).toBe(
       'failed',
     );
     expect(recorded.describe!().actions.map(({ id }) => id)).toEqual([
+      ...(checkpoint ? ['retry:START'] : []),
       'jump:implement',
     ]);
     // The answered question the failure state retains in context is not
     // pending: the view and the snapshot agree with the gated state
     // telemetry, so a mirroring shell can settle this parked record.
     expect(recorded.describe!().pendingQuestions).toEqual([]);
-    expect(recorded.exportSnapshot!()!.pendingBossQuestions).toEqual([]);
+    if (checkpoint) expect(recorded.exportSnapshot!()!.pendingBossQuestions).toEqual([]);
     await recorded.dispose();
 
     // The declared source names the entry text the machine still holds, so
@@ -7710,6 +7726,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       { id: 'jump:implement', label: 'Resume from: implement state', standing: 'ready' },
     ]);
     const snapshot = declared.exportSnapshot!()!;
+    if (!checkpoint) delete snapshot.recoveryCheckpoint;
     expect(snapshot.pendingBossQuestions).toEqual([]);
     await declared.dispose();
 
@@ -7723,10 +7740,10 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       key: 'reply-path-retry',
       signal: sigOf(),
     });
-    expect(receipt.disposition).toBe('executed');
+    expect(receipt.disposition).toBe(checkpoint ? 'executed' : 'rejected');
     expect(
       receipt.disposition === 'executed' ? receipt.run.outcome : undefined,
-    ).toBe('terminal');
+    ).toBe(checkpoint ? 'terminal' : undefined);
     await restored.dispose();
   });
 
@@ -7773,8 +7790,8 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it('excludes the declared retry when its member holds no text instead of falling back to the record', async () => {
-    const createUnsourcedRuntime = createXStatePlaybookRuntime(workflowMachine, {
+  it.each([true, false])('offers a retry without an entry payload only with a captured invocation (checkpoint=%s)', async (checkpoint) => {
+    const createUnsourcedRuntime = createXStatePlaybookRuntime(checkpoint ? workflowMachine : eventOnlyMachine(workflowMachine), {
       ...workflowSpec,
       label: 'unsourced-workflow',
       // Declared, but naming a member this machine never populates.
@@ -7794,10 +7811,10 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     expect((await runtime.handleBossInput(turn('build it'))).outcome).toBe(
       'failed',
     );
-    // The recorded event would have produced `retry:START` here; a declared
-    // source that cannot be read excludes the candidate rather than
-    // reaching for a record a restored process would not have.
+    // The invocation checkpoint supplies the original input independently
+    // of the absent entry context field; no replacement text is invented.
     expect(runtime.describe!().actions.map(({ id }) => id)).toEqual([
+      ...(checkpoint ? ['retry:START'] : []),
       'jump:implement',
     ]);
     await runtime.dispose();
@@ -7818,6 +7835,8 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       'jump:implement',
     ]);
     const snapshot = source.exportSnapshot!()!;
+    // Older snapshots retain the original process-local fallback contract.
+    delete snapshot.recoveryCheckpoint;
     await source.dispose();
 
     const restored = createWorkflowRuntime({}, snapshot.effectLedger);
@@ -7843,10 +7862,9 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     expect(failedRun.outcome).toBe('failed');
 
     // The live context gained the required input: excluded flips to
-    // included; the recorded entry event is retryable from failed.
+    // included; the non-JSON context cannot provide an invocation checkpoint.
     const view = runtime.describe!();
     expect(view.actions).toEqual([
-      { id: 'retry:START', label: 'Retry: implement state', standing: 'ready' },
       { id: 'jump:implement', label: 'Resume from: implement state', standing: 'ready' },
     ]);
     // Sanitized JSON-safe context: the raw Error entry is normalized, the
@@ -7867,11 +7885,9 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  // PBRT-71 / DR-040 §4: a jump out of the failure state restarts the failed
-  // attempt's work exactly as the retry does, so the same replay fence gates
-  // it. A machine whose root accepts BOSS_INTERRUPT made the ungated jump the
-  // one control that could still replay a possibly-effectful player call.
-  it('fences failure-state jumps with the retry unless every boundary of the failed attempt is unchanged', async () => {
+  // A jump can repeat earlier work, while checkpoint retry resumes only the
+  // stopped invocation. The whole-attempt fence therefore gates only the jump.
+  it('fences failure-state jumps while allowing retry of a later unchanged step', async () => {
     // Commit-authorized implement state, so a resolved commit can precede the
     // failure inside the same host attempt.
     const createCommitWorkflowRuntime = createXStatePlaybookRuntime(
@@ -7947,8 +7963,11 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     expect(fenced.receipts()).toEqual(['one-descendant-commit']);
     const fencedView = fenced.runtime.describe!();
     expect(fencedView.state.stateId).toBe('failed');
-    // Neither the retry nor the root interrupt's jump is advertised.
-    expect(fencedView.actions).toEqual([]);
+    // Earlier committed work blocks jumping back, not retrying verification.
+    const verificationRetry = {
+      id: 'retry:step', label: 'Retry: verify state', standing: 'ready',
+    };
+    expect(fencedView.actions).toEqual([verificationRetry]);
     await expect(
       fenced.runtime.apply!({
         actionId: 'jump:implement',
@@ -7965,7 +7984,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await fenced.runtime.dispose();
     const restored = launch({ command: 'false' }, [], snapshot.effectLedger);
     await restored.runtime.restore!(fencedSession, snapshot);
-    expect(restored.runtime.describe!().actions).toEqual([]);
+    expect(restored.runtime.describe!().actions).toEqual([verificationRetry]);
     await expect(
       restored.runtime.apply!({
         actionId: 'jump:implement',
@@ -7973,7 +7992,11 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
         signal: sigOf(),
       }),
     ).resolves.toMatchObject({ disposition: 'rejected' });
+    await expect(restored.runtime.apply!({
+      actionId: 'retry:step', key: 'retry-verification', signal: sigOf(),
+    })).resolves.toMatchObject({ disposition: 'failed', run: { outcome: 'failed' } });
     expect(fencedPlayerCalls).toBe(1);
+    expect(fencedJudge).toHaveBeenCalledOnce();
     await restored.runtime.dispose();
 
     // Open: the player errors over an `unchanged` receipt, so the whole
@@ -8882,7 +8905,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     await runtime.dispose();
   });
 
-  it('labels a guarded BOSS_INTERRUPT retry from its recorded targetId', async () => {
+  it.each([true, false])('labels a guarded BOSS_INTERRUPT retry from its recorded targetId (checkpoint=%s)', async (checkpoint) => {
     const interruptMachine = createMachine({
       id: 'interrupt-retry',
       context: { lastError: undefined as unknown },
@@ -8957,7 +8980,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     },
   );
     const createInterruptRuntime = createXStatePlaybookRuntime(
-      interruptMachine,
+      checkpoint ? interruptMachine : eventOnlyMachine(interruptMachine as any),
       {
         label: 'interrupt-retry',
         compat: { artifactSchema: 3, runtimeAbi: RUNTIME_ABI },
@@ -8992,16 +9015,9 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
 
     const failed = await runtime.handleBossInput(turn('take the second route'));
     expect(failed.outcome).toBe('failed');
-    expect(runtime.describe!().actions).toContainEqual({
-      id: 'retry:BOSS_INTERRUPT',
-      label: 'Retry: secondRoute state',
-      standing: 'ready',
-    });
-    expect(runtime.describe!().actions).not.toContainEqual({
-      id: 'retry:BOSS_INTERRUPT',
-      label: 'Retry: firstRoute state',
-      standing: 'ready',
-    });
+    expect(runtime.describe!().actions).toEqual(checkpoint ? [{
+      id: 'retry:step', label: 'Retry: secondRoute state', standing: 'ready',
+    }] : []);
     await runtime.dispose();
   });
 
@@ -9335,7 +9351,7 @@ describe('action labels never fall back to an identifier (PBRT-52)', () => {
     await runtime.dispose();
   });
 
-  it('labels a retry from its source description rather than the target id', async () => {
+  it('offers no retry without an invocation checkpoint', async () => {
     const retryMachine = createMachine({
       id: 'rm',
       initial: 'ready',
@@ -9369,11 +9385,7 @@ describe('action labels never fall back to an identifier (PBRT-52)', () => {
 
     const view = runtime.describe!();
     expect(view.state.stateId).toBe('failed');
-    expect(view.actions).toEqual([
-      { id: 'retry:START', label: 'Retry: failed state', standing: 'ready' },
-    ]);
-    expect(view.actions[0]!.label).not.toContain('plain');
-    expect(view.actions[0]!.label).not.toContain('START');
+    expect(view.actions).toEqual([]);
     await runtime.dispose();
   });
 });
@@ -10914,6 +10926,13 @@ describe('parallel profile over the shared factory (DR-067)', () => {
       ]),
     );
 
+    expect(statuses.filter(({ message }) =>
+      message.includes(' asks: ') || message.startsWith('◆ awaiting Boss reply'),
+    )).toHaveLength(4);
+    expect(statuses.filter(({ data }) =>
+      (data as { kind?: string } | undefined)?.kind === 'boss-question',
+    )).toHaveLength(4);
+
     // A reply that names no question is refused without moving the FSM.
     await expect(
       runtime.handleBossInput(turn('Use the faster one.')),
@@ -10960,11 +10979,30 @@ describe('parallel profile over the shared factory (DR-067)', () => {
             }),
     });
     const source = createPairRuntimeFactory(host.construction);
-    const sourcePorts = makeRecordingPorts(script());
+    const steps: PlaybookStepRecord[] = [];
+    const sourcePorts = makeRecordingPorts({
+      ...script(),
+      recordStep: async (step, position) => {
+        steps.push(step);
+        // A single-invocation checkpoint cannot represent two active lanes.
+        // Both starts/results still survive; a crash takes the safe exit.
+        expect(position).toBeUndefined();
+      },
+    });
     const session = makeSession(sourcePorts.ports);
     await source.init(session);
     await source.handleBossInput(turn('Pick a cache design.'));
     const snapshot = source.exportSnapshot!()!;
+    expect(
+      steps.filter(({ result }) => result === undefined)
+        .map(({ stateId }) => stateId).sort(),
+    ).toEqual(['askAlpha', 'askBeta']);
+    expect(
+      steps.filter(({ result }) => result !== undefined)
+        .map(({ stateId }) => stateId).sort(),
+    ).toEqual(['askAlpha', 'askBeta']);
+    expect(new Set(steps.map(({ id }) => id)).size).toBe(2);
+    expect(snapshot.recoveryCheckpoint).toBeUndefined();
     expect(snapshot.state.activeStateIds).toEqual([
       'proposals',
       'waitAlpha',
@@ -10992,6 +11030,122 @@ describe('parallel profile over the shared factory (DR-067)', () => {
         .exportSnapshot!()!
         .pendingBossQuestions.map(({ questionId }) => questionId),
     ).toEqual(['askBeta']);
+    await restored.dispose();
+  });
+
+  it('keeps a resumed proposal position unavailable after its sibling has completed', async () => {
+    const host = cohortHost();
+    let alphaCalls = 0;
+    const positions: Array<PlaybookRuntimeSnapshot | undefined> = [];
+    const { ports } = makeRecordingPorts({
+      callPlayer: async (roleId) => ({
+        status: 'ok',
+        finalText: roleId === 'alpha' && ++alphaCalls === 1
+          ? 'Which cache should I use?'
+          : `${roleId} proposal`,
+      }),
+      callJudge: async (prompt) => prompt.startsWith(PAIR_CLASSIFIER)
+        ? JSON.stringify({ type: 'BOSS_REPLY', questionId: 'askAlpha' })
+        : JSON.stringify({
+            guard: prompt.includes('Which cache should I use?')
+              ? 'needsBossReply' : 'proposed',
+          }),
+      recordStep: async (step, position) => {
+        if (step.result === undefined) positions.push(position);
+      },
+    });
+    const runtime = createPairRuntimeFactory(host.construction);
+    await runtime.init(makeSession(ports));
+    await runtime.handleBossInput(turn('Pick a cache design.'));
+    expect(runtime.exportSnapshot!()!.state.activeStateIds).toEqual([
+      'betaComplete', 'proposals', 'waitAlpha',
+    ]);
+    await expect(runtime.handleBossInput(turn('Use Redis.')))
+      .resolves.toMatchObject({ outcome: 'terminal' });
+    expect(host.cohortCalls).toHaveLength(1);
+    expect(host.exclusiveCalls).toEqual(['askAlpha']);
+    expect(positions).toEqual([undefined, undefined, undefined]);
+    await runtime.dispose();
+  });
+
+  it('retries a saved sequential step after a parallel join without repeating either proposal', async () => {
+    const config = cloneMachineConfig(pairMachine.config);
+    config.states.proposals.onDone.target = 'followUp';
+    config.states.followUp = {
+      tags: ['playbook.busy'],
+      meta: roleMeta('followUp', 'alpha'),
+      invoke: {
+        src: 'player',
+        input: {
+          stateId: 'followUp',
+          role: 'alpha',
+          sourceItem: 'PAIR-3',
+          prompt: 'Finish the selected proposal.',
+          result: { proposed: 'Output shall include `proposal: <verbatim final text>`.' },
+        },
+        onDone: { target: 'done' },
+        onError: {
+          target: 'failed',
+          actions: assign({ lastError: ({ event }: any) => event.error }),
+        },
+      },
+    };
+    const createRuntime = createXStatePlaybookRuntime(createMachine(config), {
+      ...pairSpec,
+      roleStates: {
+        ...pairSpec.roleStates,
+        followUp: { role: 'alpha', label: 'followUp state' },
+      },
+      outcomeAuthority: {
+        governedPlayerStates: {
+          ...pairSpec.outcomeAuthority!.governedPlayerStates,
+          followUp: { proposed: PAIR_OUTCOMES.proposed },
+        },
+      },
+    });
+    const host = cohortHost();
+    const prompts: string[] = [];
+    const positions: Array<PlaybookRuntimeSnapshot | undefined> = [];
+    let followUpCalls = 0;
+    const { ports } = makeRecordingPorts({
+      callPlayer: async (roleId, prompt) => {
+        prompts.push(prompt);
+        if (prompt === 'Finish the selected proposal.' && ++followUpCalls === 1) {
+          return { status: 'error', error: 'Temporary connection failure' };
+        }
+        return { status: 'ok', finalText: `${roleId} proposal` };
+      },
+      callJudge: async () => JSON.stringify({ guard: 'proposed' }),
+      recordStep: async (step, position) => {
+        if (step.result === undefined) positions.push(position);
+      },
+    });
+    const session = makeSession(ports);
+    const source = createRuntime(host.construction);
+    await source.init(session);
+    await expect(
+      source.handleBossInput(turn('Pick a cache design.')),
+    ).resolves.toMatchObject({ outcome: 'failed' });
+    expect(positions.slice(0, 2)).toEqual([undefined, undefined]);
+    expect(positions[2]?.recoveryCheckpoint?.stateId).toBe('followUp');
+    const snapshot = JSON.parse(
+      JSON.stringify(source.exportSnapshot!()!),
+    ) as PlaybookRuntimeSnapshot;
+    expect(snapshot.recoveryCheckpoint?.stateId).toBe('followUp');
+    await source.dispose();
+
+    const restored = createRuntime(host.construction);
+    await restored.restore!(session, snapshot);
+    expect(prompts).toHaveLength(3);
+    expect(restored.describe!().actions).toContainEqual({
+      id: 'retry:step', label: 'Retry: followUp state', standing: 'ready',
+    });
+    await expect(restored.apply!({
+      actionId: 'retry:step', key: 'retry-follow-up', signal: new AbortController().signal,
+    })).resolves.toMatchObject({ disposition: 'executed', run: { outcome: 'terminal' } });
+    expect(host.cohortCalls).toHaveLength(1);
+    expect(host.exclusiveCalls).toEqual(['followUp', 'followUp']);
+    expect(prompts).toHaveLength(4);
     await restored.dispose();
   });
 

@@ -598,6 +598,7 @@ export function snapshotPlaybookSession(
     callPlaybook: capturedPort(portDescriptors, 'callPlaybook'),
     emitStatus: capturedPort(portDescriptors, 'emitStatus'),
     emitTelemetry: capturedPort(portDescriptors, 'emitTelemetry'),
+    ...(portDescriptors.recordStep === undefined ? {} : { recordStep: capturedPort(portDescriptors, 'recordStep') }),
   });
   const playerSessions = hasPlayerSessions
     ? capturedSessionStore(sessionDescriptors)
@@ -1364,12 +1365,11 @@ export type PlaybookReconciledSemanticOutput = Readonly<
 /** Retained presentation and semantic evidence, kept separate from output. */
 export interface PlaybookRetainedSemanticEvidence {
   readonly finalText?: string;
-  readonly semanticCandidate: Readonly<Record<string, string>> & {
-    readonly guard: string;
-  };
+  readonly semanticCandidate: Readonly<Record<string, string>>;
 }
 
 export type PlaybookSemanticReconciliationReason =
+  | 'no-matching-outcome'
   | 'missing-presentation-evidence'
   | 'missing-repository-receipt'
   | 'invalid-repository-receipt'
@@ -1468,7 +1468,7 @@ function snapshotSemanticCandidate(
 }
 
 function retainedSemanticEvidence(
-  candidate: Readonly<Record<string, string>> & { readonly guard: string },
+  candidate: Readonly<Record<string, string>>,
   finalText: unknown,
 ): PlaybookRetainedSemanticEvidence {
   return Object.freeze({
@@ -1654,6 +1654,23 @@ function unresolvedSemanticEvidence(
 export function reconcilePlaybookSemanticEvidence(
   input: PlaybookSemanticEvidenceInput,
 ): PlaybookSemanticReconciliation {
+  let report: JsonValue;
+  try {
+    report = snapshotJsonValue(input.semanticCandidate, 'semantic candidate');
+  } catch (error) {
+    semanticCandidateStructureError(`must be detached plain JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (isRecord(report) && Object.keys(report).length === 1 &&
+      typeof report.blocked === 'string' && report.blocked.trim().length > 0) {
+    return unresolvedSemanticEvidence(
+      'no-matching-outcome',
+      retainedSemanticEvidence(report as Readonly<Record<string, string>>, input.finalText),
+      assertPlaybookFailureCause({
+        code: 'runtime-defect',
+        evidence: { reason: `No declared outcome matches: ${report.blocked}` },
+      }),
+    );
+  }
   const { candidate, outcome } = snapshotSemanticCandidate(
     input.semanticCandidate,
     input.outcomes,
@@ -1859,6 +1876,7 @@ function effectBoundary(value: unknown, index: number): PlaybookEffectBoundary {
       'baseline',
       'after',
       'physicalReceipt',
+      'restored',
       'finalText',
       'semanticCandidate',
       'initialSemanticCandidate',
@@ -1938,6 +1956,15 @@ function effectBoundary(value: unknown, index: number): PlaybookEffectBoundary {
   }
   if (own(value, 'finalText') && typeof value.finalText !== 'string') {
     throw new TypeError(`${path}.finalText must be a string`);
+  }
+  if (own(value, 'restored')) {
+    const restored = effectObservation(value.restored, `${path}.restored`);
+    if (!jsonValuesEqual(restored as unknown as JsonValue, baseline as unknown as JsonValue) ||
+        !isRecord(value.physicalReceipt) || after?.head !== baseline.head ||
+        (value.dispositions as string[]).some((item) => item !== 'unchanged') ||
+        value.cohortId !== undefined || value.logicalOperationId !== undefined) {
+      throw new TypeError(`${path}.restored requires a standalone read-only call restored exactly without commit movement`);
+    }
   }
   if (own(value, 'initialSemanticCandidate')) {
     if (
@@ -2359,6 +2386,7 @@ export function isPlaybookEffectLedgerMonotonicExtension(
   const boundaryEvidenceKeys = [
     'after',
     'physicalReceipt',
+    'restored',
     'finalText',
     'initialSemanticCandidate',
   ] as const;
@@ -2567,6 +2595,7 @@ export function assertPlaybookRuntimeSnapshot(
       'retainedEffectSourceSessionId',
       'retainedEffectReconciliation',
       'failedEffectAttempt',
+      'recoveryCheckpoint',
       'suspendedCall',
     ],
     'runtime snapshot',
@@ -2854,6 +2883,27 @@ export function assertPlaybookRuntimeSnapshot(
     }
     failedEffectAttempt = Object.freeze({ boundaryPrefix, attemptId });
   }
+  let recoveryCheckpoint: PlaybookRuntimeSnapshot['recoveryCheckpoint'];
+  if (own(snapshot, 'recoveryCheckpoint')) {
+    const checkpoint = snapshot.recoveryCheckpoint;
+    if ((state.stateId !== 'failed' && pendingBossQuestions.length === 0) || !isRecord(checkpoint)) {
+      throw new TypeError('runtime recoveryCheckpoint requires an interrupted state and an object');
+    }
+    rejectUnknownKeys(checkpoint, ['stateId', 'prompt', 'machine', 'boundaryPrefix', 'result', 'id', 'delivered'], 'runtime recoveryCheckpoint');
+    const stateId = requireNonEmptyString(checkpoint.stateId, 'recoveryCheckpoint.stateId');
+    const prompt = requireNonEmptyString(checkpoint.prompt, 'recoveryCheckpoint.prompt');
+    const boundaryPrefix = checkpoint.boundaryPrefix;
+    if (!Number.isSafeInteger(boundaryPrefix) || typeof boundaryPrefix !== 'number' ||
+        boundaryPrefix < 0 || boundaryPrefix > effectLedger.boundaries.length ||
+        !isRecord(checkpoint.machine) || checkpoint.machine.status !== 'active' ||
+        checkpoint.machine.value !== stateId) {
+      throw new TypeError('runtime recoveryCheckpoint has an invalid machine or boundary prefix');
+    }
+    if (own(checkpoint, 'delivered') && checkpoint.delivered !== true) {
+      throw new TypeError('recoveryCheckpoint.delivered must be true');
+    }
+    recoveryCheckpoint = Object.freeze({stateId, prompt, boundaryPrefix, machine: snapshotJsonValue(checkpoint.machine), ...(own(checkpoint, 'id') ? { id: effectUuid(checkpoint.id, 'recoveryCheckpoint.id') } : {}), ...(own(checkpoint, 'result') ? { result: snapshotJsonValue(checkpoint.result) } : {}), ...(checkpoint.delivered === true ? { delivered: true as const } : {})});
+  }
   const fields = {
     playbookId,
     machine,
@@ -2871,6 +2921,7 @@ export function assertPlaybookRuntimeSnapshot(
     ...(failedEffectAttempt === undefined
       ? {}
       : { failedEffectAttempt }),
+    ...(recoveryCheckpoint === undefined ? {} : { recoveryCheckpoint }),
   };
   return Object.freeze({
     schemaVersion: 4,
@@ -3004,6 +3055,7 @@ export interface NestedPlaybookBridge<
   confirmRestore(): void;
   /** Complete durable identity; undefined until a normal or restored call suspends. */
   getSuspendedCall(): PlaybookSuspendedCall | undefined;
+  checkpointCall(child: PlaybookPendingCall): PlaybookSuspendedCall | undefined;
   resume(input: {
     callId: string;
     result: PlaybookCallResult;
@@ -4102,6 +4154,9 @@ export function createNestedPlaybookBridge<
     actorLogic,
     getPendingCall: () => pendingIdentity(current),
     getSuspendedCall: () => suspendedIdentity(current),
+    checkpointCall: (child) => current && current.callId === child.callId && current.input.playbookId === child.playbookId
+      ? { ...child, stateId: current.input.stateId, text: current.input.text, ...(current.turnId === undefined ? {} : { turnId: current.turnId }) }
+      : undefined,
     prepareRestore(call) {
       // Capture the complete host-owned descriptor before observing or
       // mutating bridge state, so a rejected preparation cannot leave state.

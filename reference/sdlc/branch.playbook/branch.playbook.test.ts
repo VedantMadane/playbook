@@ -499,6 +499,7 @@ describe('linked BRANCH runtime', () => {
         state: { stateId: 'failed' },
       });
       expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
+        ...(repositoryEffect === 'worktree' ? ['retry:restored-step'] : []),
         'reconcile:unresolved-effect',
         'abandon:unresolved-effect',
       ]);

@@ -3556,7 +3556,7 @@ const capabilities: WorktreeHostCapabilities =
 exactKeys(capabilities, ['repository', 'effectLedger'], 'capabilities');
 exactKeys(
   capabilities.repository,
-  ['identity', 'observe', 'runExclusive', 'runDeferred'],
+  ['identity', 'observe', 'acquire', 'runExclusive', 'runDeferred'],
   'repository',
 );
 exactKeys(capabilities.effectLedger, ['snapshot', 'writeAhead'], 'effect ledger');
@@ -3699,8 +3699,11 @@ check(
   !existsSync(join(repo, '.git', 'playbook-effect-claims', 'active')),
   'the worktree claim was not released',
 );
-// @ts-expect-error the facade carries no lease acquisition
-capabilities.repository.acquire;
+const claim = await capabilities.repository.acquire();
+await claim.assertOwner();
+await claim.release();
+// @ts-expect-error the worktree claim carries no session lease
+claim.sessionLease;
 // @ts-expect-error the facade carries no cohort transaction
 capabilities.repository.runCohort;
 `;

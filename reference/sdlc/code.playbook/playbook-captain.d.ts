@@ -1,6 +1,6 @@
 import { type Captain, type CaptainSession, type TuningSelection } from '@sublang/cligent/tmux-play';
 import type { Effort, PermissionPolicy } from '@sublang/cligent';
-import type { JsonValue, PlaybookEffectLedger, PlaybookEffectLedgerCommandBatch, PlaybookControlAction, PlaybookFailureCause, PlaybookRuntime, PlaybookRuntimeSnapshot } from '@sublang/playbook/runtime';
+import type { JsonValue, PlaybookEffectLedger, PlaybookEffectLedgerCommandBatch, PlaybookControlAction, PlaybookFailureCause, PlaybookRuntime, PlaybookRuntimeSnapshot, PlaybookStepRecord } from '@sublang/playbook/runtime';
 import { type CaptainControllerPort } from '../captain.playbook/captain.playbook.js';
 import type { PlaybookSummaryPolicy } from './code.registry.js';
 interface SessionAgent {
@@ -34,7 +34,24 @@ interface PlaybookCaptainUnresolvedEffectSettlementInput {
 }
 type SnapshotAgentEnvelope = DeepReadonly<Omit<SessionAgent, 'model' | 'effort' | 'fastMode'>>;
 type PlayerLedgerSnapshotEntry = DeepReadonly<PlayerLedgerEntry>;
+export interface ProgressChange {
+    snapshot?: PlaybookCaptainShellSnapshot | null;
+    step?: Omit<PlaybookStepRecord, 'kind'> & {
+        kind: PlaybookStepRecord['kind'] | 'preparation' | 'completion' | 'answer';
+        runtimeSessionId: string;
+        playbookId: string;
+    };
+}
+export interface InterruptedReport {
+    text: string;
+    effects: readonly PlaybookCaptainUnresolvedEffect[];
+    retentionUpdates?: readonly PlaybookCaptainRetentionUpdate[];
+    unresolvedEffects?: readonly PlaybookCaptainUnresolvedEffect[];
+}
 export interface PlaybookCaptainDeps {
+    /** Stop the host's active turn, including admitted tool calls, on preparation expiry or a required save failure. */
+    abortPreparation?: (reason?: string) => void;
+    recordProgress?: (change: ProgressChange) => Promise<void>;
     continuity?: {
         beforeCall(participantId: string): Promise<void>;
         acknowledged(participantId: string, token: string): void;
@@ -137,6 +154,8 @@ export interface PlaybookCaptainFrameSnapshot {
     readonly depth: number;
     readonly parentSessionId?: string;
     readonly parentCallId?: string;
+    readonly request?: string;
+    readonly inputs?: readonly string[];
     readonly options: JsonValue;
     readonly roleBindings: Readonly<Record<string, string>>;
     readonly runtime: DeepReadonly<PlaybookRuntimeSnapshot>;
@@ -144,6 +163,7 @@ export interface PlaybookCaptainFrameSnapshot {
 interface PlaybookCaptainShellSnapshotFields {
     readonly schemaVersion: 4;
     readonly effectLedger: DeepReadonly<PlaybookEffectLedger>;
+    readonly presentedEffectPrefix?: number;
     readonly captain: {
         readonly sessionId: string;
         readonly runtime: DeepReadonly<PlaybookRuntimeSnapshot>;
@@ -158,7 +178,7 @@ interface PlaybookCaptainShellSnapshotFields {
         readonly journal: number;
     };
     readonly journal: readonly PlaybookCaptainJournalRecord[];
-    readonly lastAction?: 'respond' | 'start' | 'switch' | 'resume' | 'dismiss' | 'deliver' | 'runtime';
+    readonly lastAction?: 'respond' | 'start' | 'switch' | 'resume' | 'dismiss' | 'deliver' | 'runtime' | 'recover';
     readonly lastSettlementStatus?: 'ok' | 'rejected' | 'failed';
 }
 /**
@@ -242,6 +262,8 @@ export interface PlaybookCaptainShell extends Captain {
      * `handleBossTurn` (CAPTAIN-7).
      */
     submitShellAction?(actionId: string): string;
+    /** Report an interrupted attempt without dispatching work. */
+    selectInterruptedReport?(input: string, report: InterruptedReport): void;
 }
 /**
  * Whether words may stand outside a code span in a statement the shell says
@@ -282,6 +304,14 @@ declare function bossReport(statements: readonly (string | BossStatement)[], rea
 export declare function assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[];
 /** Validate, detach, and freeze one untrusted shell snapshot. */
 export declare function assertPlaybookCaptainShellSnapshot(value: unknown): PlaybookCaptainShellSnapshot;
+export type PlaybookCaptainUnresolvedEffectReference = {
+    readonly kind: 'boundary';
+    readonly boundaryId: string;
+} | {
+    readonly kind: 'logical-operation';
+    readonly operationId: string;
+};
+export declare const projectUnresolvedEffects: (ledger: PlaybookEffectLedger, references: readonly PlaybookCaptainUnresolvedEffectReference[]) => readonly PlaybookCaptainUnresolvedEffect[];
 export declare function createPlaybookCaptainShell(options: unknown, deps?: PlaybookCaptainDeps): PlaybookCaptainShell;
 export declare const _internal: {
     failureStatement: typeof failureStatement;

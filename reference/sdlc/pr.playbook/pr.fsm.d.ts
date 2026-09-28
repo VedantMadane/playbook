@@ -162,18 +162,18 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
     readonly answer: string;
     readonly questionId?: "openPullRequest";
 }, {
-    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<ScriptOutput, ScriptInput, import("xstate").EventObject>> | undefined;
+    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<ScriptOutput, ScriptInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>> | undefined;
 }, {
-    src: "playbook";
-    logic: import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>;
-    id: string | undefined;
-} | {
     src: "player";
     logic: import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>;
     id: string | undefined;
 } | {
     src: "script";
     logic: import("xstate").PromiseActorLogic<ScriptOutput, ScriptInput, import("xstate").EventObject>;
+    id: string | undefined;
+} | {
+    src: "playbook";
+    logic: import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>;
     id: string | undefined;
 }, {
     type: "playbook.acceptedOutcome";

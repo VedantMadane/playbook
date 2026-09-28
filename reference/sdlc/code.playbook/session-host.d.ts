@@ -48,7 +48,7 @@ export interface OpenSessionHostOptions {
   readonly store?: SharedSessionStore;
   readonly sessionsDir?: string;
   readonly sessionId?: string;
-  readonly mode?: 'new' | 'continue' | 'retry';
+  readonly mode?: 'new' | 'continue' | 'retry' | 'recover';
   readonly cwd?: string;
   readonly config?: SessionExecutionProjection;
   readonly plan?: any;
@@ -98,6 +98,9 @@ export interface SessionHostController {
    */
   submitShellAction(actionId: string): Promise<SessionRecovery>;
   retry(): Promise<SessionRecovery>;
+  /** Restore and report recorded uncertainty without running work; settled pauses require Boss input. Never discards work.
+   * After this live controller becomes uncertain, dispose and reopen with mode:'recover' first. */
+  recover(input?: string): Promise<SessionRecovery>;
   dispose(): Promise<void>;
 }
 export declare function openSessionHost(options: OpenSessionHostOptions): Promise<SessionHostController>;

@@ -113,6 +113,18 @@ export interface SessionStructuralProjection {
   readonly players: readonly Readonly<Record<string, any>>[];
   readonly catalog: Readonly<Record<string, any>>;
 }
+export interface SessionStep {
+  readonly id: string;
+  readonly kind: 'player' | 'captain' | 'script' | 'preparation' | 'completion' | 'answer';
+  readonly stateId: string;
+  readonly runtimeSessionId: string;
+  readonly playbookId: string;
+  readonly result?: unknown;
+}
+export interface SessionProgressChange {
+  readonly snapshot?: SessionSnapshot | null;
+  readonly step?: SessionStep;
+}
 export interface SessionRecovery {
   readonly schemaVersion: 6;
   readonly kind: 'captain-session';
@@ -135,6 +147,7 @@ export interface SessionRecovery {
     readonly markedAt: string;
     readonly attemptedExecutionProjection: SessionExecutionProjection;
     readonly abandonment?: Readonly<Record<string, any>>;
+    readonly progress?: { readonly snapshot: SessionSnapshot | null; readonly steps: readonly SessionStep[]; readonly positionStepId?: string | null };
   };
 }
 export interface SessionReplayCheckpoint {
@@ -215,6 +228,7 @@ export interface PlaybookSessionLifecycle extends PlaybookSessionLease {
   abandonFreshSettled(options: { expected: SessionRecovery }): Promise<boolean>;
   beginTurn(options: { input: string; attemptId: string; attemptedExecutionProjection: SessionExecutionProjection }): Promise<SessionRecovery>;
   beginRetry(options: { expectedAttemptId: string; nextAttemptId: string }): Promise<SessionRecovery>;
+  recordProgress(change: SessionProgressChange): Promise<void>;
   settle(options: { attemptId: string; snapshot: SessionSnapshot; unresolvedEffects: readonly SessionUnresolvedEffect[]; retentionUpdates?: readonly SessionRetentionUpdate[] }): Promise<SessionRecovery>;
   discard(options: { attemptId: string }): Promise<SessionRecovery | undefined>;
   beginUnresolvedEffectAbandonment(options: any): Promise<any>;
@@ -255,3 +269,6 @@ export declare function validateCaptainSessionExecutionProjection(value: unknown
 export declare function validateCaptainSessionStructuralProjection(value: unknown): SessionStructuralProjection;
 export declare function assertCaptainSessionExecutionCompatible(structural: SessionStructuralProjection, execution: SessionExecutionProjection): SessionExecutionProjection;
 export declare function attachSessionHints(snapshot: SessionSnapshot, hints: SessionHints): SessionSnapshot;
+
+/** Whether discarding an uncertain turn restores its untouched baseline. */
+export declare function isUncertainTurnDiscardable(record: SessionRecovery): boolean;

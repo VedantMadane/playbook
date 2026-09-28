@@ -515,7 +515,13 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
         initialized = true;
         return {
           abortActiveTurn: (...args) => host.abortActiveTurn(...args),
-          runBossTurn: (...args) => host.runBossTurn(...args),
+          async runBossTurn(...args) {
+            try { return await host.runBossTurn(...args); }
+            catch (error) {
+              if (created.getInterruptedSettlement?.(activeTurn?.attemptId)) return;
+              throw error;
+            }
+          },
           async dispose() {
             try {
               await host.dispose();
@@ -594,6 +600,13 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
         throw new Error('managed interactive turn prompt changed after write-ahead');
       }
       if (terminal.type !== 'turn_finished') {
+        // The shared Captain boundary saves drained recovery before reporting
+        // cancellation. Keep the pane open only when that save succeeded.
+        if ((await lease.read())?.state === 'settled') {
+          await replayChannel?.reportIfIncomplete();
+          activeTurn = undefined;
+          return;
+        }
         throw new Error(
           'managed interactive Captain turn aborted; durable state remains uncertain',
         );

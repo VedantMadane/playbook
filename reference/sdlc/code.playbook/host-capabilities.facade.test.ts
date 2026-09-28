@@ -233,6 +233,7 @@ describe('createWorktreeHostCapabilities (playbook-cli-88)', () => {
       'repository',
     ]);
     expect(Object.keys(capabilities.repository).sort()).toEqual([
+      'acquire',
       'identity',
       'observe',
       'runDeferred',
@@ -504,6 +505,25 @@ describe('exclusive governed calls (playbook-cli-88)', () => {
     expect(reconcileFor(result.receipt, 'one-descendant-commit').status).toBe(
       'resolved',
     );
+  });
+
+  it('excludes governed calls while preparation holds the public claim', async () => {
+    const repo = await makeRepo('preparation-claim');
+    const capabilities = await capabilitiesFor(repo.dir);
+    const claim = await capabilities.repository.acquire();
+    await claim.assertOwner();
+    let called = false;
+    try {
+      await expect(capabilities.repository.runExclusive({
+        signal: AbortSignal.timeout(40), effectBoundary: seed(['unchanged']),
+        operation: async () => { called = true; }, completeEffectBoundary: () => ({}),
+      })).rejects.toThrow();
+      expect(called).toBe(false);
+      expect(capabilities.effectLedger.snapshot().boundaries).toHaveLength(0);
+    } finally { await claim.release(); }
+    await expect(claim.assertOwner()).rejects.toThrow();
+    await runBoundary(capabilities, ['unchanged'], async () => { called = true; });
+    expect(called).toBe(true);
   });
 
   it('serializes overlapping calls in invocation order with contiguous sequences', async () => {

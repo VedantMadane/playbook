@@ -5,8 +5,12 @@
 
 ## Status
 
+Amended by [DR-073](073-durable-step-progress.md): portable progress records replace continuation points, with one shared discard predicate.
+
 Accepted (2026-09-05).
 Amends [DR-031](031-shared-captain-session-front-ends.md) for embedding-host lifecycle parity, [DR-042](042-shared-session-store-and-replay-stream.md) for manifest ownership, defaults, durable replay status and local hints, [DR-040](040-outcome-authority-effect-reconciliation.md) for token-free deferred-player identity, and [DR-029](029-session-scoped-conversational-captain.md) for definite-rejection-only immediate fresh retry.
+
+Amended by [DR-071](071-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-072](072-host-owned-interrupted-work-settlement.md).
 
 ## Context
 

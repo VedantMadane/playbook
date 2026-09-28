@@ -16,6 +16,6 @@ describe("captain: GEARS↔FSM conformance", () => {
       fileURLToPath(new URL("./captain.gears.md", import.meta.url)),
       'utf8',
     );
-    expect(checkGearsFsmConformance(gears, findMachineConfig(fsm))).toEqual([]);
+    expect(checkGearsFsmConformance(gears, findMachineConfig(fsm), { concurrentRoleSets: fsm.concurrentRoleSets })).toEqual([]);
   });
 });

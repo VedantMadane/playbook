@@ -180,8 +180,8 @@ function classifyControllerTurn(text, _ports, _signal, _snapshotOrState, _bounda
 // the turn as a recoverable hub return with no action executed.
 // ---------------------------------------------------------------------------
 const RESTATED_REPLY_CONTRACT = [
-    'Reply again with exactly one JSON object `{ "action": …, … }` and no other text, selecting exactly one action from the closed set `respond` | `resume` | `start` | `switch` | `dismiss` | `deliver` | `runtime`:',
-    '`{ "action": "respond", "text": … }`, `{ "action": "resume", "playbookId": … }`, `{ "action": "start", "playbookId": …, "input": … }`, `{ "action": "switch", "playbookId": …, "input": … }`, `{ "action": "dismiss" }`, `{ "action": "deliver" }`, or `{ "action": "runtime", "actionId": … }`; every `input` is one nonempty complete standalone request.',
+    'Reply again with exactly one JSON object `{ "action": …, … }` and no other text, selecting exactly one action from the closed set `respond` | `resume` | `start` | `switch` | `dismiss` | `deliver` | `runtime` | `recover`:',
+    '`{ "action": "respond", "text": … }`, `{ "action": "resume", "playbookId": … }`, `{ "action": "start", "playbookId": …, "input": … }`, `{ "action": "switch", "playbookId": …, "input": … }`, `{ "action": "dismiss" }`, `{ "action": "deliver" }`, `{ "action": "runtime", "actionId": … }`, or `{ "action": "recover" }`; every `input` is one nonempty complete standalone request.',
 ].join('\n');
 function correctiveDecisionPrompt(prompt, reason) {
     return [
@@ -276,6 +276,7 @@ function readDecisionReply(reply, options, selfPlaybookId, declaredActions) {
                 },
             };
         }
+        case 'recover':
         case 'dismiss': {
             const shape = requireKeys([]);
             if (shape !== undefined)

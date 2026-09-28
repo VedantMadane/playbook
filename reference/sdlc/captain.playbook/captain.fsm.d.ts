@@ -1,3 +1,4 @@
+export declare const concurrentRoleSets: readonly (readonly string[])[];
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
 };
@@ -8,7 +9,7 @@ export type EnabledPlaybook = {
     readonly intent: string;
 };
 /** The closed controller action set (DR-029, DR-038; stable machine contract). */
-export type DecisionAction = 'respond' | 'resume' | 'start' | 'switch' | 'dismiss' | 'deliver' | 'runtime';
+export type DecisionAction = 'respond' | 'resume' | 'start' | 'switch' | 'dismiss' | 'deliver' | 'runtime' | 'recover';
 /**
  * A deterministic parse-resolved acting decision injected by the host
  * (CAPTAIN-7 parse table): the turn's decision object, entering the decision
@@ -102,7 +103,7 @@ export type CaptainOutput = {
     readonly input: string;
     readonly settlement: SettlementEvidence;
 } | {
-    readonly guard: 'dismiss';
+    readonly guard: 'dismiss' | 'recover';
     readonly settlement: SettlementEvidence;
 } | {
     readonly guard: 'deliver';
@@ -193,6 +194,9 @@ export declare const captainMachine: import("xstate").StateMachine<Context, Boss
     params: unknown;
 } | {
     type: "deliver";
+    params: unknown;
+} | {
+    type: "recover";
     params: unknown;
 } | {
     type: "hasBossTurnText";

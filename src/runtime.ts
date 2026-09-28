@@ -492,6 +492,8 @@ export type PlaybookRunResult =
     };
 
 export interface PlaybookPorts {
+  /** Acknowledge the durable start before work and its result before transition. */
+  recordStep?(step: PlaybookStepRecord, position?: PlaybookRuntimeSnapshot): Promise<void>;
   callPlayer(
     roleId: string,
     prompt: string,
@@ -508,6 +510,7 @@ export interface PlaybookPorts {
     request: PlaybookCallRequest,
     signal: AbortSignal,
   ): Promise<PlaybookCallStart>;
+  /** Mark question presentation with data.kind = "boss-question"; Captain relays it from pendingQuestions. */
   emitStatus(message: string, data?: unknown): Promise<void>;
   emitTelemetry(event: { topic: string; payload: unknown }): Promise<void>;
 }
@@ -639,6 +642,8 @@ export interface PlaybookEffectBoundary {
   readonly baseline: PlaybookRepositoryObservation;
   readonly after?: PlaybookRepositoryObservation;
   readonly physicalReceipt?: PlaybookRepositoryReceipt;
+  /** A later exact restoration permits replay of this standalone read-only call. */
+  readonly restored?: PlaybookRepositoryObservation;
   readonly finalText?: string;
   readonly semanticCandidate?: JsonValue;
   readonly initialSemanticCandidate?: JsonValue;
@@ -655,6 +660,7 @@ export type PlaybookEffectBoundaryStart = Omit<
   | 'attemptNumber'
   | 'after'
   | 'physicalReceipt'
+  | 'restored'
   | 'finalText'
   | 'semanticCandidate'
   | 'initialSemanticCandidate'
@@ -774,7 +780,27 @@ export interface PlaybookRuntimeSnapshot {
     readonly boundaryPrefix: number;
     readonly attemptId: string | null;
   };
+  /** Interrupted invocation, captured before its external call (DR-069). */
+  recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
   suspendedCall?: PlaybookSuspendedCall;
+}
+
+export interface PlaybookRecoveryCheckpoint {
+  readonly id?: string;
+  readonly stateId: string;
+  readonly prompt: string;
+  readonly machine: JsonValue;
+  readonly boundaryPrefix: number;
+  /** Completed actor output supplied by the execution journal on restore. */
+  readonly result?: JsonValue;
+  readonly delivered?: true;
+}
+
+export interface PlaybookStepRecord {
+  readonly id: string;
+  readonly kind: 'player' | 'captain' | 'script';
+  readonly stateId: string;
+  readonly result?: JsonValue;
 }
 
 // DR-063 §3: what running an advertised action would do. `ready` is the only
@@ -805,6 +831,16 @@ export interface PlaybookControlAction {
 // the Boss-appropriate grounding a host may speak from; the state id is
 // internal and is absent from it whenever the runtime's source declares
 // no description for the state it is in.
+export interface PlaybookRecoveryOffer {
+  prompt: string;
+  description?: string;
+  /** Runtime-owned conditions to satisfy; these never authorize task completion. */
+  preparation?: string;
+  /** Saved observations and result choices for diagnosing the stopped step. */
+  evidence?: JsonValue;
+  continuation: { kind: 'reply' } | { kind: 'runtime'; actionId: string };
+}
+
 export interface PlaybookControlView {
   state: PlaybookState;
   stateDescription?: string;
@@ -812,6 +848,8 @@ export interface PlaybookControlView {
   pendingQuestions: readonly PlaybookPendingBossQuestion[];
   lastError?: NormalizedError;
   actions: readonly PlaybookControlAction[];
+  /** Context only for an explicitly authorized Captain preparation call. */
+  recovery?: PlaybookRecoveryOffer;
 }
 
 // DR-029: the receipt `apply()` returns says which of three things
@@ -820,7 +858,7 @@ export interface PlaybookControlView {
 export type PlaybookControlReceipt =
   | { disposition: 'rejected'; reason: string }
   | { disposition: 'executed'; run: PlaybookRunResult }
-  | { disposition: 'failed'; error: NormalizedError };
+  | { disposition: 'failed'; error: NormalizedError; run?: PlaybookRunResult };
 
 // DR-038 §2: link-authored metadata the Captain uses to decide whether a
 // quiescent generation is eligible for retention and whether a root terminal
@@ -838,7 +876,7 @@ export interface PlaybookRuntime {
   // a safe capture point (parked quiescence between public boundaries);
   // `restore` is an alternative to `init` that rehydrates the exported
   // snapshot under the same immutable session identity.
-  exportSnapshot?(): PlaybookRuntimeSnapshot | undefined;
+  exportSnapshot?(checkpoint?: { child?: PlaybookPendingCall }): PlaybookRuntimeSnapshot | undefined;
   restore?(
     session: PlaybookSession,
     snapshot: PlaybookRuntimeSnapshot,
@@ -879,6 +917,8 @@ export interface PlaybookRuntime {
   handleBossInput(turn: {
     text: string;
     signal: AbortSignal;
+    /** Called synchronously just before accepting the event, at most once. */
+    onAccepted?: () => void;
   }): Promise<PlaybookRunResult>;
   resumePlaybookCall(input: {
     callId: string;

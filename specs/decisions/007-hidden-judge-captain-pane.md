@@ -5,7 +5,7 @@
 
 ## Status
 
-Accepted.
+Accepted; question presentation superseded by [DR-070](070-captain-relays-player-questions.md).
 
 ## Context
 

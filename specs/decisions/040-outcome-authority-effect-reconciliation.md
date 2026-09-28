@@ -5,6 +5,10 @@
 
 ## Status
 
+Amended by [DR-073](073-durable-step-progress.md): step results restore only at their saved start; settlement owns retention and reporting, and whole-turn replay is removed.
+
+Amended by [DR-069](069-captain-prepares-step-recovery.md): saved-result assessment and verified read-only restoration permit bounded recovery while preserving immutable physical evidence.
+
 Accepted.
 Refines the registry construction and summary ownership of [DR-009](009-generic-playbook-cli-and-registry.md), transition evidence of [DR-010](010-playbook-session-tracing-and-resume.md), corrective retries of [DR-025](025-resilient-captain-control-adjudication.md) and [DR-028](028-empty-ok-result-re-ask.md), result grounding of [DR-029](029-session-scoped-conversational-captain.md), uncertain recovery of [DR-031](031-shared-captain-session-front-ends.md), failure retry of [DR-034](034-durable-failure-retry-continuity.md), and retained resumption of [DR-038](038-universal-run-resumption.md).
 Refines [DR-005](005-boss-reply-suspension-path.md)'s Boss-reply path for an effect-authorized call by binding the question and its continuation to one cumulative repository operation.
@@ -15,6 +19,8 @@ Preserves [DR-035](035-truthful-terminal-meaning.md) and [DR-037](037-terminal-r
 Amended by [DR-049](049-portable-session-contract.md): deferred-player identity independent of provider tokens.
 Amended by [DR-062](062-pre-existing-changes-are-context.md): a governed call may absorb or alter the pre-existing changes of its baseline within its one commit, recorded as receipt evidence; only a lost pre-existing change and an unattributable delta remain ambiguity.
 Amended by [DR-063](063-failures-explain-themselves.md): a parked failure carries a structured cause beside the bounded unresolved-effect list, and advertised recovery actions carry a standing.
+
+Amended by [DR-071](071-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-072](072-host-owned-interrupted-work-settlement.md).
 
 ## Context
 
@@ -109,7 +115,7 @@ Every reconciled envelope taking neither that final-disposition exit nor the exa
 
 For a player call governed by this decision, [DR-028](028-empty-ok-result-re-ask.md) and [[playbook-runtime-9](../packages/playbook-runtime.md#playbook-runtime-9)] retain their one identical player re-ask only when the call's complete durable receipt proves `unchanged`; an observed, nonzero, incomplete, or ambiguous receipt takes the reconciliation path instead.
 [DR-034](034-durable-failure-retry-continuity.md)'s entry-event retry shall not be advertised from the unresolved state, whose only retry is reconciliation.
-[DR-031](031-shared-captain-session-front-ends.md)'s uncertain-turn recovery shall reconcile every durably started governed boundary since the snapshot that whole-turn retry would restore and shall permit replay only when every boundary has a complete receipt proving `unchanged`; any nonzero, ambiguous, or incomplete boundary shall enter parked reconciliation.
+Under [DR-073](073-durable-step-progress.md), uncertain recovery reconstructs receipts and reports the saved step without whole-turn replay; nonzero, ambiguous or incomplete evidence retains its reconciliation requirements.
 [DR-038](038-universal-run-resumption.md)'s retained generation shall preserve and reenter an unresolved reconciliation state, prevent adopted work from resuming or exposing ordinary actions until every outstanding effect boundary resolves, and prevent a retained pre-effect generation from bypassing the ledger rather than using its duplicate-effect warning as permission to replay the player; explicit unresolved abandonment shall clear that root instead of retaining a turn-start dismissal candidate.
 
 ### 5. Workflow commit outcomes reconcile semantics with effects

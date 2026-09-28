@@ -18,7 +18,7 @@ export type CaptainControllerSelection = {
     /** Complete standalone request synthesized from the remembered Boss conversation. */
     readonly input: CaptainControllerInput;
 } | {
-    readonly action: 'dismiss';
+    readonly action: 'dismiss' | 'recover';
 } | {
     readonly action: 'deliver';
 } | {

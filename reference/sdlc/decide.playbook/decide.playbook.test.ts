@@ -2042,12 +2042,9 @@ describe('DECIDE accepted-outcome consumer', () => {
       ),
     ).toEqual([]);
     expect(statuses.some((status) => status.startsWith('→ '))).toBe(false);
-    // PBRT-77: both proposal boundaries hold a complete `unchanged` cohort
-    // receipt, which excludes any effect, so the unresolved semantics take
-    // the ordinary failure path with its retry — nothing parks.
-    expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
-      'retry:START_DECIDE',
-    ]);
+    // Unchanged receipts permit the ordinary failure path, but the parallel
+    // proposals have no single saved invocation to retry (recovery-3).
+    expect(runtime.describe?.().actions).toEqual([]);
     expect(runtime.unresolvedEffectEnvelopes?.()).toEqual([]);
     await runtime.dispose();
   });
@@ -2311,15 +2308,15 @@ describe('DECIDE automatic-replay effect fence', () => {
     },
   );
 
-  // The compiled root interrupt also targets `synthesizeCommit`, so a failed
-  // merge can be re-run on the promoted proposals without re-proposing —
-  // behind the same replay fence as the retry.
+  // Both the saved-step retry and the authored synthesis jump keep the
+  // completed proposals. Changed repository evidence forbids both.
   it.each([
-    ['proven unchanged', 'unchanged', true],
-    ['not proven unchanged', 'one-descendant-commit', false],
+    ['saved-step retry', 'unchanged', true, 'retry:step'],
+    ['authored jump', 'unchanged', true, 'jump:synthesizeCommit'],
+    ['changed work', 'one-descendant-commit', false, 'retry:step'],
   ] as const)(
-    'offers the synthesis jump from a failed merge only when it is %s',
-    async (_label, classification, expectedJump) => {
+    'preserves the completed proposals when handling %s after a failed merge',
+    async (_label, classification, expectedJump, actionId) => {
       const calls: PlayerCallRecord[] = [];
       let coderCalls = 0;
       const host = createTestEffectHost({
@@ -2362,14 +2359,14 @@ describe('DECIDE automatic-replay effect fence', () => {
       const actionIds = runtime.describe?.().actions.map(({ id }) => id);
       if (!expectedJump) {
         expect(actionIds).not.toContain('jump:synthesizeCommit');
-        expect(actionIds).not.toContain('retry:START_DECIDE');
+        expect(actionIds?.some((id) => id.startsWith('retry:'))).toBe(false);
         await runtime.dispose();
         return;
       }
-      expect(actionIds).toEqual(['retry:START_DECIDE', 'jump:synthesizeCommit']);
+      expect(actionIds).toEqual(['retry:step', 'jump:synthesizeCommit']);
       await expect(
         runtime.apply?.({
-          actionId: 'jump:synthesizeCommit',
+          actionId,
           key: 'rerun-synthesis',
           signal: signal(),
         }),
@@ -2488,7 +2485,7 @@ describe('DECIDE deferred effect continuation', () => {
     };
   }
 
-  it('binds one cumulative operation and uses only its saved continuation', async () => {
+  it('binds the player identity and continues without a provider hint', async () => {
     const fixture = stagedFixture();
     await fixture.init();
 
@@ -2557,11 +2554,13 @@ describe('DECIDE deferred effect continuation', () => {
     ).resolves.toMatchObject({ outcome: 'suspended' });
     expect(fixture.playerCalls.at(-1)?.options.resume).toBe('coder-token-3');
     const continuations = fixture.playerCalls.filter(
-      ({ options }) => options.freshPrompt !== undefined,
-    );
+      ({ roleId }) => roleId === 'coder',
+    ).slice(2);
     expect(continuations).toHaveLength(2);
     for (const call of continuations) {
-      for (const prompt of [call.prompt, call.options.freshPrompt]) {
+      for (const prompt of [call.prompt, call.options.freshPrompt].filter(
+        (value) => value !== undefined,
+      )) {
         expect(prompt).toContain('> Original topic: Choose the durable design.');
         expect(prompt).toContain(
           "> Reviewer's independent proposal: Reviewer proposal",
@@ -4245,12 +4244,9 @@ describe('DECIDE failure causes (DR-063)', () => {
       status: cause,
       snapshot: cause,
     });
-    // PBRT-77: the proposals' complete `unchanged` cohort receipt excludes
-    // any effect, so nothing parks — the failure offers its retry, and a
-    // later turn that leaves it in place keeps the cause bound to it.
-    expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
-      'retry:START_DECIDE',
-    ]);
+    // The parallel proposals have no single invocation checkpoint, so the
+    // failure offers no retry. A no-op turn still preserves its cause.
+    expect(runtime.describe?.().actions).toEqual([]);
     await expect(
       runtime.handleBossInput({ text: '', signal: signal() }),
     ).resolves.toMatchObject({ outcome: 'no-action' });

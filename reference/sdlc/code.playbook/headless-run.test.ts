@@ -2249,6 +2249,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(failed.stdout).toBe('');
     expect(failed.inputs).toEqual([]);
     expect(failed.stderr).toContain('synthetic post-initialization failure');
+    expect(failed.stderr).not.toContain('The latest work is saved.');
     await expect(
       stat(join(sessionsDir, `${firstId}.json`)),
     ).rejects.toMatchObject({ code: 'ENOENT' });
@@ -2259,6 +2260,13 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     });
     expect(retried.result.code).toBe(0);
     expect(retried.inputs).toEqual(['now run']);
+    const refused = await headlessHarness(['run', '--session', firstId, 'never admitted'], {
+      sessionsDir,
+      createHostRuntime: async () => { throw new Error('setup refused for existing session'); },
+    });
+    expect(refused.result.code).toBe(1);
+    expect(refused.stderr).toContain('setup refused for existing session');
+    expect(refused.stderr).not.toContain('The latest work is saved.');
   });
 
   it('starts fresh while the newest settled predecessor lease is live', async () => {
@@ -3105,13 +3113,9 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       },
     );
     expect(retried.result.code).toBe(0);
-    expect(retryPrompts).toHaveLength(1);
-    expect(retryPrompts[0]).toContain('[Boss message]\ncontinue');
-    expect(retried.result.snapshot).toMatchObject({
-      mode: 'engaged.parked',
-      lastAction: 'resume',
-    });
-    expect(lifecycle.adopts).toBe(2);
+    expect(retryPrompts).toHaveLength(0);
+    expect(retried.result.snapshot).toMatchObject({ mode: 'chat', lastAction: 'respond' });
+    expect(lifecycle.adopts).toBe(1);
 
     const adoptionPrompts: string[] = [];
     FakeAdapter.decision = (prompt) => {
@@ -3132,7 +3136,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(adoptionPrompts[0]).toContain(
       'Retained resumptions:\n- code (/code):',
     );
-    expect(lifecycle.adopts).toBe(3);
+    expect(lifecycle.adopts).toBe(2);
     expect(adopted.result.snapshot).toMatchObject({
       mode: 'engaged.parked',
       lastAction: 'resume',
@@ -3663,7 +3667,6 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
     const recordPath = join(sessionsDir, `${firstId}.json`);
-    let replacementWrites = 0;
     const sessionStore = createCaptainSessionStore({
       sessionsDir,
       fsOps: {
@@ -3671,7 +3674,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
           if (
             from.endsWith('.tmp') &&
             to === recordPath &&
-            ++replacementWrites === 2
+            JSON.parse(await readFile(from, 'utf8')).state === 'settled'
           ) {
             throw new Error('synthetic settlement rename failure');
           }
@@ -3870,7 +3873,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(record.snapshot.sequences.turn).toBe(1);
   });
 
-  it('writes uncertainty before effects, refuses implicit replay, and retries exact stored input', async () => {
+  it('writes uncertainty before effects and reports the exact interrupted input without replay', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-uncertain-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -3930,7 +3933,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(refused.stdout).toBe('');
     expect({ reads, hosts }).toEqual({ reads: 0, hosts: 0 });
     expect(refused.stderr).toContain('will not be replayed automatically');
-    expect(refused.stderr).toContain('may duplicate external effects');
+    expect(refused.stderr).toContain('restores and reports without running work');
     expect(refused.stderr).toContain(
       `playbook run --session ${firstId} --retry-uncertain`,
     );
@@ -3964,7 +3967,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       },
     );
     expect(retried.result.code).toBe(0);
-    expect(retried.inputs).toEqual([exactInput]);
+    expect(retried.inputs).toEqual([]);
     expect(reads).toBe(0);
     expect(retryMarker).toMatchObject({
       state: 'uncertain',
@@ -3994,7 +3997,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     );
   });
 
-  it('replays only an all-unchanged multi-attempt suffix and rebases schema-3 frame mirrors', async () => {
+  it('reports an all-unchanged multi-attempt suffix without replay', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-effect-retry-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4146,14 +4149,9 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       },
     );
     expect(retried.result.code, retried.stderr).toBe(0);
-    expect(captainInputs).toEqual([
-      '/code inspect it',
-      'finish recovered review',
-    ]);
-    expect(restoredFrameLedgers).toEqual([
-      { playbookId: 'code', ledger: beforeRetry.effectLedger },
-      { playbookId: 'review', ledger: beforeRetry.effectLedger },
-    ]);
+    expect(captainInputs).toEqual(['/code inspect it']);
+    expect(restoredFrameLedgers).toEqual([]);
+    expect(retried.result.snapshot.mode).toBe('chat');
     expect(retried.result.snapshot.captain.runtime.effectLedger).toEqual(
       emptyPlaybookEffectLedger(),
     );
@@ -4168,7 +4166,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     }
   });
 
-  it('parks when any earlier attempt has a non-unchanged receipt before retry work', async () => {
+  it('settles earlier non-unchanged evidence without replay', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-effect-park-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4283,8 +4281,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       'utf8',
     );
 
-    const captainFactory = vi.fn(scriptedCaptainRuntime([]));
-    const hostFactory = vi.fn();
+    const captainFactory = vi.fn(scriptedCaptainRuntime([], { action: 'recover' }));
     const retried = await headlessHarness(
       ['run', '--session', firstId, '--retry-uncertain'],
       {
@@ -4293,29 +4290,22 @@ describe('durable Captain continuation (PBCLI-24)', () => {
         entryTransform: promoteEntry,
         createAttemptId: () => fourthId,
         createCaptainRuntime: captainFactory,
-        createHostRuntime: hostFactory,
       },
     );
-    expect(retried.result.code).toBe(1);
-    expect(retried.stdout).toBe('');
-    expect(retried.stderr).toContain(ambiguousBoundaryId);
-    expect(retried.stderr).toContain('observation-ambiguous');
-    expect(retried.stderr).toContain('remains parked for reconciliation');
-    expect(captainFactory).not.toHaveBeenCalled();
-    expect(hostFactory).not.toHaveBeenCalled();
-    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).toBe(
-      beforeBytes,
-    );
-    expect(await store.read(firstId)).toMatchObject({
-      state: 'uncertain',
-      uncertain: {
-        attemptId: beforeRetry.uncertain.attemptId,
-        attemptNumber: 2,
-      },
-    });
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainFactory).toHaveBeenCalledOnce();
+    expect(retried.events).toEqual([]);
+    const recovered = await store.read(firstId);
+    expect(recovered.state).toBe('settled');
+    expect(recovered.snapshot.mode).toBe('chat');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
+    expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
+    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
+    expect(recovered.effectLedger).toEqual(beforeRetry.effectLedger);
+    expect(recovered.unresolvedEffects[0].classification).toBe('observation-ambiguous');
   });
 
-  it('parks logical-only deferred progress without reusing the stored Boss turn', async () => {
+  it('settles logical-only progress without reusing the stored Boss turn', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-logical-park-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4428,8 +4418,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       'utf8',
     );
 
-    const captainFactory = vi.fn(scriptedCaptainRuntime([]));
-    const hostFactory = vi.fn();
+    const captainFactory = vi.fn(scriptedCaptainRuntime([], { action: 'recover' }));
     const retried = await headlessHarness(
       ['run', '--session', firstId, '--retry-uncertain'],
       {
@@ -4438,21 +4427,20 @@ describe('durable Captain continuation (PBCLI-24)', () => {
         entryTransform: promoteEntry,
         createAttemptId: () => fourthId,
         createCaptainRuntime: captainFactory,
-        createHostRuntime: hostFactory,
       },
     );
-    expect(retried.result.code).toBe(1);
-    expect(retried.stdout).toBe('');
-    expect(retried.stderr).toContain('deferred logical-operation progress');
-    expect(retried.stderr).toContain('cannot replay the Boss turn');
-    expect(captainFactory).not.toHaveBeenCalled();
-    expect(hostFactory).not.toHaveBeenCalled();
-    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).toBe(
-      beforeBytes,
-    );
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainFactory).toHaveBeenCalledOnce();
+    expect(retried.events).toEqual([]);
+    const recovered = await store.read(firstId);
+    expect(recovered.state).toBe('settled');
+    expect(recovered.snapshot.mode).toBe('chat');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
+    expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
+    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
   });
 
-  it('parks when recovery changes a boundary inside the restorable checkpoint', async () => {
+  it('settles changed evidence inside the old checkpoint without replay', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-prefix-park-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4556,8 +4544,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       'utf8',
     );
 
-    const captainFactory = vi.fn(scriptedCaptainRuntime([]));
-    const hostFactory = vi.fn();
+    const captainFactory = vi.fn(scriptedCaptainRuntime([], { action: 'recover' }));
     const retried = await headlessHarness(
       ['run', '--session', firstId, '--retry-uncertain'],
       {
@@ -4566,20 +4553,20 @@ describe('durable Captain continuation (PBCLI-24)', () => {
         entryTransform: promoteEntry,
         createAttemptId: () => fourthId,
         createCaptainRuntime: captainFactory,
-        createHostRuntime: hostFactory,
       },
     );
-    expect(retried.result.code).toBe(1);
-    expect(retried.stdout).toBe('');
-    expect(retried.stderr).toContain('cannot restore a changed pre-turn boundary');
-    expect(captainFactory).not.toHaveBeenCalled();
-    expect(hostFactory).not.toHaveBeenCalled();
-    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).toBe(
-      beforeBytes,
-    );
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainFactory).toHaveBeenCalledOnce();
+    expect(retried.events).toEqual([]);
+    const recovered = await store.read(firstId);
+    expect(recovered.state).toBe('settled');
+    expect(recovered.snapshot.mode).toBe('chat');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
+    expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
+    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
   });
 
-  it('retries the exact attempted tuning instead of settled or current tuning', async () => {
+  it('restores the attempted tuning without rerunning its input', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-retuned-retry-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -4699,7 +4686,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     );
 
     expect(retried.result.code).toBe(0);
-    expect(retried.inputs).toEqual([attemptedInput]);
+    expect(retried.inputs).toEqual([]);
     expect(retryHost).toMatchObject({
       captainConfig: { model: 'captain-B', fastMode: true },
       players: [

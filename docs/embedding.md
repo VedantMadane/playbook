@@ -258,7 +258,7 @@ const inert = createPlaybookRuntime({
 ```
 
 `createWorktreeHostCapabilities()` requires only that `cwd` exist and returns
-exactly `repository: { identity, observe, runExclusive, runDeferred }` and
+exactly `repository: { identity, observe, acquire, runExclusive, runDeferred }` and
 `effectLedger: { snapshot, writeAhead }`. The governed worktree is bound at
 every governed call and observation rather than fixed at construction: it is
 the canonical root of the nearest Git worktree containing `cwd`, or — when
@@ -279,6 +279,7 @@ CLI uses (process-local until the repository exists, since there is no `.git`
 to publish it in), observe before and after the operation, apply the engine's
 correction-budget `writeAhead` mid-completion, and bind, park, continue, and
 restore deferred Boss questions with the engine's exact checkpoint semantics.
+`acquire({signal})` holds that same worktree claim for preparation checks; call `assertOwner()` before checking and `release()` in `finally`.
 Overlapping calls on one worktree run one at a time, in no guaranteed order.
 A write the ledger rejects after a boundary has started leaves the worktree
 claim quarantined, exactly as it would under `playbook run`: treat that
@@ -413,10 +414,29 @@ Automatic discovery belongs only to the ordinary
 `~/.spex/sessions` profile with no `SPEX_HOME` or `sessions` override; custom
 profiles require an explicit migration request.
 
-For an uncertain session, reopen with `mode:'retry'` and call `retry()`. It uses
-the exact recorded input and attempted configuration. Module-free
-`discardSessionUncertain(shared, sessionId)` restores the prior recovery only
-when no effect-ledger advancement prevents discard.
+Captain may answer a player from the original task when it already answers the question. It reports what it reused, respects later Boss instructions and never sends that original answer twice automatically.
+
+If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
+
+All applications sharing a session store, including Spex and the CLI, must upgrade together before running this version. Hosts through 16.0.x cannot read the extended records.
+
+A single recovery entry point handles either a paused step or an uncertain attempt:
+
+```ts
+const controller = await openSessionHost({ store: shared, sessionId, mode: 'recover' });
+try {
+  const record = await controller.read();
+  await controller.recover(record.state === 'uncertain' ? undefined : bossInstruction);
+} finally { await controller.dispose(); }
+```
+
+For uncertainty it restores the saved position and reports the recorded work using the attempted settings. It runs no player, script or preparation. Boss then chooses an available action or supplies input. Completed results are reused; before repeating unfinished work, Boss must stop any old worker and check outside actions. A runtime without a saved position returns to Captain with work preserved. It never chooses discard. For an already settled pause, `recover(bossInstruction)` requires Boss's instruction or answer and passes it through the same Captain turn as CLI input; an ordinary answer does not force preparation. New input cannot replace an uncertain instruction before recovery.
+
+If a turn fails and leaves this open controller uncertain, dispose it and reopen with `mode:'recover'` before calling `recover()` without new input.
+
+Explicit `mode:'retry'` and `retry()` remain supported. Module-free
+`discardSessionUncertain(shared, sessionId)` restores the prior recovery
+only when `isUncertainTurnDiscardable(record)` returns true: no abandonment, no recorded steps, and a ledger equal to the pre-turn snapshot. Use the same exported predicate to enable a Discard control.
 
 `readHistory()` returns readable history and a damaged boundary, including a
 clearly marked synthetic projection when a validated legacy journal has no

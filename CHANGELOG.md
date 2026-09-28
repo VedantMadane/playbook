@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Bounded Captain preparation and relayed player questions, with automatic recovery only after a stop produced in the same turn. Resuming or adopting an old stop waits for Boss to choose further work.
+- Invocation `recoveryCheckpoint`, `PlaybookRecoveryOffer`, `PlaybookControlView.recovery`, and verified `restored` repository receipts.
+- `exportSnapshot({child})`, input `onAccepted`, a failed action receipt's optional `run`, the checkpoint's `delivered` fact, and shell `presentedEffectPrefix` for carrying mandatory reports across cancellation.
+- Runtime `recordStep` and `PlaybookStepRecord`; session `recordProgress`, `SessionStep`, `SessionProgressChange`, `ProgressChange`, `InterruptedReport`, and `selectInterruptedReport` for saved starts, results, completions and answers.
+- SDK `mode:'recover'` and `recover()`, shared `isUncertainTurnDiscardable`, and `projectUnresolvedEffects` with public `PlaybookCaptainUnresolvedEffectReference`.
+
+### Changed
+
+- **Breaking; requires a major release and coordinated host upgrades.** SDK and CLI save normal step starts and results. Retry restores and reports without repeating work. Discard requires no recorded work or changed repository evidence. Hosts through 16.0.x cannot read the extended records. A record whose stored shell snapshot omits `presentedEffectPrefix` still reopens, retries and recovers, with the omitted prefix read as the ledger boundary count.
+- Retained generations change only at settlement; recovery derives their changes from recorded work, and a progress write offers no mid-turn capture of the live root for resumption.
+
+### Removed
+
+- Whole-playbook retry and `entryEvent.contextField` replay. Failed invocations retry from their saved position; old failures without a checkpoint have no automatic replacement.
+
 ## [16.0.0] - 2026-09-26
 
 ### Added

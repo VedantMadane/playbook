@@ -966,6 +966,7 @@ function buildGovernedJudgePrompt(input, finalText, outcomes, correction) {
         '```',
         '',
         'Pick exactly one declared `guard` and reply with exactly that outcome\'s reply shape below: `guard` plus its semantic-owned fields and nothing else.',
+        'If no declared outcome matches the player output, instead reply exactly {"blocked":"explain the missing outcome or contradictory requirements"}. Never force a match or invent a guard. A blocked reply pauses the playbook for Boss; it is not completion.',
         'A field listed as runtime-supplied is owned by presentation, effect, or runtime evidence; the runtime fills it itself, and a reply that includes one is structurally invalid.',
         '',
     ];
@@ -1045,7 +1046,7 @@ function validateBossReplyOutput(input, output, resumableStateIds) {
     }
 }
 export function createPlayerBridge(spec, ports, getActiveSignal, boundary, onControlPlaneError) {
-    return fromPromise(async ({ input, signal }) => {
+    const execute = async ({ input, signal }) => {
         const activeSignal = combineAbortSignals(signal, getActiveSignal?.());
         let roleId;
         let prompt;
@@ -1113,7 +1114,9 @@ export function createPlayerBridge(spec, ports, getActiveSignal, boundary, onCon
             }
             throw error;
         }
-    });
+    };
+    return fromPromise((args) => spec.run
+        ? spec.run(args.input, args.signal, () => execute(args)) : execute(args));
 }
 // ---------------------------------------------------------------------------
 // Direct-Captain adjudication (slc/link.md §Captain adjudication). The judge
@@ -1975,10 +1978,11 @@ function makeDefaultStatusesForState(roleStates) {
             }
             return [
                 ...statuses,
-                { message: `${askerLabel(pending.asker)} asks: ${pending.question}` },
+                { message: `${askerLabel(pending.asker)} asks: ${pending.question}`, data: { kind: 'boss-question' } },
                 {
                     message: `◆ awaiting Boss reply · ${pending.resumeStateId} · ` +
                         `${askerLabel(pending.asker)} · ${pending.sourceItem}`,
+                    data: { kind: 'boss-question' },
                 },
             ];
         }
@@ -2572,9 +2576,11 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 for (const pending of questions) {
                     statuses.push({
                         message: `${askerLabel(pending.asker)} asks: ${pending.question}`,
+                        data: { kind: 'boss-question' },
                     }, {
                         message: `◆ awaiting Boss reply · ${pending.resumeStateId} · ` +
                             `${askerLabel(pending.asker)} · ${pending.sourceItem}`,
+                        data: { kind: 'boss-question' },
                     });
                 }
                 continue;
@@ -2638,6 +2644,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
         }
         const currentEffectLedger = () => assertPlaybookEffectLedger(effectLedgerCapability.snapshot(), `${label} current host effect ledger`);
         let effectLedgerMirror = currentEffectLedger();
+        let recoveryCheckpoint;
         let retainedEffectSourceSessionId;
         let retainedEffectReconciliation;
         let retainedEffectReconciliationRequired = false;
@@ -2739,12 +2746,6 @@ export function createXStatePlaybookRuntime(machine, spec) {
         let playbookCallSequence = 0;
         let captainCallSequence = 0;
         let applyCallSequence = 0;
-        // DR-029: the last event a public Boss boundary sent into the
-        // machine — classified, deterministic entry, or Boss reply — kept with
-        // its recorded payload so a failure-state retry action can replay the
-        // event that drove the run into `failed`. Process-local: the durable
-        // runtime snapshot does not persist it (PBRT-50).
-        let lastBossEvent;
         // DR-029: process-local at-most-once `apply` execution — the accepted receipt
         // recorded for each idempotency key, returned verbatim on a repeated
         // key. A key whose call settled `rejected` or threw before reaching
@@ -2919,7 +2920,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // cumulative receipt from its original baseline, not by its own step.
         function boundaryExcludesEffect(boundary) {
             return (boundary.logicalOperationId === undefined &&
-                boundary.physicalReceipt?.classification === 'unchanged');
+                (boundary.physicalReceipt?.classification === 'unchanged' || boundary.restored !== undefined));
         }
         function boundaryNeedsSemanticReconciliation(candidate, ledger) {
             if (!runtimeBoundaryIsOwned(candidate))
@@ -2974,7 +2975,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
             const candidate = reconstructedGovernedPrefixSequence === undefined
                 ? owned.at(-1)
                 : owned.find(({ sequence }) => sequence > reconstructedGovernedPrefixSequence);
-            if (candidate === undefined || candidate.sourceStateId !== state.stateId) {
+            if (candidate === undefined || candidate.restored !== undefined || candidate.sourceStateId !== state.stateId) {
                 return;
             }
             const persisted = persistedBoundaryReconciliation(candidate, ledger);
@@ -4090,6 +4091,356 @@ export function createXStatePlaybookRuntime(machine, spec) {
             return (boundaries.length > 0 &&
                 boundaries.every(({ physicalReceipt }) => physicalReceipt?.classification === 'unchanged'));
         }
+        let acceptedStepResult;
+        let requiredRecoveryBaseline;
+        function captureRecoveryCheckpoint(stateId, prompt, boundaryPrefix) {
+            if (requiredRecoveryBaseline !== undefined)
+                return;
+            // Capture after the entry emissions drain: the invocation is now a
+            // real active child in XState's persisted snapshot, before host work.
+            const id = recoveryCheckpoint?.stateId === stateId ? recoveryCheckpoint.id : undefined;
+            recoveryCheckpoint = undefined;
+            if (!actor || currentState().stateId !== stateId)
+                return;
+            try {
+                const current = currentEffectLedger();
+                recoveryCheckpoint = deepFreeze({
+                    stateId,
+                    prompt,
+                    ...(id === undefined ? {} : { id }),
+                    machine: detachPersistedMachineSnapshot(actor.getPersistedSnapshot()),
+                    boundaryPrefix: boundaryPrefix ?? current.boundaries.length,
+                });
+            }
+            catch {
+                // An in-memory-only context is still executable; it simply cannot
+                // promise a durable step retry. Keep the legacy control behavior.
+            }
+        }
+        function stepReplayIsSafe() {
+            if (!recoveryCheckpoint || hasUnresolvedReconciliation())
+                return false;
+            const current = currentEffectLedger();
+            return current.boundaries
+                .slice(recoveryCheckpoint.boundaryPrefix)
+                .every((boundary) => runtimeBoundaryIsOwned(boundary) &&
+                boundary.logicalOperationId === undefined &&
+                (boundary.physicalReceipt?.classification === 'unchanged' || boundary.restored !== undefined));
+        }
+        function repairableReadOnlyBoundary() {
+            if (!recoveryCheckpoint || !repositoryCapability?.observe || !repositoryCapability.acquire ||
+                retainedEffectReconciliationRequired || deferredReconciliationOperationId !== undefined)
+                return undefined;
+            const suffix = currentEffectLedger().boundaries.slice(recoveryCheckpoint.boundaryPrefix);
+            if (suffix.length !== 1)
+                return undefined;
+            const saved = suffix[0];
+            if (!runtimeBoundaryIsOwned(saved) || saved.restored !== undefined ||
+                saved.sourceStateId !== recoveryCheckpoint.stateId || saved.cohortId !== undefined ||
+                saved.logicalOperationId !== undefined || saved.dispositions.some((item) => item !== 'unchanged') ||
+                saved.physicalReceipt === undefined || saved.after?.head !== saved.baseline.head ||
+                saved.physicalReceipt.classification === 'unchanged' ||
+                [...unresolvedSemanticBoundaryIds].some((id) => id !== saved.boundaryId))
+                return undefined;
+            return saved;
+        }
+        async function confirmReadOnlyRestoration(saved, signal) {
+            const claim = await repositoryCapability.acquire({ signal });
+            try {
+                await claim.assertOwner();
+                const restored = snapshotJsonValue(await repositoryCapability.observe());
+                if (!isDeepStrictEqual(restored, saved.baseline)) {
+                    throw new Error(`${label} preparation has not restored the stopped step's repository; it remains paused`);
+                }
+                signal.throwIfAborted();
+                effectLedgerMirror = assertPlaybookEffectLedger(await effectLedgerCapability.writeAhead([
+                    { kind: 'replace-boundaries', replacements: [{ expected: saved, next: { ...saved, restored } }] },
+                ]));
+                if (!isDeepStrictEqual(effectLedgerMirror.boundaries.find(({ boundaryId }) => boundaryId === saved.boundaryId)?.restored, restored)) {
+                    throw new Error(`${label} repository restoration was not durably acknowledged`);
+                }
+                refreshUnresolvedSemanticReconciliation(effectLedgerMirror);
+            }
+            finally {
+                await claim.release();
+            }
+        }
+        // A completed commit with saved presentation needs only the missing
+        // tool-free judgment. Never repeat the player to recover that evidence.
+        function recoverableJudgment() {
+            if (!recoveryCheckpoint || recoveryCheckpoint.result !== undefined || recoveryCheckpoint.delivered ||
+                retainedEffectReconciliationRequired ||
+                deferredReconciliationOperationId !== undefined)
+                return undefined;
+            const suffix = currentEffectLedger().boundaries.slice(recoveryCheckpoint.boundaryPrefix);
+            if (suffix.length !== 1)
+                return undefined;
+            const saved = suffix[0];
+            if (!runtimeBoundaryIsOwned(saved) ||
+                saved.sourceStateId !== recoveryCheckpoint.stateId ||
+                saved.logicalOperationId !== undefined ||
+                saved.correctionBudget.spent ||
+                saved.physicalReceipt?.classification !== 'one-descendant-commit' ||
+                !saved.finalText?.trim() ||
+                governedOutcomesForBoundary(saved) === undefined ||
+                (saved.semanticCandidate !== undefined &&
+                    persistedBoundaryReconciliation(saved, currentEffectLedger())
+                        ?.reconciliation.status !== 'resolved') ||
+                [...unresolvedSemanticBoundaryIds].some((id) => id !== saved.boundaryId))
+                return undefined;
+            return saved;
+        }
+        async function recoverJudgment(saved, signal) {
+            const checkpoint = recoveryCheckpoint;
+            const persisted = checkpoint.machine;
+            const input = Object.values(persisted.children)[0];
+            const actorInput = input.snapshot.input;
+            const outcomes = governedOutcomesForBoundary(saved);
+            const candidate = saved.semanticCandidate ??
+                parseGovernedSemanticCandidate(await boundary.callJudge('player-output-adjudication', saved.sourceStateId, buildGovernedJudgePrompt(actorInput, saved.finalText, outcomes), signal));
+            const result = reconcilePlaybookSemanticEvidence({
+                outcomes,
+                semanticCandidate: candidate,
+                finalText: saved.finalText,
+                receipt: saved.physicalReceipt,
+            });
+            signal.throwIfAborted();
+            const next = {
+                ...saved,
+                semanticCandidate: snapshotJsonValue(result.evidence.semanticCandidate),
+            };
+            const acknowledged = assertPlaybookEffectLedger(await effectLedgerCapability.writeAhead([
+                {
+                    kind: 'replace-boundaries',
+                    replacements: [{ expected: saved, next }],
+                },
+            ]));
+            if (!isDeepStrictEqual(acknowledged.boundaries.find((b) => b.boundaryId === saved.boundaryId), next)) {
+                throw new Error(`${label} recovered judgment was not acknowledged exactly`);
+            }
+            effectLedgerMirror = acknowledged;
+            refreshUnresolvedSemanticReconciliation(acknowledged);
+            if (result.status !== 'resolved') {
+                const error = attachPlaybookFailureCause(new Error(result.status === 'unresolved' && 'reason' in result.cause.evidence && result.cause.evidence.reason
+                    ? String(result.cause.evidence.reason)
+                    : `${label} saved result could not be reconciled; the playbook remains parked`), result.status === 'unresolved' ? result.cause : runtimeDefectCause('Saved result still needs a Boss answer'));
+                const paused = detachPersistedMachineSnapshot(actor.getPersistedSnapshot());
+                stopActor();
+                actor = buildActor(runtimePorts, {
+                    ...paused, context: { ...paused.context, lastError: snapshotJsonValue(normalizeErrorFull(error)) },
+                });
+                suppressInspectionEmissions = false;
+                actor.start();
+                throw error;
+            }
+            await resumeCheckpoint({ ...checkpoint, result: snapshotJsonValue(result.output) });
+        }
+        async function resumeCheckpoint(checkpoint) {
+            acceptedStepResult = checkpoint;
+            try {
+                stopActor();
+                actor = buildActor(runtimePorts, checkpoint.machine);
+                suppressInspectionEmissions = false;
+                actor.start();
+                await waitForPlaybookQuiescence(actor, { pendingCalls: nestedBridge });
+            }
+            finally {
+                acceptedStepResult = undefined;
+            }
+        }
+        function exportRuntimeSnapshot(checkpoint) {
+            if (!actor || !session || disposed || disposalPromise !== undefined) {
+                return undefined;
+            }
+            if (activeSignal !== undefined && checkpoint === undefined)
+                return undefined;
+            if (deferredSettlementClosure !== undefined)
+                return undefined;
+            const pendingCall = checkpoint?.child ?? nestedBridge.getPendingCall();
+            const bridgeSuspendedCall = checkpoint?.child ? nestedBridge.checkpointCall(checkpoint.child) : nestedBridge.getSuspendedCall();
+            if ((pendingCall === undefined) !== (bridgeSuspendedCall === undefined)) {
+                return undefined;
+            }
+            let suspendedCall;
+            if (bridgeSuspendedCall !== undefined) {
+                if (pendingCall?.callId !== bridgeSuspendedCall.callId ||
+                    pendingCall?.playbookId !== bridgeSuspendedCall.playbookId ||
+                    pendingCall?.childSessionId !== bridgeSuspendedCall.childSessionId) {
+                    return undefined;
+                }
+                if (!playbookCallTurnIds.has(bridgeSuspendedCall.callId)) {
+                    return undefined;
+                }
+                const turnId = playbookCallTurnIds.get(bridgeSuspendedCall.callId);
+                if (bridgeSuspendedCall.turnId !== undefined &&
+                    bridgeSuspendedCall.turnId !== turnId) {
+                    return undefined;
+                }
+                suspendedCall = {
+                    ...bridgeSuspendedCall,
+                    ...(turnId === undefined ? {} : { turnId }),
+                    ...(hasGovernedPlayerStates
+                        ? {
+                            effectBoundaryPrefixSequence: playbookCallEffectPrefixes.get(bridgeSuspendedCall.callId) ?? null,
+                        }
+                        : {}),
+                };
+            }
+            const interrupted = checkpoint?.interrupted && recoveryCheckpoint && machine.root.states.failed;
+            const state = interrupted
+                ? normalizePlaybookSnapshot(machine.resolveState({ value: 'failed', context: {} }))
+                : checkpoint?.child ? normalizePlaybookSnapshot(actor.getSnapshot(), { pendingCall }) : currentState();
+            if (state.status !== 'active' || !state.quiescent)
+                return undefined;
+            const context = actor.getSnapshot()
+                .context;
+            // DR-063 §2: the failed state's `lastError` is persisted as every live
+            // surface publishes it, completed from the runtime's own cause slot, so
+            // a thrown value that refused the cause still explains itself after a
+            // restart.
+            const machineSnapshot = detachPersistedMachineSnapshot(interrupted ? { ...recoveryCheckpoint.machine, value: 'failed', children: {} } : actor.getPersistedSnapshot(), state.stateId === 'failed'
+                ? { lastError: interrupted ? { name: 'InterruptedStep', message: 'The process stopped during this step. Review the recorded work before choosing how to continue.', cause: runtimeDefectCause('The process stopped during this step. Review the recorded work before choosing how to continue.') } : failedStateError(context ?? {}) }
+                : {});
+            effectLedgerMirror = currentEffectLedger();
+            refreshRetainedEffectReconciliation(effectLedgerMirror);
+            syncDeferredReconciliationOverlay();
+            refreshUnresolvedSemanticReconciliation(effectLedgerMirror);
+            const pendingQuestions = !hasUnresolvedReconciliation()
+                ? pendingBossQuestionsFor(state, context ?? {})
+                : [];
+            const interruptedPrefix = interrupted ? activeEffectLedgerPrefixSequence : undefined;
+            const interruptedAttempts = new Set(effectLedgerMirror.boundaries.filter(({ sequence }) => interruptedPrefix !== undefined && sequence > interruptedPrefix).map(({ attemptId }) => attemptId));
+            const failedEffectAttempt = interrupted && interruptedPrefix !== undefined && interruptedAttempts.size <= 1
+                ? { boundaryPrefix: interruptedPrefix, attemptId: interruptedAttempts.values().next().value ?? null }
+                :
+                    hasGovernedPlayerStates &&
+                        !interrupted && state.stateId === 'failed' &&
+                        failedAttemptMatchesCurrentLedger(effectLedgerMirror)
+                        ? {
+                            boundaryPrefix: failedEffectBoundaryPrefix,
+                            attemptId: failedGovernedAttemptId ?? null,
+                        }
+                        : undefined;
+            return {
+                schemaVersion: 4,
+                playbookId: session.playbookId,
+                machine: machineSnapshot,
+                roleResumeTokens: snapshotRoleResumeTokens(),
+                sequences: {
+                    trace: traceSequence,
+                    turn: turnSequence,
+                    judgeCall: judgeCallSequence,
+                    playerCall: playerCallSequence,
+                    playbookCall: playbookCallSequence,
+                    ...(declaredActors.has('captain')
+                        ? { captainCall: captainCallSequence }
+                        : {}),
+                },
+                state,
+                pendingBossQuestions: pendingQuestions.map((pending) => ({
+                    questionId: pending.questionId,
+                    asker: pending.asker,
+                    question: pending.question,
+                    sourceItem: pending.sourceItem,
+                })),
+                effectLedger: effectLedgerMirror,
+                ...(retainedEffectSourceSessionId === undefined
+                    ? {}
+                    : { retainedEffectSourceSessionId }),
+                ...(retainedEffectReconciliation === undefined
+                    ? {}
+                    : { retainedEffectReconciliation }),
+                ...(failedEffectAttempt === undefined
+                    ? {}
+                    : { failedEffectAttempt }),
+                ...((state.stateId === 'failed' || pendingQuestions.length > 0) && recoveryCheckpoint !== undefined
+                    ? { recoveryCheckpoint } : {}),
+                ...(suspendedCall === undefined ? {} : { suspendedCall }),
+            };
+        }
+        async function runJournalledStep(kind, input, signal, execute) {
+            const saved = acceptedStepResult;
+            let output;
+            if (saved?.stateId === input.stateId && saved.result !== undefined) {
+                acceptedStepResult = undefined;
+                recoveryCheckpoint = saved;
+                output = snapshotJsonValue(saved.result);
+            }
+            else {
+                const record = savedPorts?.recordStep;
+                await drainEmissions();
+                signal.throwIfAborted();
+                try {
+                    captureRecoveryCheckpoint(input.stateId, 'command' in input ? input.command : 'role' in input ? composeBoundPlayerPrompt(input) : composeCaptainPrompt(input));
+                }
+                catch (error) {
+                    if (!isAbortFailure(error, signal))
+                        controlPlaneError ??= error;
+                    throw error;
+                }
+                if (record) {
+                    const id = randomUUID();
+                    if (recoveryCheckpoint)
+                        recoveryCheckpoint = { ...recoveryCheckpoint, id };
+                    const step = { id, kind, stateId: input.stateId };
+                    await record(step, exportRuntimeSnapshot({ interrupted: true }));
+                    signal.throwIfAborted();
+                    const result = snapshotJsonValue(await execute());
+                    // Keep the known output if its save loses acknowledgement. A drained
+                    // failure can then preserve it without treating the call as unexecuted.
+                    if (recoveryCheckpoint?.id === id)
+                        recoveryCheckpoint = { ...recoveryCheckpoint, result };
+                    await record({ ...step, result });
+                    output = result;
+                }
+                else {
+                    output = await execute();
+                }
+            }
+            if (recoveryCheckpoint?.stateId === input.stateId) {
+                const { result: _result, ...start } = recoveryCheckpoint;
+                recoveryCheckpoint = { ...start, delivered: true };
+            }
+            return output;
+        }
+        function validateRecoveryCheckpoint(checkpoint) {
+            if (!checkpoint)
+                return;
+            const node = machine.root.states[checkpoint.stateId];
+            const persisted = checkpoint.machine;
+            const children = persisted.children;
+            if (!node ||
+                node.invoke.length !== 1 ||
+                !['player', 'captain', 'script'].includes(String(node.invoke[0].src)) ||
+                !isPlainObject(children) ||
+                Object.keys(children).length !== 1) {
+                throw new TypeError(`${label} recovery checkpoint does not name one current invocation`);
+            }
+            const child = children[node.invoke[0].id];
+            if (!child ||
+                child.src !== node.invoke[0].src ||
+                !isPlainObject(child.snapshot) ||
+                child.snapshot.status !== 'active' ||
+                !isPlainObject(child.snapshot.input) ||
+                child.snapshot.input.stateId !== checkpoint.stateId) {
+                throw new TypeError(`${label} recovery checkpoint invocation is incompatible`);
+            }
+            if (checkpoint.result !== undefined) {
+                const output = checkpoint.result;
+                const input = child.snapshot.input;
+                if (!isPlainObject(output) || typeof output.guard !== 'string' ||
+                    !isPlainObject(input.result) || !Object.hasOwn(input.result, output.guard) ||
+                    (node.invoke[0].src === 'script' &&
+                        (!Number.isInteger(output.exitStatus) || Object.keys(output).sort().join(',') !== 'exitStatus,guard' ||
+                            output.guard !== Object.keys(input.result)[output.exitStatus === 0 ? 0 : Math.min(1, Object.keys(input.result).length - 1)]))) {
+                    throw new TypeError(`${label} saved step result is incompatible with its invocation`);
+                }
+                for (const field of extractFields(String(input.result[output.guard]))) {
+                    if (output[field] === undefined || output[field] === null)
+                        throw new TypeError(`${label} saved step result is missing ${field}`);
+                }
+            }
+        }
         function captureEffectLedgerPrefixSequence() {
             if (!hasGovernedPlayerStates)
                 return undefined;
@@ -4675,7 +5026,16 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             // captured it under this exclusive claim. A host that supplies
                             // none states no pre-existing change, exactly as an empty
                             // baseline projection does.
-                            operation: (context) => runTracedPlayerCall(selectedResume, effectAuthorizedPreExistingBlock(effectBoundary, context?.baseline)),
+                            operation: async (context) => {
+                                if (requiredRecoveryBaseline !== undefined) {
+                                    if (!isDeepStrictEqual(snapshotJsonValue(context.baseline), requiredRecoveryBaseline)) {
+                                        throw new Error(`${label} repository changed after preparation; the stopped step remains paused`);
+                                    }
+                                    requiredRecoveryBaseline = undefined;
+                                    captureRecoveryCheckpoint(input.stateId, freshPrompt, currentEffectLedger().boundaries.findIndex(({ boundaryId }) => boundaryId === effectBoundary.boundaryId));
+                                }
+                                return runTracedPlayerCall(selectedResume, effectAuthorizedPreExistingBlock(effectBoundary, context?.baseline));
+                            },
                             completeEffectBoundary: completionEvidenceFor(input, roleId, playerId, signal, undefined),
                         });
                         return acknowledgeGovernedPlayerResult(exclusive, effectBoundary.boundaryId);
@@ -4901,6 +5261,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
         }
         function playerActor(ports) {
             return createPlayerBridge({
+                run: (input, signal, execute) => runJournalledStep('player', input, signal, execute),
                 resolveRoleId: requireRoleId,
                 validateInput: (input) => assertGovernedPlayerInput(outcomeAuthority, input, extractFields, label),
                 composePlayerPrompt: composeBoundPlayerPrompt,
@@ -4918,7 +5279,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // adjudication that injects the exact visible finalText as the selected
         // output's question/response.
         function captainActor() {
-            return fromPromise(async ({ input, signal }) => {
+            return fromPromise(({ input, signal }) => runJournalledStep('captain', input, signal, async () => {
                 const active = combineAbortSignals(signal, activeSignal);
                 try {
                     await drainEmissions();
@@ -4982,7 +5343,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     }
                     throw error;
                 }
-            });
+            }));
         }
         // Deterministic script actor (slc/link.md §Script execution). Runs
         // `input.command` through `sh -c`, resolves the declared guard
@@ -4990,7 +5351,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
         // `playbook.script` telemetry event. No agent call, no adjudication,
         // no `*.call.*` trace.
         function scriptActor() {
-            return fromPromise(async ({ input, signal }) => {
+            return fromPromise(({ input, signal }) => runJournalledStep('script', input, signal, async () => {
                 await drainEmissions();
                 const active = combineAbortSignals(signal, activeSignal);
                 const guards = Object.keys(input.result);
@@ -5162,7 +5523,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             clearTimeout(killTimer);
                     }
                 }
-            });
+            }));
         }
         const nestedBridge = createNestedPlaybookBridge({
             nextCallId: () => `playbook-${++playbookCallSequence}`,
@@ -5487,6 +5848,10 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             latchRuntimeError(error);
                         }
                         if (state.stateId === 'failed') {
+                            if (previousState?.stateId !== 'failed' &&
+                                previousState?.stateId !== recoveryCheckpoint?.stateId) {
+                                recoveryCheckpoint = undefined;
+                            }
                             if (previousState?.stateId !== 'failed' ||
                                 activeGovernedBoundarySeen) {
                                 latchFailedGovernedAttempt();
@@ -5734,7 +6099,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
             activeDeferredContinuation = undefined;
             deferInspectionEmissions = false;
             deferredInspectionEmissions = [];
-            lastBossEvent = undefined;
+            recoveryCheckpoint = undefined;
             suppressInspectionEmissions = false;
             initialized = false;
             traceSequence = 0;
@@ -5751,77 +6116,26 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 can.call(snapshot, event) ===
                     true);
         }
-        // DR-034: where the artifact names the FSM context member its entry
-        // action copies the exact Boss text into, that member of the live
-        // snapshot is the retry payload's source. The persisted machine snapshot
-        // carries it, so the candidate derives identically in the process that
-        // exported the snapshot and in one that restored it, and a failure
-        // reached after a Boss reply — whose recorded event the failure state
-        // refuses — is recoverable too. Naming the member is the artifact's
-        // statement that it holds the entry text: a same-named member is never
-        // assumed, since inferring one would turn any matching context member
-        // into a replay payload without its author saying so.
-        // Declared and absent or empty excludes the candidate rather than
-        // falling back to the record, which would make the action depend on the
-        // process again — the very thing this source exists to end.
-        function retryEventFrom(snapshot) {
-            const entryEvent = spec.entryEvent;
-            if (entryEvent?.contextField === undefined)
-                return lastBossEvent;
-            const context = snapshot?.context;
-            const text = isPlainObject(context)
-                ? context[entryEvent.contextField]
-                : undefined;
-            if (typeof text !== 'string' || text.trim() === '')
+        function retryActionFor(stateId) {
+            if (stateId !== 'failed' || !recoveryCheckpoint)
                 return undefined;
-            return { type: entryEvent.type, [entryEvent.textField]: text };
-        }
-        // The failure-state retry entry replays the recorded last classified
-        // event with its recorded payload, or the entry event the declared
-        // context member above sources. A candidate whose event the live
-        // snapshot does not accept — or whose payload the runtime can source
-        // from neither — is excluded rather than completed with invented text.
-        // The caller has already applied the PBRT-71 replay fence.
-        function retryActionFor(snapshot, stateId) {
-            if (stateId !== 'failed')
+            const description = stateDescriptions.get(recoveryCheckpoint.stateId);
+            const savedResult = recoveryCheckpoint.result !== undefined;
+            const safe = savedResult
+                ? !hasUnresolvedReconciliation() && currentEffectLedger().boundaries.slice(recoveryCheckpoint.boundaryPrefix)
+                    .every((boundary) => runtimeBoundaryIsOwned(boundary) && boundary.sourceStateId === recoveryCheckpoint.stateId)
+                : stepReplayIsSafe();
+            if (description === undefined || !safe)
                 return undefined;
-            const retryEvent = retryEventFrom(snapshot);
-            if (retryEvent === undefined)
-                return undefined;
-            if (!snapshotCan(snapshot, retryEvent))
-                return undefined;
-            // A recorded explicit-state-jump event names the exact state its
-            // replay re-enters: the root BOSS_INTERRUPT shape is a guarded
-            // multi-arm list keyed on `targetId`, so the first configured arm
-            // may label a different state than the one the recorded event
-            // actually resumes.
-            const recordedTargetId = retryEvent.type === JUMP_EVENT_TYPE
-                ? retryEvent.targetId
-                : undefined;
-            const target = typeof recordedTargetId === 'string' &&
-                recordedTargetId.trim().length > 0
-                ? recordedTargetId
-                : firstTransitionTarget(machine, stateId, retryEvent.type);
-            // PBRT-52: a label is written from a source state description, never
-            // from an identifier. Falling back to the target id — or, with no
-            // resolvable target, to the FSM event type — makes the label *be* the
-            // internal name, which defeats the substitution the label exists for
-            // and puts a machine identifier into Boss-facing text
-            // (CAPPLAY-5). A candidate whose label can only be an id is excluded
-            // exactly like one whose payload cannot be sourced.
-            const description = (target === undefined ? undefined : stateDescriptions.get(target)) ??
-                stateDescriptions.get(stateId);
-            if (description === undefined)
-                return undefined;
+            const entry = spec.entryEvent;
+            const target = entry && firstTransitionTarget(machine, stateId, entry.type);
             return {
                 action: {
-                    id: `retry:${retryEvent.type}`,
-                    label: `Retry: ${description}`,
-                    // DR-063 §3: retrying a failed call is `ready` — the runtime cannot
-                    // see whether the Boss changed the outside world since it failed.
+                    id: target === recoveryCheckpoint.stateId ? `retry:${entry.type}` : 'retry:step',
+                    label: `${savedResult ? 'Continue from saved result' : 'Retry'}: ${description}`,
                     standing: 'ready',
                 },
-                event: retryEvent,
+                retryStep: true,
             };
         }
         /**
@@ -5867,6 +6181,21 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 return [];
             }
             const derived = [];
+            const repairable = state.stateId === 'failed' ? repairableReadOnlyBoundary() : undefined;
+            if (repairable !== undefined)
+                derived.push({
+                    action: { id: 'retry:restored-step', label: 'Restore the repository and retry the read-only step', standing: 'ready' },
+                    retryStep: true,
+                    restoreReadOnly: repairable,
+                });
+            const judgment = state.stateId === 'failed' ? recoverableJudgment() : undefined;
+            if (judgment !== undefined)
+                derived.push({
+                    action: { id: 'retry:adjudication', label: 'Retry assessment of the saved result', standing: 'ready' },
+                    retryJudgment: judgment,
+                });
+            if (judgment !== undefined && !hasUnresolvedReconciliation())
+                return derived;
             if (hasUnresolvedReconciliation()) {
                 const operation = deferredReconciliationOperationId === undefined
                     ? undefined
@@ -5895,18 +6224,14 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 });
                 return derived;
             }
-            // PBRT-71 / DR-040 §4: out of the failure state, a jump restarts the
-            // failed attempt's work exactly as the retry does, so one fence gates
-            // both. Unless every governed boundary of that attempt carries a
-            // complete `unchanged` receipt, neither is advertised — and `apply`,
-            // which revalidates against this list, accepts neither — so no
-            // control can replay a player call whose effect may already exist.
+            const retry = retryActionFor(state.stateId);
+            if (retry !== undefined)
+                derived.push(retry);
+            // A jump can repeat earlier work, unlike checkpoint retry. Its whole
+            // failed attempt must therefore still pass the replay fence.
             if (state.stateId === 'failed' && !failedAttemptAllowsReplay()) {
                 return derived;
             }
-            const retry = retryActionFor(snapshot, state.stateId);
-            if (retry !== undefined)
-                derived.push(retry);
             // Jump entries: resumable targets whose explicit-state-jump event the
             // live snapshot accepts (state guards included), sent with the
             // advertised target id and optional textual fields omitted.
@@ -6018,6 +6343,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
             }
             const boundSession = bindSession(nextSession);
             const boundSnapshot = assertPlaybookRuntimeSnapshot(snapshot, boundSession.playbookId, { allowSuspendedCall: true });
+            validateRecoveryCheckpoint(boundSnapshot.recoveryCheckpoint);
             if (kind === 'adopt' &&
                 effectLedgerCapability !== undefined &&
                 (boundSnapshot.retainedEffectReconciliation?.checkpoint ??
@@ -6084,6 +6410,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
             initInFlight = initialization;
             const initTask = (async () => {
                 session = boundSession;
+                recoveryCheckpoint = boundSnapshot.recoveryCheckpoint;
                 syncDeferredReconciliationOverlay();
                 refreshUnresolvedSemanticReconciliation(effectLedgerMirror);
                 prepareReconstructedGovernedDelivery(boundSnapshot.state, effectLedgerMirror);
@@ -6278,7 +6605,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     emission();
             }
         }
-        async function continueBoundDeferredOperation(operation, event, signal, turnId, classificationLine) {
+        async function continueBoundDeferredOperation(operation, event, signal, turnId, classificationLine, onAccepted) {
             if (repositoryCapability === undefined) {
                 throw new Error(`${label} deferred continuation requires repository.runDeferred`);
             }
@@ -6324,6 +6651,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                         continuation.baseline = context?.baseline;
                         continuation.playerContinuation = selectPlayerResume(effectBoundary.roleId, boundPlayerId);
                         continuationStarted = true;
+                        onAccepted?.();
                         actor.send(event);
                         // The host has durably started this boundary and the FSM has
                         // moved: publish the buffered classification line and the
@@ -6573,106 +6901,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
             // Defined only at a safe capture point — initialized, not disposing
             // or disposed, no active public boundary, and the actor quiescent with
             // status `active`.
-            exportSnapshot() {
-                if (!actor || !session || disposed || disposalPromise !== undefined) {
-                    return undefined;
-                }
-                if (activeSignal !== undefined)
-                    return undefined;
-                if (deferredSettlementClosure !== undefined)
-                    return undefined;
-                const pendingCall = nestedBridge.getPendingCall();
-                const bridgeSuspendedCall = nestedBridge.getSuspendedCall();
-                if ((pendingCall === undefined) !== (bridgeSuspendedCall === undefined)) {
-                    return undefined;
-                }
-                let suspendedCall;
-                if (bridgeSuspendedCall !== undefined) {
-                    if (pendingCall?.callId !== bridgeSuspendedCall.callId ||
-                        pendingCall?.playbookId !== bridgeSuspendedCall.playbookId ||
-                        pendingCall?.childSessionId !== bridgeSuspendedCall.childSessionId) {
-                        return undefined;
-                    }
-                    if (!playbookCallTurnIds.has(bridgeSuspendedCall.callId)) {
-                        return undefined;
-                    }
-                    const turnId = playbookCallTurnIds.get(bridgeSuspendedCall.callId);
-                    if (bridgeSuspendedCall.turnId !== undefined &&
-                        bridgeSuspendedCall.turnId !== turnId) {
-                        return undefined;
-                    }
-                    suspendedCall = {
-                        ...bridgeSuspendedCall,
-                        ...(turnId === undefined ? {} : { turnId }),
-                        ...(hasGovernedPlayerStates
-                            ? {
-                                effectBoundaryPrefixSequence: playbookCallEffectPrefixes.get(bridgeSuspendedCall.callId) ?? null,
-                            }
-                            : {}),
-                    };
-                }
-                const state = currentState();
-                if (state.status !== 'active' || !state.quiescent)
-                    return undefined;
-                const context = actor.getSnapshot()
-                    .context;
-                // DR-063 §2: the failed state's `lastError` is persisted as every live
-                // surface publishes it, completed from the runtime's own cause slot, so
-                // a thrown value that refused the cause still explains itself after a
-                // restart.
-                const machineSnapshot = detachPersistedMachineSnapshot(actor.getPersistedSnapshot(), state.stateId === 'failed'
-                    ? { lastError: failedStateError(context ?? {}) }
-                    : {});
-                effectLedgerMirror = currentEffectLedger();
-                refreshRetainedEffectReconciliation(effectLedgerMirror);
-                syncDeferredReconciliationOverlay();
-                refreshUnresolvedSemanticReconciliation(effectLedgerMirror);
-                const pendingQuestions = !hasUnresolvedReconciliation()
-                    ? pendingBossQuestionsFor(state, context ?? {})
-                    : [];
-                const failedEffectAttempt = hasGovernedPlayerStates &&
-                    state.stateId === 'failed' &&
-                    failedAttemptMatchesCurrentLedger(effectLedgerMirror)
-                    ? {
-                        boundaryPrefix: failedEffectBoundaryPrefix,
-                        attemptId: failedGovernedAttemptId ?? null,
-                    }
-                    : undefined;
-                return {
-                    schemaVersion: 4,
-                    playbookId: session.playbookId,
-                    machine: machineSnapshot,
-                    roleResumeTokens: snapshotRoleResumeTokens(),
-                    sequences: {
-                        trace: traceSequence,
-                        turn: turnSequence,
-                        judgeCall: judgeCallSequence,
-                        playerCall: playerCallSequence,
-                        playbookCall: playbookCallSequence,
-                        ...(declaredActors.has('captain')
-                            ? { captainCall: captainCallSequence }
-                            : {}),
-                    },
-                    state,
-                    pendingBossQuestions: pendingQuestions.map((pending) => ({
-                        questionId: pending.questionId,
-                        asker: pending.asker,
-                        question: pending.question,
-                        sourceItem: pending.sourceItem,
-                    })),
-                    effectLedger: effectLedgerMirror,
-                    ...(retainedEffectSourceSessionId === undefined
-                        ? {}
-                        : { retainedEffectSourceSessionId }),
-                    ...(retainedEffectReconciliation === undefined
-                        ? {}
-                        : { retainedEffectReconciliation }),
-                    ...(failedEffectAttempt === undefined
-                        ? {}
-                        : { failedEffectAttempt }),
-                    ...(suspendedCall === undefined ? {} : { suspendedCall }),
-                };
-            },
+            exportSnapshot: (checkpoint) => exportRuntimeSnapshot(checkpoint?.child ? { child: checkpoint.child } : undefined),
             // DR-014 §1 / PBRT-45: alternative to `init` that rehydrates an
             // exported snapshot under the same immutable session identity.
             // Emits no `session.started`, transition trace, or human status —
@@ -6725,6 +6954,30 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 const stateDescription = !hasUnresolvedReconciliation()
                     ? stateDescriptionFor(state)
                     : undefined;
+                const actions = deriveControlActions(snapshot).map(({ action }) => action);
+                const retry = actions.find(({ id, standing }) => id.startsWith('retry:') &&
+                    (standing ?? 'ready') === 'ready');
+                const stoppedBoundary = recoveryCheckpoint === undefined ? undefined :
+                    currentEffectLedger().boundaries.slice(recoveryCheckpoint.boundaryPrefix)
+                        .filter((boundary) => runtimeBoundaryIsOwned(boundary) && boundary.sourceStateId === recoveryCheckpoint.stateId).at(-1);
+                const recovery = recoveryCheckpoint === undefined ||
+                    (pendingQuestions.length === 0 && retry === undefined) ? undefined : {
+                    prompt: recoveryCheckpoint.prompt,
+                    ...(stoppedBoundary === undefined ? {} : { evidence: snapshotJsonValue({
+                            declaredResults: stoppedBoundary.sourceOutcomeSchema,
+                            ...(stoppedBoundary.finalText === undefined ? {} : { savedPlayerText: stoppedBoundary.finalText }),
+                            ...(stoppedBoundary.semanticCandidate === undefined ? {} : { selectedResult: stoppedBoundary.semanticCandidate }),
+                            ...(stoppedBoundary.physicalReceipt === undefined ? {} : { repositoryReceipt: stoppedBoundary.physicalReceipt }),
+                        }) }),
+                    ...(repairableReadOnlyBoundary() === undefined ? {} : {
+                        preparation: `This read-only step changed the repository. Restore its exact original HEAD and visible files before retrying; do not accept its saved result. Preserve user work. You may put generated outputs aside and prevent their return using local environment or ignore settings. Original observation: ${JSON.stringify(repairableReadOnlyBoundary().baseline)}. Observed after the failed step: ${JSON.stringify(repairableReadOnlyBoundary().after)}.`,
+                    }),
+                    ...(stateDescriptions.get(recoveryCheckpoint.stateId) === undefined ? {} :
+                        { description: stateDescriptions.get(recoveryCheckpoint.stateId) }),
+                    continuation: pendingQuestions.length === 0
+                        ? { kind: 'runtime', actionId: retry.id }
+                        : { kind: 'reply' },
+                };
                 return deepFreeze({
                     state,
                     ...(stateDescription === undefined ? {} : { stateDescription }),
@@ -6738,7 +6991,8 @@ export function createXStatePlaybookRuntime(machine, spec) {
                         sourceItem: pending.sourceItem,
                     })),
                     ...(lastError !== undefined ? { lastError } : {}),
-                    actions: deriveControlActions(snapshot).map(({ action }) => action),
+                    actions,
+                    ...(recovery === undefined ? {} : { recovery }),
                 });
             },
             // DR-029 / PBRT-52: revalidate the named action against the live
@@ -6900,7 +7154,11 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             accepted = true;
                             try {
                                 let run;
-                                if (candidate.unresolvedEffectAction === 'abandon') {
+                                if (candidate.retryJudgment !== undefined) {
+                                    await recoverJudgment(candidate.retryJudgment, signal);
+                                    run = runResultFor(settledOutcome(signal));
+                                }
+                                else if (candidate.unresolvedEffectAction === 'abandon') {
                                     signal.throwIfAborted();
                                     run = runResultFor('unresolved-effect');
                                 }
@@ -6919,6 +7177,21 @@ export function createXStatePlaybookRuntime(machine, spec) {
                                         ? 'no-action'
                                         : 'quiescent');
                                 }
+                                else if (candidate.retryStep) {
+                                    if (candidate.restoreReadOnly !== undefined) {
+                                        await confirmReadOnlyRestoration(candidate.restoreReadOnly, signal);
+                                    }
+                                    const checkpoint = recoveryCheckpoint;
+                                    requiredRecoveryBaseline = currentEffectLedger().boundaries
+                                        .slice(checkpoint.boundaryPrefix).find(({ restored }) => restored !== undefined)?.restored;
+                                    try {
+                                        await resumeCheckpoint(checkpoint);
+                                    }
+                                    finally {
+                                        requiredRecoveryBaseline = undefined;
+                                    }
+                                    run = runResultFor(settledOutcome(signal));
+                                }
                                 else {
                                     actor.send(candidate.event);
                                     await waitForPlaybookQuiescence(actor, {
@@ -6931,6 +7204,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                                 receipt = settledReceipt(run.outcome === 'failed' || run.outcome === 'aborted'
                                     ? {
                                         disposition: 'failed',
+                                        run,
                                         error: ('error' in run ? run.error : undefined) ??
                                             normalizeError(new Error(`apply settled with outcome ${run.outcome}`)),
                                     }
@@ -7039,7 +7313,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 return receipt;
             },
             unresolvedEffectEnvelopes: unresolvedEffectEnvelopeIdentities,
-            async handleBossInput({ text, signal, }) {
+            async handleBossInput({ text, signal, onAccepted, }) {
                 if (!actor || !savedPorts) {
                     throw new Error('createPlaybookRuntime.handleBossInput: init must be called first');
                 }
@@ -7143,14 +7417,8 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             deferredOperation !== undefined) {
                             if (isExactDeferredBossReply(classifiedSnapshot, event, deferredPending)) {
                                 const statusLine = classificationStatus(event);
-                                const continuation = await continueBoundDeferredOperation(deferredOperation, event, signal, turnId, statusLine);
+                                const continuation = await continueBoundDeferredOperation(deferredOperation, event, signal, turnId, statusLine, onAccepted);
                                 if (continuation === 'continued') {
-                                    try {
-                                        lastBossEvent = snapshotJsonValue(event, 'recorded Boss event');
-                                    }
-                                    catch {
-                                        lastBossEvent = undefined;
-                                    }
                                     if (controlPlaneError !== undefined) {
                                         throw controlPlaneError;
                                     }
@@ -7159,7 +7427,6 @@ export function createXStatePlaybookRuntime(machine, spec) {
                                         : 'no-action');
                                 }
                                 else {
-                                    lastBossEvent = undefined;
                                     result = runResultFor('no-action');
                                 }
                                 handledDeferred = true;
@@ -7171,7 +7438,6 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             }
                             else {
                                 await parkBoundDeferredOperation(deferredOperation.operationId, signal);
-                                lastBossEvent = undefined;
                                 result = runResultFor('no-action');
                                 handledDeferred = true;
                             }
@@ -7202,16 +7468,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                                 suppressInspectionEmissions = false;
                                 actor.start();
                             }
-                            // DR-029: keep the classified event with its recorded payload
-                            // as the retry-replay source. Recording is sanitizing, not
-                            // load-bearing: an override classifier's non-JSON-safe event is
-                            // simply not recorded, and the turn proceeds unchanged.
-                            try {
-                                lastBossEvent = snapshotJsonValue(event, 'recorded Boss event');
-                            }
-                            catch {
-                                lastBossEvent = undefined;
-                            }
+                            onAccepted?.();
                             actor.send(event);
                             await waitForPlaybookQuiescence(actor, {
                                 pendingCalls: nestedBridge,
@@ -7491,7 +7748,6 @@ export function createXStatePlaybookRuntime(machine, spec) {
                         failedGovernedAttemptId = undefined;
                         controlPlaneError = undefined;
                         emissionFailure = undefined;
-                        lastBossEvent = undefined;
                         retainedEffectSourceSessionId = undefined;
                         retainedEffectReconciliation = undefined;
                         retainedEffectReconciliationRequired = false;

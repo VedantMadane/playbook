@@ -144,17 +144,16 @@ uses the exact stable player IDs configured under its `roles` map. Equal IDs
 share one pane and provider conversation across nested and later root
 engagements; distinct IDs remain isolated even when their agent settings are
 identical. When a player surfaces a
-clarifying question the FSM parks, the pane shows the question, and a
-judge classifies your next turn as its reply or a fresh directive that
-abandons it
+clarifying question, the playbook pauses and Captain explains the complete question briefly.
+Answer or ask for clarification through Captain; reading a player pane is unnecessary.
+A request to explain preserves the pending question, while an answer or explicit player follow-up reaches the waiting player
 ([[playbook-runtime-2](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-runtime.md#playbook-runtime-2)]).
 
 The Captain pane shows start/stop/finished status with `◇` lines and
-streams progress with captain-speech classification and questions
+streams progress; Captain relays pending questions in its reply
 ([[playbook-runtime-3](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-runtime.md#playbook-runtime-3)]), while player
 prompts ride their own panes. A turn that actually did something ends
-with one Captain reply summarizing what changed, composed only from that
-turn's reported outcome; a turn that changed nothing ends with an
+with one Captain reply summarizing what changed, grounded in that turn's reported outcome and current pending questions; a turn that changed nothing ends with an
 ordinary reply and no saved-counts line
 ([[playbook-captain-19](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-captain.md#playbook-captain-19)]).
 
@@ -187,8 +186,8 @@ stderr, and `--verbose` adds only telemetry topic names to stderr.
 | `--verbose` | add Captain telemetry topic names to stderr |
 | `--continue` | continue the newest Captain session stored for this working directory, or the reported global fallback |
 | `--session <id>` | continue one durable Captain session explicitly |
-| `--retry-uncertain` | with `--session`, retry its exact recorded uncertain input |
-| `--discard-uncertain` | with `--session`, abandon its uncertain attempt |
+| `--retry-uncertain` | with `--session`, restore and report interrupted work; then choose a continuation |
+| `--discard-uncertain` | with `--session`, discard an attempt only if no work was recorded |
 | `--` | end options before one literal input or reply |
 | `-h`, `--help` | print the complete grammar without reading stdin or config |
 
@@ -196,8 +195,7 @@ Exit `0` means the Captain turn and its durable hand-off were presented,
 even when the selected action reported rejection or failure through the
 Captain reply. Argument, config, catalog, readiness, or pre-turn setup errors
 exit `1`; a started-turn, persistence, lease-release, or presentation failure
-exits `2` with stdout empty. SIGINT, SIGTERM, and SIGHUP preserve the
-uncertain boundary, withhold stdout, and are re-raised after lease retirement
+exits `2` with stdout empty. SIGINT, SIGTERM, and SIGHUP withhold stdout, preserve uncertainty unless stopped recovery can save its current work, and are re-raised after lease retirement
 ([[playbook-cli-18](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-cli.md#playbook-cli-18)]).
 
 The former positional `<from>`, `resume`, `--player`, `--captain`,
@@ -369,27 +367,47 @@ abandonment disposes the complete engagement without claiming an authored
 workflow outcome. The same restricted recovery survives process restart
 ([DR-040](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/040-outcome-authority-effect-reconciliation.md)).
 
+### Preparing a stopped step
+
+Captain automatically tries to prepare and resume a step stopped by an operation in the current turn. You can also supply a missing answer or ask for a repair:
+
+```sh
+playbook run --session <id> "Install the missing dependency and continue."
+```
+
+This also works in the interactive Boss pane. Captain may inspect prerequisites, prepare local tools, put generated files aside, and adjust local ignore settings. It preserves user work and the task's scope. It cannot do the remaining specialist work, change saved session data, invent a result, or skip a step.
+
+The runtime checks the continuation. It retries the interrupted step, keeps earlier commits, and uses saved output when only its assessment was interrupted. If a read-only check left unwanted files, retry requires restoring its original files and HEAD; the original failure stays recorded. A waiting player's repository checkpoint must remain intact.
+
+Captain asks Boss for a real missing decision, uncertain permission, or a missing or contradictory playbook transition. Repository checks alone cannot prove that publishing or another outside action is safe to repeat; Captain must check that separately.
+
+Preparation allows at most two automatic attempts, each following a stop produced by work in this turn. Resuming saved work or refusing new text does not start preparation. Each preparation has a 150-second deadline. When a turn with recorded progress throws and its calls drain safely, the latest stopped step is saved and accepts a new instruction; the interactive pane stays open. Before every player, script or preparation step, the runner saves its position; it saves the result before advancing. After process loss, Retry only restores and reports. Boss chooses what happens next. Custom hosts must provide cancellation before preparation is available.
+
+Custom runtimes can provide the same recovery offer: step prompt, optional preparation conditions and evidence, and a continuation they will validate. Captain needs no list of repair tools or error strings. Failed checkpoints without an invocation position have no step retry; restarting the whole playbook could repeat completed work.
+
+Captain may answer a player from the original task when it already answers the question. It reports what it reused, respects later Boss instructions and never sends that original answer twice automatically.
+
+If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
+
+All applications sharing a session store, including Spex and the CLI, must upgrade together before running this version: every step writes the new progress fields. Hosts through 16.0.x cannot read the extended records.
+
 ### Recovering an uncertain turn
 
 Before model work, the runner takes one exclusive session lease and writes an
 uncertain marker. If the process is interrupted after effects may
 have begun but before settlement is durable, ordinary continuation refuses
-to guess. Choose explicitly:
+to guess. Retry restores the saved position and reports what happened, without running any work. Discard is a separate explicit request:
 
 ```sh
 playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --retry-uncertain
 playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --discard-uncertain
 ```
 
-Retry reads no input and reuses the byte-exact recorded turn and its exact
-attempted Captain, player, and per-role model, effort, and fast-mode settings;
-current config cannot retune that attempt, and retry may duplicate external
-effects. Discard
+Retry reads no input and restores the recorded attempt only to report it. It runs no model work. Later turns use the current compatible configuration. A completed step can use its saved result without running again. Before repeating an unfinished step, Boss must confirm that the old worker has stopped and check any outside actions; unchanged files do not prove nothing happened. A runtime that cannot save its position returns to Captain with the work preserved. Discard
 reads no input and runs no model: it restores the exact prior settled boundary,
 or deletes a never-settled fresh session, while abandoning the attempted work.
-An interrupted interactive turn uses the same uncertain record and these
-headless recovery commands. Discard preserves the attempt's replay history and
-refuses if the effect ledger has advanced beyond the prior checkpoint.
+An interrupted interactive turn that could not save a normal pause uses the same uncertain record and these headless recovery commands. Discard preserves the attempt's replay history and
+refuses if the effect ledger has advanced beyond the prior checkpoint or any step was recorded. It does not undo files or commits. Captain never selects discard automatically.
 
 Stop old writers before upgrading. When using the ordinary `~/.spex/sessions`
 default, the CLI imports sessions from

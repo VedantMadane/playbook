@@ -117,6 +117,7 @@ function projectStatus(status) {
 
 export {
   createCaptainSessionStore as createSessionStore,
+  isUncertainTurnDiscardable,
   projectCaptainSessionStructure,
   validateCaptainSessionExecutionProjection,
   validateCaptainSessionStructuralProjection,

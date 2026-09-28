@@ -5,9 +5,11 @@
 
 ## Status
 
+Amended by [DR-073](073-durable-step-progress.md): step progress replaces whole-turn replay and saved continuation points in every host.
+
 Accepted.
 [DR-032](032-explicit-roles-session-players.md) amends the shared configuration and durable record: active structure remains restorable, explicit session players and current model and effort replace the frozen namespaced lineup, and runtime snapshot schema `3` replaces schema `2` player identity.
-[DR-040](040-outcome-authority-effect-reconciliation.md) extends the leased uncertain record with governed-call receipts, deferred-operation checkpoints, and unresolved-abandonment settlement, while permitting whole-turn retry only after every started boundary durably proves `unchanged`.
+[DR-040](040-outcome-authority-effect-reconciliation.md) extends the leased uncertain record with governed-call receipts, deferred-operation checkpoints, and unresolved-abandonment settlement, with whole-turn replay since removed by [DR-073](073-durable-step-progress.md).
 [DR-041](041-working-directory-aware-continuation.md) amends §4 so bare headless continuation prefers the newest session stored for the invoking working directory before an explicit global fallback.
 Amended by [DR-049](049-portable-session-contract.md): embedding-host lifecycle parity.
 

@@ -9,6 +9,7 @@ Accepted (2026-09-24).
 Amends [DR-019](019-shared-linked-runtime-factory.md) §1 and §4: the shared factory's domain gains the one parallel shape [gears2fsm](../../slc/gears2fsm.md) compiles, and DECIDE joins the factory-backed artifacts, so no maintained artifact keeps its own machinery.
 Amends [DR-011](011-composable-playbook-execution.md) §1 in one respect: the runtime that interprets the parallel proposal pair is the shared engine, not a linked runtime of its own.
 Everything else of both records stands.
+Recovery is refined by [DR-073](073-durable-step-progress.md): parallel regions record work without a single-invocation retry, while sequential steps after the join use saved-step recovery.
 
 ## Context
 
@@ -39,7 +40,7 @@ Everything else of both records stands.
 ### 2. Where the bespoke runtime deviated, the engine's semantics apply
 
 - A deferred `needsBossReply` on the merge call binds the token-free `{v:1,playerId}` continuation, publishes the continuation inline, and closes the runtime on an indeterminate settlement, as [[playbook-runtime-69](../packages/playbook-runtime.md#playbook-runtime-69)] and [[playbook-runtime-73](../packages/playbook-runtime.md#playbook-runtime-73)] require of every artifact.
-- An `unchanged` boundary whose semantic reply is unacceptable takes the ordinary failure path with the retry the engine advertises; a governed judge outage settles the turn as failed rather than rejecting it.
+- An `unchanged` boundary whose semantic reply is unacceptable takes the ordinary failure path with only the saved-step controls the engine can support; a governed judge outage settles the turn as failed rather than rejecting it.
 - Retained-snapshot adoption ([DR-038](038-universal-run-resumption.md)) stays in the flat domain: the factory omits `adopt` for a machine that declares a parallel state, and member absence remains the capability boundary of [[playbook-runtime-61](../packages/playbook-runtime.md#playbook-runtime-61)].
 - The DECIDE conformance suites pin the parallel contract — blind concurrent proposals and their join, branch-local waits with several pending questions, the interrupt restart, completion-order markers, sibling cancellation and the first-decided cause, the nested REVIEW handoff, the pre-existing-changes block — and are rebaselined to the engine's wording and to the semantics above where they pinned the drift.
 

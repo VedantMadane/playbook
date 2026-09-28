@@ -1444,6 +1444,7 @@ function makeShell(
     hostCapabilities?: PlaybookCaptainDeps['hostCapabilities'];
     unresolvedEffectSettlement?: PlaybookCaptainDeps['unresolvedEffectSettlement'];
     continuity?: PlaybookCaptainDeps['continuity'];
+    recordProgress?: PlaybookCaptainDeps['recordProgress'];
   } = {},
 ) {
   const list = Array.isArray(entries) ? entries : [entries];
@@ -1539,6 +1540,7 @@ function makeShell(
         );
       },
       hostCapabilities,
+      ...(opts.recordProgress ? { recordProgress: opts.recordProgress } : {}),
       ...(opts.continuity ? { continuity: opts.continuity } : {}),
       ...(opts.unresolvedEffectSettlement
         ? {
@@ -2170,7 +2172,8 @@ describe('createPlaybookCaptainShell explicit CODE routing (CAPTAIN-12/15)', () 
     expect(registry.runtimes[0]?.inputs).toEqual([
       {
         text: 'fix the failing test',
-        signal: context.controller.signal,
+        signal: expect.any(AbortSignal),
+        onAccepted: expect.any(Function),
       },
     ]);
     expect(session.statuses[0]).toEqual({
@@ -3006,7 +3009,7 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       resumeStateId: 'review',
       sourceItem: 'CODE-7',
       player: 'Coder',
-      question: 'Which branch should I use?',
+      question: 'Which branch should I use? ' + 'Preserve the existing setup. '.repeat(24) + 'Choose staging only with Boss approval.',
     };
     const registry = fakeCodeEntry(async (runtime, runtimeTurn) => {
       if (!runtime.ports) throw new Error('runtime ports missing');
@@ -3054,7 +3057,7 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       expect(prompt).not.toContain('stackDepth');
       expect(prompt).not.toContain('latestSubRuntimeStateId');
     }
-    expect(decisionPrompts[0]).toContain('Which branch should I use?');
+    expect(decisionPrompts[0]).toContain(JSON.stringify(pendingBossQuestion.question));
     expect(decisionPrompts[1]).toContain(
       'Last error: {"name":"TypeError","message":"boom"}',
     );
@@ -3220,7 +3223,9 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       () => {
         order.push('present');
         ledgerReadsAtPresentation = snapshotLedger.mock.calls.length;
-        authoritativeLedger = emptyPlaybookEffectLedger();
+        // Authoritative history cannot shrink after presentation. The disposed
+        // runtime exposes no live envelope; its frozen report must still survive.
+        authoritativeLedger = { ...authoritativeLedger, revision: authoritativeLedger.revision + 1 };
         return {
           status: 'ok',
           turnId: 2,
@@ -3244,7 +3249,6 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
     expect(registry.runtimes[0]?.disposeCount).toBe(1);
     expect(order).toEqual(['apply', 'begin', 'dispose', 'complete', 'present']);
     expect(ledgerReadsAtPresentation).toBeGreaterThan(0);
-    expect(snapshotLedger).toHaveBeenCalledTimes(ledgerReadsAtPresentation!);
     const expectedSettlement = {
       rootPlaybookId: 'code',
       unresolvedEffects: unresolvedEffectTestProjection(),
@@ -3257,9 +3261,6 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       retentionUpdates: [{ kind: 'clear', rootPlaybookId: 'code' }],
       unresolvedEffects: unresolvedEffectTestProjection(),
     });
-    expect(snapshotLedger).toHaveBeenCalledTimes(
-      ledgerReadsAtPresentation! + 1,
-    );
     const publicEvidence = JSON.stringify({
       statuses: session.statuses,
       summary: turnSummaryCalls(abandonment).map(({ prompt }) => prompt),
@@ -5393,7 +5394,7 @@ describe('createPlaybookCaptainShell turn summaries (CAPTAIN-21)', () => {
     // The grounding and no-raw-vocabulary instructions live in the compiled
     // closing-reply prompt the shell wraps verbatim (CAPPLAY-20 pin 5).
     expect(summary?.prompt).toContain(
-      'compose the closing reply and turn summary only from the outcome-report facts',
+      'report effects only from the outcome-report facts',
     );
     expect(summary?.prompt).toContain(
       'claim no work the report does not contain',
@@ -5404,7 +5405,7 @@ describe('createPlaybookCaptainShell turn summaries (CAPTAIN-21)', () => {
     expect(summary?.prompt).toContain(
       'Do not mention counts for states the report does not name',
     );
-    expect(summary?.prompt).toContain('Keep a natural chat-like tone');
+    expect(summary?.prompt).toContain('Use familiar words and usually one to three short sentences');
   });
 
   it('derives schema-3 saved counts only from accepted outcomes', async () => {
@@ -7181,6 +7182,14 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     const docs = fakePlaybookEntry('docs', 'docs', async () =>
       quiescentResult('drafting'),
     );
+    const createChild = docs.entry.createRuntime;
+    docs.entry.createRuntime = (...args: any[]) => {
+      const child = createChild(...args);
+      child.describe = () => ({ state: quiescentResult('drafting').state, pendingQuestions: [], actions: [] });
+      // A describable child still must not be retained before input delivery.
+      child.exportSnapshot = () => ({}) as PlaybookRuntimeSnapshot;
+      return child;
+    };
     // Give the child one role its caller does not map so the visibility
     // request is observably the explicitly bound child leaf.
     docs.entry.requiredRoleIds = ['docs'];
@@ -7209,6 +7218,72 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     const failurePrompt = turnSummaryCalls(context).at(-1)?.prompt ?? '';
     expect(failurePrompt).toContain('Settlement status: failed');
     expect(failurePrompt).toContain('invalid nested visible set');
+  });
+
+  it.each(['status-error', 'visibility-abort', 'input-abort', 'input-abort-describe'])('disposes an exportable child before delivery: %s', async (failure) => {
+    let childResult: unknown;
+    const code = fakeCodeEntry(async (runtime, runtimeTurn) => {
+      if (!runtime.ports) throw new Error('runtime ports missing');
+      childResult = await runtime.ports.callPlaybook(
+        {
+          callId: 'code:docs:visibility',
+          playbookId: 'docs',
+          text: 'open docs',
+        },
+        runtimeTurn.signal,
+      );
+      return quiescentResult();
+    });
+    const docs = fakePlaybookEntry('docs', 'docs', async () =>
+      quiescentResult('drafting'),
+    );
+    const createChild = docs.entry.createRuntime;
+    docs.entry.createRuntime = (...args: any[]) => {
+      const child = createChild(...args);
+      child.describe = () => ({ state: quiescentResult('drafting').state, pendingQuestions: [], actions: [] });
+      if (failure === 'input-abort-describe') child.describe = () => { throw new Error('describe is unavailable'); };
+      // A describable child still must not be retained before input delivery.
+      child.exportSnapshot = () => ({}) as PlaybookRuntimeSnapshot;
+      if (failure.startsWith('input-abort')) child.handleBossInput = async () => {
+        abort.abort(new Error('cancel before child accepts input'));
+        return { outcome: 'aborted', state: quiescentResult('drafting').state };
+      };
+      return child;
+    };
+    docs.entry.requiredRoleIds = ['docs'];
+    delete code.entry.summaryPolicy;
+    delete docs.entry.summaryPolicy;
+    const shell = makeShell([code, docs], { sessionIds: [ROOT_ID, CHILD_ID] });
+    const session = stubSession();
+    const context = stubContext();
+    const abort = new AbortController();
+    if (failure.startsWith('input-abort')) context.context.signal = abort.signal;
+    if (failure === 'visibility-abort') {
+      context.context.signal = abort.signal;
+      context.context.setVisiblePlayers = async (ids) => {
+        if (ids.includes('docs-docs')) abort.abort(new Error('stop before child delivery'));
+      };
+    }
+    const emitStatus = session.session.emitStatus;
+    session.session.emitStatus = async (...args) => {
+      if (failure === 'status-error' && String(args[0]).includes('called by')) throw new Error('status writer failed before delivery');
+      return emitStatus(...args);
+    };
+
+    await shell.init!(session.session);
+    const running = shell.handleBossTurn(turn('/code open a nested child'), context.context);
+    if (failure !== 'status-error') await running.catch(() => {});
+    else await expect(running).resolves.toBeUndefined();
+
+    expect(docs.runtimes[0]?.inputs).toEqual([]);
+    expect(docs.runtimes[0]?.disposeCount).toBe(1);
+    expect(childResult).toMatchObject({ state: 'settled' });
+    if (failure.startsWith('input-abort')) {
+      expect(abort.signal.aborted).toBe(true);
+      expect(childResult).toMatchObject({ result: { status: 'aborted' } });
+    }
+    if (failure === 'status-error') expect(childResult).toMatchObject({ result: { status: 'error', error: { message: 'status writer failed before delivery' } } });
+    await shell.dispose!();
   });
 
   it('uses the parent invocation lifetime signal for the child initial turn', async () => {
@@ -7281,6 +7356,30 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     });
     expect(docs.runtimes[0]?.disposeCount).toBe(1);
     expect(code.runtimes[0]?.disposeCount).toBe(0);
+  });
+
+  it('keeps a parked child when a finished Boss turn is cancelled later', async () => {
+    const code = fakeCodeEntry(async (runtime, input) => {
+      const child = await runtime.ports!.callPlaybook({ callId: 'code:docs:lifetime', playbookId: 'docs', text: 'open docs' }, input.signal);
+      if (child.state !== 'suspended') throw new Error('expected child pause');
+      return suspendedResult({ callId: 'code:docs:lifetime', playbookId: 'docs', childSessionId: child.childSessionId });
+    });
+    const docs = fakePlaybookEntry('docs', 'docs', async () => quiescentResult('drafting'));
+    delete code.entry.summaryPolicy;
+    delete docs.entry.summaryPolicy;
+    const shell = makeShell([code, docs], { sessionIds: [ROOT_ID, CHILD_ID] });
+    const session = stubSession();
+    const context = stubContext();
+    const oldTurn = new AbortController();
+    context.context.signal = oldTurn.signal;
+    await shell.init!(session.session);
+    await shell.handleBossTurn(turn('/code open child'), context.context);
+    oldTurn.abort(new Error('old Boss turn ended'));
+    await shell.handleBossTurn(turn('/docs continue child', 2), stubContext().context);
+    expect(docs.runtimes[0]?.disposeCount).toBe(0);
+    expect(code.runtimes[0]?.resumes).toEqual([]);
+    expect(docs.runtimes[0]?.inputs.map(({ text }) => text)).toEqual(['open docs', 'continue child']);
+    await shell.dispose!();
   });
 
   it('serializes invocation-abort cleanup against a simultaneous child return', async () => {
@@ -8479,7 +8578,16 @@ describe('Playbook Captain complete session snapshots (CAPTAIN-41/42/43)', () =>
     ).toBe('code-coder');
 
     const clone = (): any => JSON.parse(JSON.stringify(base));
+    const withRequest = clone();
+    withRequest.frames[0].request = 'Original task';
+    withRequest.frames[0].inputs = ['Later instruction'];
+    expect(() => assertPlaybookCaptainShellSnapshot(withRequest)).not.toThrow();
     const intrinsicMutations: Array<() => unknown> = [
+      ...[ [0, 'request', ' '], [1, 'request', 'child task'], [0, 'inputs', ['']], [1, 'inputs', ['child answer']] ].map(([index, key, field]) => () => {
+        const value = clone();
+        value.frames[index as number][key as string] = field;
+        return value;
+      }),
       () => {
         const value = clone();
         value.captain.agent.model = { kind: 'value', value: 'forbidden' };
@@ -9985,6 +10093,7 @@ describe('Playbook Captain complete session snapshots (CAPTAIN-41/42/43)', () =>
 
     const mutations: readonly [string, () => unknown][] = [
       ['schema version', () => Object.assign(clone(), { schemaVersion: 9 })],
+      ...[-1, 1.5, null, 999].map((presentedEffectPrefix): [string, () => any] => ['presented prefix', () => Object.assign(clone(), { presentedEffectPrefix })]),
       ['unknown field', () => Object.assign(clone(), { ledger: {} })],
       ['chat with engagement members', () => Object.assign(clone(), { mode: 'chat' })],
       ['conversation/history mismatch', () => {
@@ -10952,7 +11061,7 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
     expect(code.runtimes[0]?.adoptions[0]?.snapshot.effectLedger).toEqual(
       emptyPlaybookEffectLedger(),
     );
-    expect(resumed.visiblePlayers).toEqual([]);
+    expect(resumed.visiblePlayers).toEqual([['code-coder', 'code-reviewer']]);
     expect(resumed.replies[0]).toContain(
       'remains parked until its repository-effect evidence is reconciled',
     );
@@ -11315,7 +11424,7 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
     expect(code.runtimes[0]?.adoptions[0]?.snapshot.effectLedger).toEqual(
       captureLedger,
     );
-    expect(resumed.visiblePlayers).toEqual([]);
+    expect(resumed.visiblePlayers).toEqual([['code-coder', 'code-reviewer']]);
     expect(shell.exportSettlement()?.snapshot).toMatchObject({
       effectLedger: authoritativeLedger,
       retainedEffectReconciliation: {
@@ -11687,6 +11796,59 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
       ]),
     });
     await shell.dispose?.();
+  });
+
+  it.each([false, true])('preserves a decided clear through progress=%s and repeated settlements', async (progress) => {
+    const code = fakeCodeEntry(
+      async (runtime) => {
+        const state = playbookState('editing');
+        runtime.snapshot = runtimeSnapshot('code', state, { turn: 1 });
+        return { outcome: 'quiescent', state };
+      }, undefined,
+      async (runtime) => { runtime.snapshot = runtimeSnapshot('code', playbookState('ready')); },
+    );
+    enableGenerationRetention(code);
+    let supportsRetention = false;
+    const createCode = code.entry.createRuntime;
+    code.entry.createRuntime = (options, capabilities) => {
+      const runtime = createCode(options, capabilities) as FakeRuntime;
+      if (!supportsRetention) delete runtime.retainedGenerationMetadata;
+      return runtime;
+    };
+    const docs = fakePlaybookEntry('docs', 'docs', async (runtime) => {
+      const state = playbookState('drafting');
+      runtime.snapshot = runtimeSnapshot('docs', state, { turn: 1 });
+      return { outcome: 'quiescent', state };
+    }, undefined, async (runtime) => { runtime.snapshot = runtimeSnapshot('docs', playbookState('ready')); });
+    enableGenerationRetention(docs);
+    const recordProgress = vi.fn<NonNullable<PlaybookCaptainDeps['recordProgress']>>(async () => {});
+    const shell = makeShell([code, docs], { ...(progress ? { recordProgress } : {}) });
+    await shell.init!(stubSession(roster).session);
+    await shell.installRetainedGenerations({ code: retainedRootGeneration('code', SOURCE_ROOT_ID, 'retainedCode') });
+    try {
+      await shell.handleBossTurn(turn('/docs draft'), stubContext([
+        { status: 'ok', turnId: 1, finalText: 'The draft is ready to continue.' },
+      ]).context);
+      if (progress) expect(recordProgress).toHaveBeenCalled();
+      const cleared = shell.exportSettlement();
+      expect(cleared?.retentionUpdates).toContainEqual({ kind: 'clear', rootPlaybookId: 'code' });
+      expect(shell.exportSettlement()).toEqual(cleared);
+
+      // A new capable runtime can retain work after the old generation was
+      // cleared; neither another export nor the next turn revives the clear.
+      supportsRetention = true;
+      await shell.handleBossTurn(turn('/code new task', 2), stubContext([
+        { status: 'ok', turnId: 2, finalText: 'The new work is ready to continue.' },
+      ]).context);
+      const retained = shell.exportSettlement();
+      expect(retained?.retentionUpdates).toContainEqual(expect.objectContaining({ kind: 'retain', rootPlaybookId: 'code' }));
+      expect(retained?.retentionUpdates).not.toContainEqual({ kind: 'clear', rootPlaybookId: 'code' });
+      expect(shell.exportSettlement()).toEqual(retained);
+      await shell.handleBossTurn(turn('status', 3), stubContext([
+        captainJson({ action: 'respond', text: 'The work remains ready to continue.' }),
+      ]).context);
+      expect(shell.exportSettlement()?.retentionUpdates).toContainEqual(expect.objectContaining({ kind: 'retain', rootPlaybookId: 'code' }));
+    } finally { await shell.dispose?.(); }
   });
 
   it('keeps retained playbook ids available as repeatable Boss prose', async () => {
@@ -13492,6 +13654,14 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     })),
     ...[
       {
+        reason: 'no-matching-outcome',
+        sentence: 'the playbook has no next step for this result.',
+      },
+      {
+        reason: 'No declared outcome matches: The request needs a choice Boss has not made.',
+        sentence: 'No declared outcome matches: The request needs a choice Boss has not made.',
+      },
+      {
         reason: 'host omitted governed semantic settlement',
         sentence: "the host did not settle the step's outcome.",
       },
@@ -14587,7 +14757,7 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     await shell.handleBossTurn(turn(text, 2), context.context);
 
     // The leaf's own `apply` ran once, under the turn's idempotency key.
-    expect(applied).toEqual([{ actionId: RETRY.id, key: 'turn-2-apply-retry:step' }]);
+    expect(applied).toEqual([{ actionId: RETRY.id, key: 'turn-2-apply-retry:step-1' }]);
     // No decision call was allocated, for this turn or the command turn.
     expect(
       context.captainCalls.filter((call) => isDecisionPrompt(call.prompt)),

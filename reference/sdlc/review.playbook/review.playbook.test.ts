@@ -723,7 +723,7 @@ describe('linked REVIEW runtime', () => {
     // Besides the ordinary retry, Boss may jump back into any round whose
     // typed context exists; no reconciliation action is offered.
     expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
-      'retry:START_REVIEW',
+      'retry:step',
       'jump:firstReview',
       'jump:fixFindings',
     ]);

@@ -2551,24 +2551,21 @@ async function createLease({
   now,
 }) {
   let released = false;
-  let operationActive = false;
+  let operationTail = Promise.resolve();
   let indeterminateEffectLedgerWrite;
+  let releasing = false;
+  const ownerChecks = new Set();
 
-  const requireActive = () => {
-    if (released) throw new Error('Captain session lease was already released');
-    if (operationActive) {
-      throw new Error('Captain session lease operation is already in progress');
-    }
-  };
-
-  const runExclusive = async (operation) => {
-    requireActive();
-    operationActive = true;
-    try {
-      return await operation();
-    } finally {
-      operationActive = false;
-    }
+  // All lifecycle, step and repository writes share one order, including
+  // calls from parallel players. A failed write does not poison the queue.
+  const runExclusive = (operation) => {
+    if (releasing) return Promise.reject(new Error('Captain session lease is releasing'));
+    const run = operationTail.then(() => {
+      if (released) throw new Error('Captain session lease was already released');
+      return operation();
+    });
+    operationTail = run.then(() => undefined, () => undefined);
+    return run;
   };
 
   const assertOwnerUnchecked = async () => {
@@ -2580,7 +2577,14 @@ async function createLease({
     return current;
   };
 
-  const assertOwner = () => runExclusive(assertOwnerUnchecked);
+  const assertOwner = () => {
+    if (releasing) return Promise.reject(new Error('Captain session lease is releasing'));
+    // This reads only the lease token. Parallel players must not compete
+    // for the mutation guard, but release must still join admitted reads.
+    const check = assertOwnerUnchecked();
+    ownerChecks.add(check);
+    return check.finally(() => ownerChecks.delete(check));
+  };
 
   const replayWriter = await createLeaseReplayWriter({
     sessionsDir,
@@ -3113,6 +3117,7 @@ async function createLease({
         ...settledAbandonmentMember(prior),
         uncertain: {
           baseUpdatedAt: prior.uncertain.baseUpdatedAt,
+          ...(prior.uncertain.progress === undefined ? {} : { progress: prior.uncertain.progress }),
           input: prior.uncertain.input,
           attemptId: nextAttemptId,
           attemptNumber: prior.uncertain.attemptNumber + 1,
@@ -3607,6 +3612,49 @@ async function createLease({
       return record.effectLedger;
     });
 
+  const recordProgress = (value) => runExclusive(async () => {
+    const change = requireRecord(snapshotJsonValue(value, 'Captain progress change'), 'Captain progress change');
+    exactOptionalKeys(change, [], ['snapshot', 'step'], 'Captain progress change');
+    await assertOwnerUnchecked();
+    const prior = await readRecord(sessionId, { missing: 'undefined' });
+    if (prior?.state !== 'uncertain' || prior.uncertain.abandonment) {
+      throw new Error('Saving progress requires an active uncertain turn');
+    }
+    const progress = structuredClone(prior.uncertain.progress ?? { snapshot: null, steps: [], positionStepId: null });
+    const newStepStart = change.step && !Object.hasOwn(change.step, 'result') && !progress.steps.some(({ id }) => id === change.step.id);
+    if (Object.hasOwn(change, 'snapshot')) {
+      if (change.snapshot !== null && !isDeepStrictEqual(change.snapshot.effectLedger, prior.effectLedger)) {
+        throw new Error('Saved progress must contain the current effect ledger');
+      }
+      progress.snapshot = change.snapshot;
+      progress.positionStepId = change.snapshot !== null && newStepStart ? change.step.id : null;
+    }
+    if (change.step !== undefined) {
+      const step = snapshotJsonValue(change.step, 'Captain step');
+      const index = progress.steps.findIndex(({ id }) => id === step.id);
+      if (index < 0) {
+        if (!Object.hasOwn(change, 'snapshot')) throw new Error('A step start requires its position or explicit null');
+        if (Object.hasOwn(step, 'result') && !['completion', 'answer'].includes(step.kind)) throw new Error('A step result requires its saved start');
+        progress.steps.push(step);
+      } else {
+        const { result, ...start } = step;
+        const saved = progress.steps[index];
+        const { result: priorResult, ...priorStart } = saved;
+        if (!isDeepStrictEqual(start, priorStart) ||
+            (priorResult !== undefined && !isDeepStrictEqual(priorResult, result))) {
+          throw new Error('A saved step cannot be replaced');
+        }
+        progress.steps[index] = step;
+      }
+    }
+    const record = validateCaptainSessionRecord(projectRecovery({
+      ...prior, uncertain: { ...prior.uncertain, progress },
+    }));
+    await assertOwnerUnchecked();
+    await writeRecord(record, { noReplace: false });
+    await assertOwnerUnchecked();
+  });
+
   const discard = ({ attemptId } = {}) =>
     runExclusive(async () => {
       assertUuid(attemptId, 'Captain session attempt id');
@@ -3620,10 +3668,8 @@ async function createLease({
           'Captain session unresolved-effect abandonment must recover before discard',
         );
       }
-      if (!isDeepStrictEqual(prior.effectLedger, prior.snapshot.effectLedger)) {
-        throw new Error(
-          'Captain session uncertain effect ledger differs from its pre-turn checkpoint and cannot be discarded',
-        );
+      if (!isUncertainTurnDiscardable(prior)) {
+        throw new Error('Recorded work or changed repository evidence must be restored and reported; the turn cannot be discarded');
       }
       await assertOwnerUnchecked();
       if (prior.uncertain.baseUpdatedAt === null) {
@@ -3655,19 +3701,27 @@ async function createLease({
     });
 
   const release = () => {
+    if (released || releasing) return Promise.reject(new Error(`Captain session lease is ${released ? 'released' : 'releasing'}`));
     replayWriter.closeAppendAdmission();
-    return runExclusive(async () => {
-      await replayWriter.prepareRelease();
-      if (replayWriter.status().incomplete && previousManifest?.replay?.incomplete !== true) {
-        const record = await readRecord(sessionId, { missing: 'undefined' });
-        if (record !== undefined) await writeRecord(record, { noReplace: false });
+    const pending = runExclusive(async () => {
+      try {
+        await Promise.allSettled([...ownerChecks]);
+        await replayWriter.prepareRelease();
+        if (replayWriter.status().incomplete && previousManifest?.replay?.incomplete !== true) {
+          const record = await readRecord(sessionId, { missing: 'undefined' });
+          if (record !== undefined) await writeRecord(record, { noReplace: false });
+        }
+        const current = await assertOwnerUnchecked();
+        await retireObservedLease(sessionId, current);
+        released = true;
+        portableWriters.delete(sessionId);
+        return replayWriter.status();
+      } finally {
+        releasing = false;
       }
-      const current = await assertOwnerUnchecked();
-      await retireObservedLease(sessionId, current);
-      released = true;
-      portableWriters.delete(sessionId);
-      return replayWriter.status();
     });
+    releasing = true;
+    return pending;
   };
 
   return Object.freeze({
@@ -3691,6 +3745,7 @@ async function createLease({
     completeUnresolvedEffectAbandonment,
     recoverUnresolvedEffectAbandonment,
     writeEffectLedger,
+    recordProgress,
     settle,
     discard,
     assertOwner,
@@ -4034,7 +4089,7 @@ function validateCanonicalCaptainSessionRecord(
     exactOptionalKeys(
       uncertain,
       UNCERTAIN_KEYS,
-      ['abandonment'],
+      ['abandonment', 'progress'],
       'Captain session record uncertain',
     );
     if (uncertain.baseUpdatedAt !== null) {
@@ -4112,6 +4167,65 @@ function validateCanonicalCaptainSessionRecord(
       uncertain.attemptedExecutionProjection,
       artifactSchemas,
     );
+    if (uncertain.progress !== undefined) {
+      const progress = requireRecord(uncertain.progress, 'Captain progress');
+      exactOptionalKeys(progress, ['snapshot', 'steps'], ['positionStepId'], 'Captain progress');
+      if (!Array.isArray(progress.steps)) throw new Error('Captain steps must be an array');
+      const ids = new Set();
+      for (const step of progress.steps) {
+        exactOptionalKeys(requireRecord(step, 'Captain step'), ['id', 'kind', 'stateId', 'runtimeSessionId', 'playbookId'], ['result'], 'Captain step');
+        assertUuid(step.id, 'Captain step id');
+        assertUuid(step.runtimeSessionId, 'Captain step runtime');
+        if (ids.has(step.id)) throw new Error('Captain step ids must be unique');
+        ids.add(step.id);
+        if (!['player', 'captain', 'script', 'preparation', 'completion', 'answer'].includes(step.kind)) throw new Error('Unknown Captain step kind');
+        if (['completion', 'answer'].includes(step.kind) && (!step.result || typeof step.result !== 'object' || Array.isArray(step.result))) throw new Error('A recorded completion or answer requires its result');
+        if (step.kind === 'completion') {
+          exactOptionalKeys(step.result, ['state'], ['description', 'terminalOutcome', 'retention'], 'Completed root result');
+          if (step.result.retention !== undefined && !['clear', 'keep'].includes(step.result.retention)) throw new Error('Completed root retention must be clear or keep');
+          if (step.result.state?.status !== 'done' || (step.result.state.stateId !== undefined && step.result.state.stateId !== step.stateId)) throw new Error('Completed root result must name its final state');
+          if (step.result.description !== undefined) requireNonblank(step.result.description, 'Completed root description');
+          if (step.result.terminalOutcome !== undefined) {
+            const terminal = step.result.terminalOutcome;
+            exactOptionalKeys(terminal, ['stateId', 'kind'], ['description'], 'Completed root outcome');
+            if (terminal.stateId !== step.stateId || !['success', 'failure'].includes(terminal.kind)) throw new Error('Completed root outcome must name its final state and kind');
+            if (terminal.description !== undefined) requireNonblank(terminal.description, 'Completed root outcome description');
+          }
+        }
+        if (step.kind === 'answer') {
+          exactOptionalKeys(step.result, ['questions', 'instruction'], [], 'Selected answer');
+          requireNonblank(step.result.instruction, 'Selected answer instruction');
+          if (!Array.isArray(step.result.questions) || !step.result.questions.length) throw new Error('Selected answer requires questions');
+          for (const question of step.result.questions) {
+            exactOptionalKeys(question, ['asker', 'question'], [], 'Selected answer question');
+            if (question.asker?.kind === 'captain') exactOptionalKeys(question.asker, ['kind'], [], 'Selected answer asker');
+            else {
+              exactOptionalKeys(question.asker, ['kind', 'roleId'], [], 'Selected answer asker');
+              if (question.asker.kind !== 'role') throw new Error('Unknown selected answer asker');
+              requireCanonicalNonblank(question.asker.roleId, 'Selected answer role');
+            }
+            requireNonblank(question.question, 'Selected answer question');
+          }
+        }
+        requireCanonicalNonblank(step.stateId, 'Captain step state');
+        if (!Object.hasOwn(structural.catalog, step.playbookId)) throw new Error('Captain step names an unknown playbook');
+      }
+      if (progress.positionStepId !== undefined && progress.positionStepId !== null && !ids.has(progress.positionStepId)) throw new Error('Captain progress positionStepId must name a recorded step');
+      if (progress.snapshot === null && progress.positionStepId != null) throw new Error('Captain progress positionStepId requires a saved position');
+      if (progress.snapshot !== null) {
+        const prepared = assertPlaybookCaptainShellSnapshot(progress.snapshot);
+        assertSnapshotMatchesStructure(prepared, structural, artifactSchemas);
+        if ((Object.hasOwn(progress.snapshot, 'presentedEffectPrefix') && prepared.presentedEffectPrefix !== snapshot.presentedEffectPrefix) ||
+            !isDeepStrictEqual(prepared.captain, snapshot.captain) ||
+            !isDeepStrictEqual(prepared.journal, snapshot.journal) ||
+            !isDeepStrictEqual(prepared.sequences, snapshot.sequences) ||
+            !isPlaybookEffectLedgerMonotonicExtension(snapshot.effectLedger, prepared.effectLedger) ||
+            !isPlaybookEffectLedgerMonotonicExtension(prepared.effectLedger, effectLedger)) {
+          throw new Error('Saved progress must retain the settled controller and current work');
+        }
+
+      }
+    }
     if (uncertain.baseUpdatedAt === null) {
       if (!isDeepStrictEqual(lastApplied, attempted)) {
         throw new Error(
@@ -4436,6 +4550,7 @@ const EFFECT_BOUNDARY_IDENTITY_KEYS = [
 const EFFECT_BOUNDARY_OPTIONAL_KEYS = [
   'after',
   'physicalReceipt',
+  'restored',
   'finalText',
   'semanticCandidate',
   'initialSemanticCandidate',
@@ -5018,6 +5133,7 @@ function assertMonotonicBoundaryReplacement(expected, next, path) {
   for (const key of [
     'after',
     'physicalReceipt',
+    'restored',
     'finalText',
     'initialSemanticCandidate',
   ]) {
@@ -6001,9 +6117,13 @@ function validateRetainedGenerationFrame(
       'roleBindings',
       'runtime',
     ],
-    ['parentSessionId', 'parentCallId'],
+    ['parentSessionId', 'parentCallId', 'request', 'inputs'],
     path,
   );
+  if (frame.request !== undefined) {
+    if (index !== 0) throw new Error(`${path}.request belongs only to the root`);
+    requireNonblank(frame.request, `${path}.request`);
+  }
   const playbookId = requireCanonicalNonblank(
     frame.playbookId,
     `${path}.playbookId`,
@@ -6014,6 +6134,7 @@ function validateRetainedGenerationFrame(
       `${path}.playbookId names unknown stored playbook ${JSON.stringify(playbookId)}`,
     );
   }
+  if (frame.inputs !== undefined && (index !== 0 || !Array.isArray(frame.inputs) || frame.inputs.some((input) => typeof input !== 'string' || !input.trim()))) throw new Error(`${path}.inputs belongs only to the root and must contain nonempty strings`);
   assertUuid(frame.sessionId, `${path}.sessionId`);
   assertUuid(frame.rootSessionId, `${path}.rootSessionId`);
   if (sessionIds.has(frame.sessionId)) {
@@ -6573,4 +6694,11 @@ async function writePrivateBytes(path, bytes, fs) {
     await handle?.close();
     try { await fs.unlink(temporary); } catch (cause) { if (cause?.code !== 'ENOENT') throw cause; }
   }
+}
+
+/** One shared decision for discard controls and durable rollback. */
+export function isUncertainTurnDiscardable(record) {
+  return record?.state === 'uncertain' && !record.uncertain.abandonment &&
+    (record.uncertain.progress?.steps.length ?? 0) === 0 &&
+    isDeepStrictEqual(record.effectLedger, record.snapshot.effectLedger);
 }

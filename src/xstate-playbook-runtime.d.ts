@@ -208,6 +208,13 @@ interface XStateRepositoryCohortResult<T> {
     readonly effectLedger: PlaybookEffectLedger;
 }
 export interface XStateRepositoryCapability {
+    observe?(): Promise<PlaybookRepositoryReceipt['baseline']>;
+    acquire?(options: {
+        readonly signal: AbortSignal;
+    }): Promise<{
+        assertOwner(): Promise<void>;
+        release(): Promise<void>;
+    }>;
     runExclusive<T>(options: {
         readonly signal: AbortSignal;
         readonly effectBoundary: XStateEffectBoundarySeed;
@@ -360,14 +367,7 @@ interface XStatePlaybookRuntimeSpecBase<TOptions> {
     entryEvent?: {
         type: string;
         textField: string;
-        /**
-         * DR-034: the FSM context member this machine's entry action copies the
-         * exact Boss text into. Where it is named, the failure-state retry
-         * builds its payload from that member of the live snapshot instead of
-         * from the process-local recorded event, so the action derives the same
-         * before and after `restore`. Absent: the recorded event stays the
-         * source and the action lives only as long as the process.
-         */
+        /** @deprecated Step checkpoints now carry the accepted input directly. */
         contextField?: string;
     };
     /**
@@ -516,6 +516,7 @@ interface PlayerBridgeSpec {
     adjudication: PlayerAdjudicationSpec;
     resumableStateIds: ReadonlySet<string>;
     allowsCorrectiveReplay?: (result: PlayerResult) => boolean;
+    run?: (input: PlaybookPlayerInput, signal: AbortSignal, execute: () => Promise<PlaybookActorOutput>) => Promise<PlaybookActorOutput>;
 }
 export declare function createPlayerBridge(spec: PlayerBridgeSpec, ports: PlaybookPorts, getActiveSignal?: () => AbortSignal | undefined, boundary?: RuntimeBoundaryCalls, onControlPlaneError?: (error: unknown) => void): PromiseActorLogic<PlaybookActorOutput, PlaybookPlayerInput>;
 /**

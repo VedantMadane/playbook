@@ -997,7 +997,7 @@ describe('managed interactive Captain lifecycle (PBCLI-49/50/56/84)', () => {
     );
 
     await lifecycle.initializeRuntime(fixture.context);
-    expect(restored).toEqual(shellSnapshot(fixture.execution, 0));
+    expect(restored).toEqual({ ...shellSnapshot(fixture.execution, 0), presentedEffectPrefix: 0 });
     expect(installCalls).toBe(1);
     expect(installed).toEqual({ code: retainedGeneration() });
     await lifecycle.beforeNonEmptyTurn({

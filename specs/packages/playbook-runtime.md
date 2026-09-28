@@ -31,7 +31,7 @@ Where a factory-backed artifact supplies linker-emitted `roleStates` and no arti
 - Before sending a selected Boss event, emit its bare type such as `START_CODE` as Captain speech.
 - Emit exact `→ <acceptedOutcome>` with no payload tally, rider, or leading whitespace only from the confirmed accepted-outcome evidence of [[playbook-runtime-81](#playbook-runtime-81)].
 - On entry to a state named by `roleStates`, emit `⤷ <Role>: <label>` from that metadata with no source-item or context rider.
-- On entry to a Boss-reply wait, emit the untruncated `<asker> asks: <question>` as Captain speech followed by `◆ awaiting Boss reply · <resumeStateId> · <asker> · <sourceItem>` with no question excerpt, rendering the Captain asker as `Captain` and a role asker by its local role id.
+- On entry to a Boss-reply wait, mark both status lines with `{ kind: "boss-question" }` status data and emit the untruncated `<asker> asks: <question>` as Captain speech followed by `◆ awaiting Boss reply · <resumeStateId> · <asker> · <sourceItem>` with no question excerpt, rendering the Captain asker as `Captain` and a role asker by its local role id.
 - On entry to failure, emit `◆ workflow failed; awaiting Boss recovery.` with the compact normalized error, carrying its cause [[playbook-runtime-96](#playbook-runtime-96)], as status data.
 - Emit no canonical status on entry to an idle, terminal, or other unlisted state.
 
@@ -66,7 +66,7 @@ The package shall provide a module resolvable as
 `PLAYBOOK_FAILURE_CODES` and its validator `assertPlaybookFailureCause`
 ([[playbook-runtime-96](#playbook-runtime-96)]) and which is the single authored source of the
 runtime contract types `PlaybookFailureCode`, `PlaybookFailureCause`,
-`PlaybookFailureEvidence`, `PlaybookFailurePaths`,
+`PlaybookFailureEvidence`, `PlaybookFailurePaths`, `PlaybookRecoveryCheckpoint`, `PlaybookRecoveryOffer`,
 `PlaybookFailureErrorEvidence`, `PlaybookControlStanding`,
 `PlaybookControlActionReason`, `PlayerResult`, `PlayerCallOptions`,
 `PlaybookRoleBinding`, `PlayerSessionStore`, `CaptainResult`, `CaptainCallOptions`,
@@ -77,7 +77,7 @@ runtime contract types `PlaybookFailureCode`, `PlaybookFailureCause`,
 `PlaybookEffectBoundary`, `PlaybookEffectBoundaryStart`, `PlaybookEffectLogicalOperation`, `PlaybookEffectLedger`, `PlaybookEffectLedgerCommand`, `PlaybookEffectLedgerCommandBatch`, `PlaybookEffectLedgerCapability`, `PlaybookControlAction`, `PlaybookControlView`,
 `PlaybookControlReceipt`, `PlaybookRetainedGenerationMetadata`, `PlaybookAdoptionContext`, `PlaybookPorts`, `PlaybookSession`,
 `PlaybookTraceType`, `PlaybookTraceEvent`,
-`PlaybookRuntime`, and `PlaybookRuntimeFactory<Options = unknown>`, as
+`PlaybookRuntime`, `PlaybookStepRecord`, and `PlaybookRuntimeFactory<Options = unknown>`, as
 the TypeScript projection of
 [slc/link.md](../../slc/link.md#playbookruntime-contract).
 The executable `@sublang/playbook/xstate-runtime` module shall export `assertPlaybookEffectLedger`, `emptyPlaybookEffectLedger`, and `isPlaybookEffectLedgerMonotonicExtension` over those shared contract types, plus `PlaybookSemanticFieldAuthority`, `PlaybookSemanticOutcomeSpec`, `PlaybookSemanticEvidenceInput`, `PlaybookReconciledSemanticOutput`, `PlaybookRetainedSemanticEvidence`, `PlaybookSemanticReconciliationReason`, `PlaybookSemanticReconciliation`, `PlaybookSemanticCandidateStructureError`, and `reconcilePlaybookSemanticEvidence` as the centralized semantic-reconciliation surface of [[playbook-runtime-77](#playbook-runtime-77)].
@@ -94,8 +94,8 @@ tools. `PlaybookRuntime.init` shall
 accept a `PlaybookSession` whose optional `roleBindings` maps each local role to exact `playerId` and `promptIdentity` strings and whose optional `playerSessions` implements the exact synchronous store contract in [[playbook-runtime-58](#playbook-runtime-58)], and `PlaybookPorts` shall declare exactly
 the members `callPlayer`,
 `callCaptain`, `callJudge`, `callPlaybook`, `emitStatus`, and
-`emitTelemetry`.
-`PlaybookRuntime.handleBossInput` shall accept exactly `{ text, signal }`:
+`emitTelemetry`, and optional `recordStep(step: PlaybookStepRecord, position?: PlaybookRuntimeSnapshot): Promise<void>` for durable invocation progress [[recovery-1](recovery.md#recovery-1)].
+`PlaybookRuntime.handleBossInput` shall accept exactly `{ text, signal, onAccepted? }`, calling the optional `onAccepted` synchronously immediately before sending the accepted event, at most once and never on refused input:
 no FSM event, parsed decision, or other host-decided input shall enter a
 runtime through it, so a host's per-turn resolution of a Boss turn reaches a
 compiled runtime only as a linker-exposed option member whose type the
@@ -120,12 +120,12 @@ Promise<PlaybookControlReceipt>` — implemented both or neither
 runtime-published `stateDescription` naming what that state means
 ([[playbook-runtime-52](#playbook-runtime-52)]), the optional JSON-safe
 `context` projection its runtime authors ([[playbook-runtime-52](#playbook-runtime-52)]),
-`pendingQuestions`, optional `lastError`, and `actions` of
+`pendingQuestions`, optional `lastError`, the optional preparation offer [[recovery-5](recovery.md#recovery-5)], and `actions` of
 `PlaybookControlAction` (`id`, `label`, optional `standing` and `reason`
 [[playbook-runtime-97](#playbook-runtime-97)]), and `PlaybookControlReceipt`
 shall discriminate exactly `rejected` (with `reason`, before any
 effect), `executed` (with the `run` result), and `failed` (with the
-normalized `error`, after effects may exist).
+normalized `error` and, when the action produced a settled run result, that `run`, after effects may exist).
 `PlaybookTraceType` shall include the paired `apply.started` and
 `apply.finished` members alongside the existing boundary pairs.
 The module shall import no CODE or FSM types, directly or
@@ -207,13 +207,13 @@ Receipt classification shall compare the complete projections and ancestry witho
 #### playbook-runtime-69
 
 Where a schema-3 delegated-player boundary is governed by [[playbook-runtime-50](#playbook-runtime-50)], the current host's effect ledger shall be an exact detached plain-JSON value `{ schemaVersion: 1, revision, boundaries, logicalOperations }` whose nonnegative `revision` is zero if and only if both ordered ledgers are empty and otherwise advances once for each accepted non-idempotent batch, whose `boundaries` have contiguous positive `sequence` in physical order from one, and whose `logicalOperations` have their own contiguous positive `sequence` from one in first-physical-boundary order ([DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §2-§4).
-Each physical boundary shall contain exactly `sequence`, UUID `boundaryId`, UUID `attemptId`, positive `attemptNumber`, `playbookId`, UUID `runtimeSessionId`, positive `turnId`, nonempty `callId`, `roleId`, and `sourceStateId`, exact detached plain-JSON `sourceOutcomeSchema`, the nonempty deduplicated ordered `dispositions` supplied from the schema-3 authority already validated under [[playbook-runtime-50](#playbook-runtime-50)], canonical `{ worktree, gitDir }`, detached `baseline`, optional detached `after`, optional `physicalReceipt`, optional opaque `finalText`, optional plain-JSON `semanticCandidate`, optional plain-JSON `initialSemanticCandidate`, exact `correctionBudget: { limit: 1, spent: boolean }`, optional host-owned UUID `cohortId`, and optional UUID `logicalOperationId`; `initialSemanticCandidate` shall occur only after one spent correction replaces `semanticCandidate`, shall equal that prior candidate, and shall then remain immutable with the replacement.
+Each physical boundary shall contain exactly `sequence`, UUID `boundaryId`, UUID `attemptId`, positive `attemptNumber`, `playbookId`, UUID `runtimeSessionId`, positive `turnId`, nonempty `callId`, `roleId`, and `sourceStateId`, exact detached plain-JSON `sourceOutcomeSchema`, the nonempty deduplicated ordered `dispositions` supplied from the schema-3 authority already validated under [[playbook-runtime-50](#playbook-runtime-50)], canonical `{ worktree, gitDir }`, detached `baseline`, optional detached `after`, optional `physicalReceipt`, optional immutable `restored` observation permitting only verified read-only replay [[recovery-12](recovery.md#recovery-12)], optional opaque `finalText`, optional plain-JSON `semanticCandidate`, optional plain-JSON `initialSemanticCandidate`, exact `correctionBudget: { limit: 1, spent: boolean }`, optional host-owned UUID `cohortId`, and optional UUID `logicalOperationId`; `initialSemanticCandidate` shall occur only after one spent correction replaces `semanticCandidate`, shall equal that prior candidate, and shall then remain immutable with the replacement.
 A `cohortId` shall occur on every and only member of one contiguous all-`unchanged` group, shall be unique to that group, and shall bind distinct roles whose order is one artifact-declared concurrent role set; every member shall share attempt, playbook, runtime-session, turn, canonical-worktree, and baseline identity and shall be uniformly started or uniformly complete, complete members shall carry the identical after observation and receipt, and no later boundary may reuse the id.
 A complete physical receipt shall contain exactly `classification` from [[playbook-runtime-67](#playbook-runtime-67)], the exact `baseline`, optional complete `after`, optional `commitOid`, and an optional closed `preExisting` member `{ absorbed, altered, lost }` of sorted unique pairwise-disjoint baseline projection paths, present exactly when one list is nonempty and only on `one-descendant-commit`, `worktree-only-change`, or `observation-ambiguous` ([DR-062](../decisions/062-pre-existing-changes-are-context.md)); its observations shall equal the enclosing boundary members, a boundary `after` shall occur only with that receipt in the same atomic update, `after` shall be absent only for `observation-ambiguous`, `commitOid` shall occur if and only if it proves `one-descendant-commit` and shall equal `after.head`, and a started boundary with no after and receipt is effect-possible and shall never be represented as completed.
 Each logical operation shall contain exactly `sequence`, UUID `operationId`, `playbookId`, UUID `runtimeSessionId`, a nonempty physical-order unique `boundaryIds` list, `originalBaseline`, optional latest `checkpoint`, optional exact pending question with nonempty exact identity and nonblank content, optional exact token-free `playerContinuation: {v:1,playerId:string}`, boolean `checkpointRestorationEligible`, and optional cumulative `logicalReceipt`; its first boundary, original baseline, prior boundary-id prefix, and completed receipt shall remain fixed; every named boundary shall exist, reciprocally name that operation, share its playbook and runtime-session identity, use the first boundary's exact baseline as the operation's original baseline and its canonical worktree, and after the first start from the preceding boundary's complete after checkpoint; its checkpoint shall equal its latest boundary's after observation; the checkpoint, pending question, and player continuation shall occur together or all be absent; and eligibility shall require that bound group.
 A replacement may append physical-order boundary ids and replace or clear the complete current bound group together with eligibility, while an existing logical receipt remains immutable. The optional receipt shall require every physical receipt and reconcile the original baseline with the final after observation rather than replace any physical receipt ([DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §4).
 No boundary or logical operation shall carry a capability function, abort signal, lease-owner token, repository-claim handle, session-store handle, or other live object.
-The capability shall expose its complete current mirror synchronously and one atomic `writeAhead` accepting a nonempty ordered batch drawn from exactly four nonempty command variants: `start-boundaries`, whose `PlaybookEffectBoundaryStart` inputs omit store-owned `sequence`, `attemptId`, and `attemptNumber` plus completion-only `after`, `physicalReceipt`, `finalText`, `semanticCandidate`, and `initialSemanticCandidate`; `replace-boundaries`, whose `replacements` entries carry an exact expected and next boundary under one identity; `append-logical-operations`, whose `operations` inputs omit store-owned `sequence`; and `replace-logical-operations`, whose `replacements` entries carry an exact expected and next operation under one identity.
+The capability shall expose its complete current mirror synchronously and one atomic `writeAhead` accepting a nonempty ordered batch drawn from exactly four nonempty command variants: `start-boundaries`, whose `PlaybookEffectBoundaryStart` inputs omit store-owned `sequence`, `attemptId`, and `attemptNumber` plus completion-only `after`, `physicalReceipt`, `restored`, `finalText`, `semanticCandidate`, and `initialSemanticCandidate`; `replace-boundaries`, whose `replacements` entries carry an exact expected and next boundary under one identity; `append-logical-operations`, whose `operations` inputs omit store-owned `sequence`; and `replace-logical-operations`, whose `replacements` entries carry an exact expected and next operation under one identity.
 The host shall apply the batch's commands in order as one ledger transition, validate the final cross-reference graph after the complete batch, and acknowledge only one atomic persistence and revision increment; an exact start or append replay under the same boundary or operation identities and payload shall return the same detached frozen acknowledgement without advancing revision, while conflicting identity reuse, a stale replace `expected` value, a changed immutable member, non-prefix start, nonmonotonic replacement, or final cross-reference violation shall reject the complete batch without mutation. A spent correction may replace `semanticCandidate` exactly once only while adding `initialSemanticCandidate` equal to the prior candidate; neither candidate may then change.
 The runtime shall replace its synchronous mirror only with the detached frozen ledger acknowledged after the host's atomic durable write, and every linked workflow runtime construction, restore, and adoption shall require that full mirror to equal the current host mirror; the internal compiled Captain runtime shall instead use the canonical empty version-1 ledger at revision zero.
 Before a player begins, the coordinator shall persist one started boundary containing the captured baseline; a declared cohort shall assign one fresh shared `cohortId` and persist every member's start in one batch before any member begins.
@@ -225,12 +225,13 @@ Where that post-operation persistence fails or is indeterminate, the current hos
 
 #### playbook-runtime-71
 
-Where a delegated-player boundary is governed by an artifact-schema-3 outcome contract [[playbook-runtime-50](#playbook-runtime-50)], the runtime shall authorize either of the following forms of runtime-local automatic replay only from the current host-acknowledged durable effect ledger of [[playbook-runtime-69](#playbook-runtime-69)] under [DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §4:
+Where a delegated-player boundary is governed by an artifact-schema-3 outcome contract [[playbook-runtime-50](#playbook-runtime-50)], the runtime shall authorize either of the following forms of governed player reentry only from the current host-acknowledged durable effect ledger of [[playbook-runtime-69](#playbook-runtime-69)] under [DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §4:
 
 - The empty-`ok` corrective re-ask of [[playbook-runtime-9](#playbook-runtime-9)] may start only after its preceding physical boundary occurs in the acknowledged mirror with a complete `physicalReceipt` whose `classification` is exactly `unchanged`.
-- The failure-state entry-event retry of [[playbook-runtime-1](#playbook-runtime-1)] and [[playbook-runtime-52](#playbook-runtime-52)], and every explicit-state jump of [[playbook-runtime-52](#playbook-runtime-52)] out of that failure state, may be mapped, advertised, or accepted only when every governed physical boundary in the failed host attempt's `attemptId` group occurs in that mirror with a complete `physicalReceipt` whose `classification` is exactly `unchanged`.
+- New Boss text mapped to the failure-state entry event of [[playbook-runtime-1](#playbook-runtime-1)] and every explicit-state jump out of that failure state [[playbook-runtime-52](#playbook-runtime-52)] may be mapped, advertised, or accepted only when every governed physical boundary in the failed host attempt's `attemptId` group occurs in that mirror with a complete `physicalReceipt` whose `classification` is exactly `unchanged`.
 
-A missing boundary, missing receipt, incomplete boundary, or any other classification shall start no corrective player call, shall suppress every ordinary failure-state retry and jump derived from that attempt, and shall retain the acknowledged ledger evidence unchanged for later reconciliation.
+A missing boundary, missing receipt, incomplete boundary, or any other classification shall start no corrective player call, shall suppress entry events and explicit-state jumps derived from that attempt, and shall retain the acknowledged ledger evidence unchanged for later reconciliation.
+The invocation-local checkpoint retry shall instead establish replay safety from its own boundary prefix [[recovery-3](recovery.md#recovery-3)], including a separately verified restoration of a read-only invocation [[recovery-12](recovery.md#recovery-12)].
 When a governed runtime enters its failure state, it shall bind the retry decision to every effect-ledger boundary appended since the causal public boundary began, including a nested or sibling runtime's boundary: an exportable failed snapshot shall carry `failedEffectAttempt` with the exact pre-boundary `boundaryPrefix` and the one causal host-attempt UUID as `attemptId`, use `null` as that attempt id only when the ledger suffix after the prefix is empty, or omit the member when the causal attempt is unknown; restore shall preserve those three meanings, and an unknown or multi-attempt causal set shall authorize no replay.
 Where that public boundary suspends a nested playbook call before it can fail, the suspended-call snapshot shall preserve the same prefix as nonnegative `effectBoundaryPrefixSequence`, use explicit `null` when the prefix observation is unknown, and restore it for the eventual child-result boundary; a legacy snapshot that omits it shall conservatively use the complete ledger.
 The fence shall not alter nongoverned delegated calls, authored Boss-reply continuations, or direct-Captain corrective re-asks.
@@ -381,7 +382,8 @@ control-plane error the turn's drain surfaces ([[playbook-runtime-41](#playbook-
 #### playbook-runtime-10
 
 When adjudicating a player's `finalText`, the runtime shall call `callJudge` with a prompt that names the invoked player, includes the player's output verbatim, and lists every guard key of the FSM state's `result` map with its description.
-It shall require a JSON object reply carrying a `guard` field equal to one of those keys.
+For a matching outcome it shall require a JSON object reply carrying a `guard` field equal to one of those keys.
+For a governed call whose output fits no declared outcome, the prompt shall instead permit exactly `{blocked:<nonempty explanation>}`; reconciliation shall retain that reply and return `no-matching-outcome` with its explanation as a runtime-defect cause, without correcting the reply or delivering an FSM outcome.
 For a nongoverned delegated-player call, each description is rendered verbatim.
 For a governed delegated-player call, each description's meaning before its `Output shall include` clause is rendered verbatim, while that clause — authored for the complete actor output — is replaced by the reply contract derived from the outcome's declared field authority under [[playbook-runtime-50](#playbook-runtime-50)]: exactly `guard` plus the outcome's semantic-owned fields, each keeping the placeholder or guidance its clause authors, with every presentation-, effect-, and runtime-owned field named as runtime-supplied to omit, so the judge is never asked for a field it does not own while the artifact's description text stays unaltered.
 For a nongoverned delegated-player call, the reply shall carry a string value for every payload field the
@@ -413,12 +415,12 @@ For a nongoverned delegated-player call, a reply that is malformed, names an und
 
 #### playbook-runtime-77
 
-Where an artifact-schema-3 delegated-player boundary is governed by [[playbook-runtime-50](#playbook-runtime-50)], the shared engine shall apply the hidden adjudication and JSON-recovery boundary of [[playbook-runtime-10](#playbook-runtime-10)] through one semantic reconciler that accepts only a detached plain-JSON candidate containing exactly one declared `guard` plus every and only semantic-owned string field required by that outcome, rejects a missing, extra, wrongly owned, invalid, or mutually inconsistent field before FSM delivery, preserves the exact nonempty `finalText` as opaque presentation evidence, supplies each presentation-owned field only from its canonical trimmed value, supplies every effect-owned field independently of its name from the matching receipt's exact new-descendant OID on `one-descendant-commit` or observed HEAD OID on `unchanged` under [[playbook-runtime-67](#playbook-runtime-67)] ([DR-045](../decisions/045-unchanged-receipt-revision-authority.md)), and supplies any runtime-owned field only from explicit runtime evidence ([DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §1 and §3).
+Where an artifact-schema-3 delegated-player boundary is governed by [[playbook-runtime-50](#playbook-runtime-50)], the shared engine shall apply the hidden adjudication and JSON-recovery boundary of [[playbook-runtime-10](#playbook-runtime-10)] through one semantic reconciler that admits to FSM delivery only a detached plain-JSON candidate containing exactly one declared `guard` plus every and only semantic-owned string field required by that outcome, rejects a missing, extra, wrongly owned, invalid, or mutually inconsistent field before FSM delivery, preserves the exact nonempty `finalText` as opaque presentation evidence, supplies each presentation-owned field only from its canonical trimmed value, supplies every effect-owned field independently of its name from the matching receipt's exact new-descendant OID on `one-descendant-commit` or observed HEAD OID on `unchanged` under [[playbook-runtime-67](#playbook-runtime-67)] ([DR-045](../decisions/045-unchanged-receipt-revision-authority.md)), and supplies any runtime-owned field only from explicit runtime evidence ([DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §1 and §3).
 For `unchanged` and `one-descendant-commit`, the reconciler shall resolve only when the complete physical receipt, or a deferred chain's cumulative logical receipt, exactly matches the selected outcome's declared repository disposition; for `deferred`, it shall admit only the already-valid effect-authorized `needsBossReply` arm from a complete `unchanged` or `worktree-only-change` receipt whose after HEAD equals its baseline HEAD, and the actor output shall become deliverable only after the host durably binds the checkpoint and continuation under [[playbook-runtime-73](#playbook-runtime-73)].
 After a first structurally invalid semantic reply, the runtime shall make at most one corrective hidden judge call over the identical retained presentation evidence and outcome schema with the validation error restated, and shall start that call only after it has awaited an exact durable compare-and-swap acknowledgement changing that physical boundary's correction budget from unspent to spent while retaining its physical receipt, opaque presentation, and recoverable invalid candidate through [[playbook-runtime-69](#playbook-runtime-69)] and has rechecked the live abort signal under [[playbook-runtime-13](#playbook-runtime-13)].
 A failed, indeterminate, stale, or mismatched spend, a previously spent budget, or an abort before the corrective call begins shall start no corrective judge and shall never replenish the budget across restart; a second structurally invalid reply shall receive no further correction; an initial or corrective judge transport or result-shape failure shall trigger no corrective or third call respectively; and a player abort, error, non-`ok` result, or missing nonempty `finalText` shall trigger no adjudication under [[playbook-runtime-9](#playbook-runtime-9)].
 Only a complete authority-consistent envelope shall deliver its exact frozen reconciled output once to the FSM after the applicable evidence update is durably acknowledged; completion shall retain the opaque presentation and the latest recoverable detached plain-JSON semantic candidate, including a structurally invalid candidate, without parsing either for a repository fact, and when correction replaces that candidate it shall preserve the first candidate immutably as `initialSemanticCandidate`, while a malformed reply from which no JSON value can be recovered may omit both candidates, effect-possible missing, incomplete, invalid, or inconsistent evidence shall deliver no output and remain parked for reconciliation, and retained evidence shall start no replacement player or judge after restart.
-A standalone boundary whose complete physical receipt is exactly `unchanged` excludes any effect: missing, invalid, or inconsistent semantic evidence over it — a judge transport or result-shape failure, an exhausted correction budget, or a disposition mismatch — shall instead fail that boundary into the ordinary failure path, entering no unresolved reconciliation, exposing no unresolved-effect envelope or control, and leaving the failure-state retry to the fence of [[playbook-runtime-71](#playbook-runtime-71)]; a boundary inside a deferred chain of [[playbook-runtime-73](#playbook-runtime-73)] is judged by the chain's cumulative evidence rather than by its own step.
+A standalone boundary whose complete physical receipt is exactly `unchanged` excludes any effect: missing, invalid, or inconsistent semantic evidence over it — a judge transport or result-shape failure, an exhausted correction budget, or a disposition mismatch — shall instead fail that boundary into the ordinary failure path, entering no unresolved reconciliation, exposing no unresolved-effect envelope or control, and leaving saved-step retry to [[recovery-3](recovery.md#recovery-3)] and new entry or jump actions to the fence of [[playbook-runtime-71](#playbook-runtime-71)]; a boundary inside a deferred chain of [[playbook-runtime-73](#playbook-runtime-73)] is judged by the chain's cumulative evidence rather than by its own step.
 A complete retained envelope may reconcile and deliver once without another player or judge only after restoration reaches its exact matching source state; until then it shall remain parked.
 
 ### Drive to quiescence
@@ -533,7 +535,7 @@ Each registry shall publish only the summary labels and handoff guards its curre
 #### playbook-runtime-16
 
 Where CODE, REVIEW, or DECIDE runs through composed config, the host Captain module shall be `@sublang/playbook/playbook-captain` and the enabled entry shall use the matching public `@sublang/playbook/<id>/registry` module per [[playbook-captain-16](playbook-captain.md#playbook-captain-16)] and [[playbook-captain-17](playbook-captain.md#playbook-captain-17)].
-Each registry shall map a dispatched Boss turn to `runtime.handleBossInput({ text, signal })` and shall expose no direct tmux-play adapter.
+Each registry shall map a dispatched Boss turn to `runtime.handleBossInput` with the input of [[playbook-runtime-34](#playbook-runtime-34)] and shall expose no direct tmux-play adapter.
 
 #### playbook-runtime-30
 
@@ -784,8 +786,9 @@ state descriptor, the governed failure-attempt member of [[playbook-runtime-71](
 A question shall count as pending only while the machine awaits its reply in an authored reply-wait state, under one pendingness shared with the state telemetry a host ledger mirrors, so the ledger and this snapshot cannot disagree about the same fact: for a flat machine the shared factory interprets that wait is the singular canonical `awaitBossReply` state, for a machine it interprets through the parallel profile each keyed question pends only while its own authored wait is active under [[playbook-runtime-88](#playbook-runtime-88)], DECIDE's parallel branch waits included, and a context question a later state retains — the recoverable failure a resumed player reached included — shall export as no pending question, while linked machinery of an artifact's own counts the questions awaiting replies in its own authored wait states.
 Where exactly one nested playbook call is suspended, that snapshot shall also carry its bridge-owned `callId`, `stateId`, `playbookId`, exact `text`, and `childSessionId`, enriched with the matching call-to-turn owner when present and the governed replay prefix of [[playbook-runtime-71](#playbook-runtime-71)] when applicable; export shall return `undefined` if the pending bridge identity, complete descriptor, or recorded call-to-turn ownership is absent or inconsistent.
 Where no nested playbook call is suspended, the schema-version-4 snapshot shall omit `suspendedCall`; at any other unsafe capture point `exportSnapshot` shall return `undefined`.
+Public `exportSnapshot({child})` shall capture an exact bridge-owned child call during startup as well as suspension, without running the actor.
 A direct-Captain-capable runtime shall persist the `captainCall` member of `sequences` in every exported schema-version-4 snapshot.
-The public `PlaybookRuntimeSnapshot` contract shall admit only schema version `4`, shall require `effectLedger`, shall name its token member `roleResumeTokens`, shall permit `failedEffectAttempt` only on the failed state as an exact `{ boundaryPrefix, attemptId }` object whose nonnegative prefix does not exceed the ledger and whose suffix is either nonempty and wholly owned by its canonical UUID attempt id or empty for an explicit `null`, shall permit `retainedEffectSourceSessionId` only as the canonical UUID of the original adopted source runtime, shall permit `retainedEffectReconciliation` only as an exact `{ sourceSessionId, checkpoint }` object whose source identity equals that separately retained lineage and whose valid checkpoint is a monotonic baseline of `effectLedger`, and shall permit an optional `suspendedCall` descriptor carrying `callId`, `stateId`, `playbookId`, exact `text`, `childSessionId`, optional positive `turnId`, and optional nonnegative-or-null `effectBoundaryPrefixSequence` that does not exceed the ledger; schemas `1` and `2` shall reject before binding because their token and pending-question identities are ambiguous under [DR-032](../decisions/032-explicit-roles-session-players.md), while schema `3` shall reject because it cannot prove effect-ledger authority.
+The public `PlaybookRuntimeSnapshot` contract shall admit only schema version `4`, shall require `effectLedger`, shall name its token member `roleResumeTokens`, shall permit `failedEffectAttempt` only on the failed state as an exact `{ boundaryPrefix, attemptId }` object whose nonnegative prefix does not exceed the ledger and whose suffix is either nonempty and wholly owned by its canonical UUID attempt id or empty for an explicit `null`, shall permit `retainedEffectSourceSessionId` only as the canonical UUID of the original adopted source runtime, shall permit `retainedEffectReconciliation` only as an exact `{ sourceSessionId, checkpoint }` object whose source identity equals that separately retained lineage and whose valid checkpoint is a monotonic baseline of `effectLedger`, shall permit the optional invocation checkpoint [[recovery-1](recovery.md#recovery-1)] validated before restoration [[recovery-2](recovery.md#recovery-2)], and shall permit an optional `suspendedCall` descriptor carrying `callId`, `stateId`, `playbookId`, exact `text`, `childSessionId`, optional positive `turnId`, and optional nonnegative-or-null `effectBoundaryPrefixSequence` that does not exceed the ledger; schemas `1` and `2` shall reject before binding because their token and pending-question identities are ambiguous under [DR-032](../decisions/032-explicit-roles-session-players.md), while schema `3` shall reject because it cannot prove effect-ledger authority.
 The shared snapshot validator shall capture the complete supplied value once as detached frozen JSON and reject accessors and undeclared snapshot, sequence, pending-question, asker, or suspended-call fields.
 The validator shall apply [[playbook-runtime-69](#playbook-runtime-69)] to the ledger and shall reject a schema-version-4 suspended call unless its caller explicitly opts into handling it, its playbook-call counter is positive, its optional turn id does not exceed the turn counter, and its normalized state is active, quiescent, tagged `playbook.suspended`, and contains the descriptor's source state among its active state ids.
 Conversely, the validator shall reject any snapshot whose normalized state is tagged `playbook.suspended` without a schema-version-4 suspended-call descriptor.
@@ -921,47 +924,10 @@ JSON-safe dropped rather than thrown — and the two members the view
 surfaces first-class, the pending Boss question and the last error,
 shall not be nameable; a projection naming either shall fail runtime
 construction rather than be silently ignored.
-Actions shall derive from the live snapshot only at the safe capture
-point of [[playbook-runtime-45](#playbook-runtime-45)] (actor status `active`, quiescent, no
-pending nested call) and shall be empty anywhere else. While the
-singular state id is the recoverable failure state and the live
-snapshot accepts the retry event sourced below, the runtime shall
-advertise the `retry:<EVENT_TYPE>` action replaying exactly that event, subject for a governed artifact-schema-3 failed host attempt to the automatic-replay fence of [[playbook-runtime-71](#playbook-runtime-71)];
-for each registered resumable
-state id whose explicit-state-jump event (`BOSS_INTERRUPT` with that
-`targetId` and optional textual fields omitted) the live snapshot
-accepts, guards included, it shall advertise `jump:<stateId>`, subject
-from the recoverable failure state of a governed artifact-schema-3 failed
-host attempt to that same fence.
-The retry event shall come from the artifact's entry-event declaration
-where that declaration names the FSM context member the machine's entry
-action copies the exact Boss text into: the runtime shall build the
-deterministic entry event from that member of the live snapshot,
-excluding the candidate when the member is absent, not a string, or
-blank, and shall not fall back to the recorded event
-([DR-034](../decisions/034-durable-failure-retry-continuity.md)).
-Where the declaration names no such member, the retry event shall be
-the recorded last classified event — the event a public Boss boundary
-sent, kept with its recorded payload — and shall be absent when the
-runtime holds none.
-The declared source is what the persisted machine snapshot already
-carries, so a runtime restored from that snapshot shall advertise the
-same retry as the process that exported it, including a failure the
-machine reached after a Boss reply resumed the work; an artifact naming
-no member shall keep the process-local behavior of its recorded event.
-The runtime shall not treat a context member that merely matches the
-entry event's text field as that declaration.
-Each action the shared factory advertises shall carry a stable id, its standing
-[[playbook-runtime-97](#playbook-runtime-97)], and a label written from the source
-state descriptions; a retry whose event carries its own
-`targetId` (the explicit-state-jump shape) shall be labeled from that
-recorded target's description — the state its replay re-enters — never
-from another configured arm of a guarded transition list; a candidate
-whose event requires a payload the
-runtime can source from neither its recorded event nor the persisted
-state above shall be excluded — `apply`
-shall never invent free text and shall never enter Boss-input
-classification.
+Actions shall derive from the live snapshot only at the safe capture point [[playbook-runtime-45](#playbook-runtime-45)] and shall be empty elsewhere.
+A failed invocation shall offer only the checkpoint-based retry [[recovery-3](recovery.md#recovery-3)]; no captured position means no retry, and legacy `entryEvent.contextField` metadata shall have no effect.
+For each registered resumable state whose `BOSS_INTERRUPT` with `targetId` and no optional text is accepted, guards included, the runtime shall advertise `jump:<stateId>`, subject from a governed failure state to the failed-attempt fence [[playbook-runtime-71](#playbook-runtime-71)].
+Each action shall have a stable id, standing [[playbook-runtime-97](#playbook-runtime-97)], and label from the actual source or jump-target description; `apply` shall neither invent free text nor classify Boss input.
 A label shall never fall back to an identifier, and a candidate whose
 label could only be one shall be excluded on the same terms as one whose
 payload cannot be sourced. The label is the only Boss-facing name the
@@ -973,8 +939,7 @@ no-op and puts a machine identifier into Boss-facing text
 ([[captain-playbook-5](captain-playbook.md#captain-playbook-5)]). A jump whose
 target publishes no description shall therefore not be advertised —
 borrowing another state's description would name the wrong state — and a
-retry shall fall back from its target's description to its own source
-state's, and shall not be advertised when neither exists.
+retry shall not be advertised when its invocation source has no description.
 `apply({ actionId, key, signal })` shall revalidate against the live
 state and settle `{ disposition: 'rejected', reason }` with no effect
 when the action is not currently advertised; an accepted action shall
@@ -1051,7 +1016,7 @@ persists neither.
 
 #### playbook-runtime-79
 
-At the safe control-capture point of [[playbook-runtime-52](#playbook-runtime-52)], while a schema-3 runtime has effect-possible outcome evidence unresolved under [[playbook-runtime-73](#playbook-runtime-73)], [[playbook-runtime-75](#playbook-runtime-75)], or [[playbook-runtime-77](#playbook-runtime-77)], its control view shall omit every pending Boss question and state description and shall advertise exactly `reconcile:unresolved-effect` labeled `Retry unresolved effect reconciliation` and `abandon:unresolved-effect` labeled `Abandon unresolved workflow attempt`, each with its standing [[playbook-runtime-97](#playbook-runtime-97)], and with no ordinary retry, jump, or other action ([DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §4).
+At the safe control-capture point of [[playbook-runtime-52](#playbook-runtime-52)], while a schema-3 runtime has effect-possible outcome evidence unresolved under [[playbook-runtime-73](#playbook-runtime-73)], [[playbook-runtime-75](#playbook-runtime-75)], or [[playbook-runtime-77](#playbook-runtime-77)], its control view shall omit every pending Boss question and state description and shall advertise `reconcile:unresolved-effect` labeled `Retry unresolved effect reconciliation` and `abandon:unresolved-effect` labeled `Abandon unresolved workflow attempt`, each with its standing [[playbook-runtime-97](#playbook-runtime-97)], additionally offering the narrowly eligible saved-result assessment [[recovery-10](recovery.md#recovery-10)] or verified read-only restoration and retry [[recovery-12](recovery.md#recovery-12)] and no ordinary player retry or jump ([DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §4).
 Applying `reconcile:unresolved-effect` shall use only the current host's authoritative effect ledger under [[playbook-runtime-69](#playbook-runtime-69)] for any reconciliation refresh and shall start no player; where the unresolved episode is a checkpoint-restoration-eligible open deferred operation, it shall perform the exclusive exact-checkpoint restoration of [[playbook-runtime-73](#playbook-runtime-73)] without a player, judge, or semantic-candidate delivery.
 An exact deferred restoration shall return the operation to its identical bound wait and republish its stable pending question through an ordinary nonterminal run result, while an unequal checkpoint or other still-unresolved evidence shall remain parked and return `no-action` without consuming the unresolved episode.
 Applying `abandon:unresolved-effect` shall move no FSM state, start no player, judge, Captain, script, or child call, and settle the accepted control action with exactly `{ outcome: 'unresolved-effect', state }`, where `state` is the current normalized nonfinal state.
@@ -1088,7 +1053,7 @@ The runtime shall decide one failure cause `{ code, evidence }` where each failu
 Each action a control view advertises shall read as one standing — `ready`, `no-op`, or `blocked` — declared by its optional `standing` member and `ready` when that member is absent, with `reason` from a closed list present exactly when the standing is not `ready`, so no host draws a control without saying what running it would do while a runtime declaring none keeps advertising what it always did ([DR-063](../decisions/063-failures-explain-themselves.md)):
 
 - `reconcile:unresolved-effect` [[playbook-runtime-79](#playbook-runtime-79)] shall be `no-op` with reason `receipt-complete` when no checkpoint restoration is eligible and every unresolved envelope's boundary already holds a complete `physicalReceipt` in the ledger mirror the view just refreshed [[playbook-runtime-69](#playbook-runtime-69)], and `ready` otherwise.
-- `abandon:unresolved-effect`, `retry:<EVENT_TYPE>`, and `jump:<stateId>` [[playbook-runtime-52](#playbook-runtime-52)] shall be `ready`, since the runtime cannot see whether the Boss changed the outside world.
+- `abandon:unresolved-effect`, `retry:<EVENT_TYPE>`, `retry:step`, `retry:adjudication`, `retry:restored-step` [[recovery-3](recovery.md#recovery-3)] [[recovery-10](recovery.md#recovery-10)] [[recovery-12](recovery.md#recovery-12)], and `jump:<stateId>` [[playbook-runtime-52](#playbook-runtime-52)] shall be `ready`, since the runtime cannot see whether the Boss changed the outside world.
 
 
 ## Verification
@@ -1166,7 +1131,7 @@ The recovery matrix shall fail unless a completion write that rejects before or 
 #### playbook-runtime-72
 
 When the automatic-replay integration matrix drives governed artifact-schema-3 calls through the shared factory and a current-host effect-ledger capability, it shall fail unless an intentionally blocked start acknowledgement prevents the first player call, a blocked completion acknowledgement after an empty first result prevents a second call, an acknowledged complete `unchanged` receipt then permits exactly one corrective call and records that correction as its own physical boundary, and an absent or incomplete receipt plus each non-`unchanged` classification permits no corrective player call.
-The matrix shall fail unless a failure reached through a player error, a second empty-`ok` result, or adjudication failure maps no deterministic retry and exposes no retry from either `describe` or `apply` whenever any governed boundary in its host attempt is missing, incomplete, or non-`unchanged`, including an earlier nonzero boundary followed by a complete `unchanged` boundary; unless all-complete-`unchanged` attempts map, advertise, and accept that retry; unless a parent failure binds a foreign-runtime boundary in the same attempt while a proven pre-effect failure remains retryable; and unless failure snapshots and nested-call suspension across export and restore preserve each decision without a restore-time player call.
+The matrix shall fail unless a failure reached through a player error, a second empty-`ok` result, or adjudication failure maps no deterministic retry and exposes no retry from either `describe` or `apply` whenever any governed boundary in its host attempt is missing, incomplete, or non-`unchanged`, including an earlier nonzero boundary followed by a complete `unchanged` boundary in a legacy snapshot without an invocation checkpoint; unless all-complete-`unchanged` attempts map, advertise, and accept that retry; unless a parent failure binds a foreign-runtime boundary in the same attempt while a proven pre-effect failure remains retryable; and unless failure snapshots and nested-call suspension across export and restore preserve each decision without a restore-time player call.
 The matrix shall fail unless a failure state whose live snapshot accepts an explicit-state jump to a described resumable state advertises no `jump:` action, refuses that jump from `apply`, and starts no player whenever its host attempt holds a boundary without a complete `unchanged` receipt, while an all-complete-`unchanged` attempt advertises the jump beside the retry and applying it starts the target's player call (verifying [[playbook-runtime-71](#playbook-runtime-71)] and [[playbook-runtime-52](#playbook-runtime-52)]).
 The matrix shall further fail unless nongoverned delegated-player correction, direct-Captain correction, and authored Boss-reply continuation fixtures retain their existing behavior (verifying [[playbook-runtime-71](#playbook-runtime-71)]).
 
@@ -1193,13 +1158,15 @@ When the semantic-reconciliation integration matrix drives the exported shared s
 The matrix shall exercise malformed or unknown candidates, missing semantic fields, extra and wrongly owned fields, non-string values, and accessor-backed evidence; it shall fail unless each raises the distinct structural error before actor delivery, the first such live reply starts one corrective judge only after the exact unspent-to-spent ledger update is acknowledged, a valid correction may then reconcile, and a second invalid reply parks with no third call while retaining its recoverable detached candidate (verifying [[playbook-runtime-77](#playbook-runtime-77)] and [[playbook-runtime-69](#playbook-runtime-69)]).
 The matrix shall drive a governed state whose result descriptions name presentation-owned, effect-owned, and semantic-owned fields in their `Output shall include` clauses, in both the annotated and the bare-name-with-guidance forms, and shall fail unless each judge prompt carries no such clause, requests exactly `guard` plus the semantic-owned fields with their authored placeholders or guidance, names the presentation- and effect-owned fields only as runtime-supplied fields to omit, and a reply carrying only the owned fields resolves with an unspent correction budget while the runtime supplies the omitted fields (verifying [[playbook-runtime-10](#playbook-runtime-10)] and [[playbook-runtime-77](#playbook-runtime-77)]).
 The live matrix shall fail unless a rejected or indeterminate correction-budget write starts no corrective judge, abort after an acknowledged spend preserves the spent budget and recoverable first candidate while starting no corrective judge, successful correction preserves that first candidate immutably beside the latest candidate, initial and corrective judge transport or result-shape failures over effect-possible evidence park without an unauthorized later call and retain the latest recoverable candidate when one exists, malformed no-value replies may omit one, player abort, error, non-`ok`, and missing-final-text paths start no semantic adjudication, and export and restart preserve the one-way spend and start neither a replacement player nor judge (verifying [[playbook-runtime-77](#playbook-runtime-77)] and [[playbook-runtime-69](#playbook-runtime-69)]).
-The live matrix shall further fail unless a judge transport failure or a claimed-commit disposition mismatch over a standalone boundary whose complete receipt is exactly `unchanged` parks in the ordinary failure state with no unresolved-effect envelope or control, advertising the ordinary retry when the failed attempt is all-`unchanged` — whose application re-asks the player — and no action at all when an earlier boundary of that attempt proves a commit (verifying [[playbook-runtime-77](#playbook-runtime-77)] and [[playbook-runtime-71](#playbook-runtime-71)]).
+The live matrix shall further fail unless a judge transport failure or a claimed-commit disposition mismatch over a standalone boundary whose complete receipt is exactly `unchanged` parks in the ordinary failure state with no unresolved-effect envelope or control, advertising a captured invocation retry only when its own suffix is replay-safe — whose application re-asks that player — and refusing new entry text when its failed attempt proves a commit (verifying [[playbook-runtime-77](#playbook-runtime-77)] and [[playbook-runtime-71](#playbook-runtime-71)]).
 The evidence matrix shall fail unless exact matching receipts resolve, missing or malformed presentation, semantic, effect, or runtime evidence and a mismatched nonzero receipt remain unresolved without semantic correction, a host acknowledgement cannot change the receipt used for reconciliation or omit proposed retained evidence from either a resolved or unresolved envelope, a deferred `needsBossReply` is eligible only for a complete same-HEAD `unchanged` or `worktree-only-change` receipt and publishes nothing before its durable binding, and a semantic candidate can never establish or alter the repository result (verifying [[playbook-runtime-77](#playbook-runtime-77)] and [[playbook-runtime-73](#playbook-runtime-73)]).
 Across live completion and reconstruction at the matching persisted source state, the suite shall fail unless one complete consistent envelope delivers one frozen output exactly once after acknowledgement and starts no replacement player or judge, while incomplete evidence delivers no output and remains parked (verifying [[playbook-runtime-77](#playbook-runtime-77)]).
 
+When no declared result matches, the integration suite shall verify that live and restored governed runtimes retain the judge’s blocked explanation without a corrective call or successful transition (verifying [[playbook-runtime-10](#playbook-runtime-10)]).
+
 #### playbook-runtime-80
 
-When the unresolved-effect control matrix drives live, restored, and retained-adopted schema-3 runtimes at the safe control-capture point of [[playbook-runtime-52](#playbook-runtime-52)], it shall fail unless every unresolved view omits its pending questions and state description and advertises exactly `reconcile:unresolved-effect` and `abandon:unresolved-effect`, with no ordinary retry or jump, while a resolved runtime advertises neither action (verifying [[playbook-runtime-79](#playbook-runtime-79)]).
+When the unresolved-effect control matrix drives live, restored, and retained-adopted schema-3 runtimes at the safe control-capture point of [[playbook-runtime-52](#playbook-runtime-52)], it shall fail unless every unresolved view omits its pending questions and state description and, outside eligible saved-result assessment and verified-restoration cases, advertises exactly `reconcile:unresolved-effect` and `abandon:unresolved-effect`, with no ordinary retry or jump, while a resolved runtime advertises neither action (verifying [[playbook-runtime-79](#playbook-runtime-79)]).
 The matrix shall fail unless an unequal deferred-checkpoint reconciliation retains the unresolved operation and starts no player or judge, while exact checkpoint restoration consumes eligibility, republishes the identical stable question and bound wait, returns an ordinary nonterminal run result, and likewise starts no player, judge, or semantic-candidate delivery (verifying [[playbook-runtime-79](#playbook-runtime-79)] and [[playbook-runtime-73](#playbook-runtime-73)]).
 The matrix shall fail unless abandonment moves no actor state and returns one accepted control receipt whose run is exactly `{ outcome: 'unresolved-effect', state }`, whose state remains active, quiescent, and nonfinal, and whose run carries no state description, output, pending call, error, repository receipt, effect ledger, semantic evidence, or unresolved-effects projection; replaying its idempotency key shall return that receipt without another action boundary (verifying [[playbook-runtime-79](#playbook-runtime-79)] and [[playbook-runtime-52](#playbook-runtime-52)]).
 The public-contract matrix shall fail unless the SLC, authored runtime source, committed declaration, and packaged declaration all expose that exact state-only arm while preserving the distinct terminal, suspended, failure, abort, quiescent, and no-action shapes (verifying [[playbook-runtime-34](#playbook-runtime-34)], [[playbook-runtime-41](#playbook-runtime-41)], and [[playbook-runtime-79](#playbook-runtime-79)]).
@@ -1630,6 +1597,7 @@ When the integration suite constructs a shared-factory runtime over an artifact 
 
 #### playbook-runtime-53
 
+The legacy event-retry cases below shall run without an invocation checkpoint; checkpoint-bearing cases shall instead assert the interrupted-step behavior [[playbook-runtime-52](#playbook-runtime-52)].
 
 Where the integration suite drives shared-factory runtimes — synthetic
 workflow machines plus the real linked CODE runtime, under fake ports
@@ -1660,9 +1628,7 @@ question with its stable id, and the last error as
 The suite shall discover every linked playbook artifact in the
 repository rather than listing them, and shall fail unless each
 artifact built on the shared factory declares a `controlContextFields`
-projection, each artifact declaring a deterministic entry event whose
-machine has a recoverable failure state also names that event's
-persisted retry source [[playbook-runtime-52](#playbook-runtime-52)], and each
+projection, and each
 artifact's `_internal` exposes the prompt composers
 its own machine uses, preserving the invocation arguments of the runtime seam, including the player identity lookup and optional third resume flag of [[playbook-runtime-92](#playbook-runtime-92)] — the player composer where and only where that
 playbook calls players — so a re-link or a newly linked artifact cannot
@@ -1679,38 +1645,8 @@ the real CODE runtime parked at `failed` exports only its declared
 exposing the resolved player roster, option value, or player-authored
 members its live context holds; and unless naming a first-class-surfaced
 member fails runtime construction.
-Action derivation shall fail unless: the real CODE runtime parked in
-`failed` advertises only the `retry:START_CODE` action for its recorded
-entry event with a label written from the source state description;
-a synthetic guarded multi-arm `BOSS_INTERRUPT` matrix exercises a
-non-first `targetId` and labels its retry from the recorded target's
-description, never from the first configured arm; a recorded event the current state does not accept produces no
-retry entry; outside the failure state no retry entry appears; the
-synthetic context-conditional target flips from excluded to included
-once the live context gains its required input; and jump events are
-sent with textual fields omitted, never with invented text (an applied
-retry replays the recorded payload with no classification call).
-It shall further fail unless the declared retry source of
-[[playbook-runtime-52](#playbook-runtime-52)] survives a process boundary on a
-synthetic machine whose entry action copies the entry text into the
-declared member: the runtime parked in `failed` advertises the same
-action id and label before export and after restoring that snapshot
-into a fresh instance, the applied action replays the original player
-prompt, and the exported snapshot's members are exactly those of
-[[playbook-runtime-45](#playbook-runtime-45)]; a failure reached after a Boss
-reply resumed the work — which the same machine's undeclared twin
-cannot retry in its own live process — advertises and applies that
-retry in both processes; a declared member the machine never populates
-excludes the candidate rather than falling back to the recorded event;
-and the undeclared twin still advertises its recorded retry live and
-none after restore.
-It shall further fail unless no advertised label is ever an identifier:
-a registered resumable target whose source publishes no description
-shall not be advertised at all — not advertised under its own target id
-— while a described sibling target the same snapshot accepts still is;
-and a retry whose transition target publishes no description shall be
-labeled from its own source state's description, with neither the target
-id nor the replayed event type appearing in the label.
+Action derivation shall verify exact interrupted-step retry before and after restoration, including accepted Boss answers and non-first guarded entry targets, without depending on legacy entry-context metadata [[playbook-runtime-52](#playbook-runtime-52)].
+The suite shall verify no retry without a JSON invocation checkpoint, no retry outside failure, source-description labels with no identifier fallback, guarded jumps appearing only when their required context is present, and jump events carrying no invented text [[playbook-runtime-52](#playbook-runtime-52)].
 Receipts shall fail unless the A29-17 engine-level twins hold against
 real `apply()`: an advertised retry from `failed` settles
 `executed` with the run result; the same `actionId` re-applied after

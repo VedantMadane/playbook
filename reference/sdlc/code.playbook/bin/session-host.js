@@ -2,9 +2,11 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import { randomUUID } from 'node:crypto';
-import { createCaptainSessionStore, projectCaptainSessionStructure } from './session-store.js';
+import { createCaptainSessionStore, isUncertainTurnDiscardable, projectCaptainSessionStructure } from './session-store.js';
 import { createCaptainSessionHost, executionConfigFromPlan, installRetainedGenerationsForLaunch, validateFrozenExecutionConfig } from './run.js';
 import { createReplayRecordObserver } from './replay-observer.js';
+
+const RECOVERY_REOPEN = "This controller stopped with an uncertain turn. Dispose it, reopen with mode: 'recover', then call recover() without new input.";
 
 /** Own one session lease and the same durable turn transaction as the CLIs. */
 export async function openSessionHost(options) {
@@ -19,9 +21,10 @@ export async function openSessionHost(options) {
     let record = await lease.read();
     if (record !== undefined) await lease.assertContinuable({ cwd: options.cwd });
     record = await lease.recoverUnresolvedEffectAbandonment();
+    if (options.mode === 'recover') retryPending = record?.state === 'uncertain';
     if (options.mode === 'new' && record !== undefined) throw new Error('session already exists');
     if (options.mode !== 'new' && options.sessionId && record === undefined) throw new Error('session does not exist');
-    if (record?.state === 'uncertain' && !retryPending) throw new Error('session has an uncertain turn; select Retry or Discard');
+    if (record?.state === 'uncertain' && !retryPending) throw new Error(isUncertainTurnDiscardable(record) ? 'session has an uncertain turn; select Retry or Discard' : 'session has recorded work or repository evidence; select Retry to restore and report it');
     if (retryPending && record?.state !== 'uncertain') throw new Error('session has no uncertain turn to retry');
     const cwd = options.cwd ?? record?.cwd ?? process.cwd();
     const selected = retryPending ? record.uncertain.attemptedExecutionProjection : options.config ?? (options.plan ? executionConfigFromPlan(options.plan) : record?.lastAppliedExecutionProjection);
@@ -43,16 +46,20 @@ export async function openSessionHost(options) {
     await installRetainedGenerationsForLaunch({ lease, shell: created.shell, ...(record === undefined ? { freshBoundary: { cwd, structuralProjection: structure, executionProjection: config, snapshot: created.snapshot } } : {}), retainedGenerations: record?.retainedGenerations ?? {}, reconcileRepositoryEffects: created.reconcileRepositoryEffects });
     record = await lease.read();
     await replay.flushStoredRecords();
-    const execute = async (input, retry, actionId, shellActionId) => {
+    const assertIdle = () => {
       if (closed || closing) throw new Error('session host is closing');
       if (active) throw new Error('session turn is already active');
+    };
+    const execute = async (input, retry, actionId, shellActionId) => {
+      assertIdle();
+      let attemptId;
       const operation = (async () => {
         let prior = await lease.read();
         if (retry) {
           if (prior?.state !== 'uncertain') throw new Error('session has no uncertain turn to retry');
           input = prior.uncertain.input;
-          if (!retryPending) throw new Error('retry requires reopening the uncertain checkpoint');
-        } else if (prior?.state !== 'settled') throw new Error('session has an uncertain turn; select Retry or Discard');
+          if (!retryPending) throw new Error(RECOVERY_REOPEN);
+        } else if (prior?.state !== 'settled') throw new Error(RECOVERY_REOPEN);
         if (actionId === undefined && shellActionId === undefined && (typeof input !== 'string' || input.trim().length === 0)) throw new Error('session input must be nonempty');
         await created.reconcileRepositoryEffects();
         // The selection is made after reconciliation, so the advertised
@@ -66,7 +73,7 @@ export async function openSessionHost(options) {
           input = created.shell.submitShellAction(shellActionId);
         }
         terminal = undefined; replies = [];
-        const attemptId = options.createAttemptId?.() ?? randomUUID();
+        attemptId = options.createAttemptId?.() ?? randomUUID();
         const marked = retry ? await lease.beginRetry({ expectedAttemptId: prior.uncertain.attemptId, nextAttemptId: attemptId }) : await lease.beginTurn({ input, attemptId, attemptedExecutionProjection: config });
         retryPending = false;
         await replay.flushStoredRecords();
@@ -80,10 +87,23 @@ export async function openSessionHost(options) {
         await replay.flushStoredRecords();
         await options.onCheckpoint?.(record);
         return record;
-      })();
+      })().catch(async (error) => {
+        try {
+          const parked = created.getInterruptedSettlement(attemptId);
+          if (parked?.state === 'settled') {
+            record = parked;
+            await replay.flushStoredRecords();
+            await options.onCheckpoint?.(record);
+          }
+        } catch (reportError) {
+          throw new AggregateError([error, reportError], 'Captain turn stopped and its saved state could not be reported');
+        }
+        throw error;
+      });
       active = operation;
       try { return await operation; } finally { active = undefined; }
     };
+
     const dispose = () => {
       if (closed) return Promise.resolve();
       if (closing) return closing;
@@ -94,7 +114,19 @@ export async function openSessionHost(options) {
       })();
       return closing;
     };
-    return Object.freeze({ sessionId, host: created.host, shell: created.shell, lease, read: () => lease.read(), handleBossTurn: (input) => execute(input, false), listRuntimeActions: () => created.shell.describeRuntimeActions?.() ?? Object.freeze([]), submitRuntimeAction: (actionId) => execute(undefined, false, actionId), listShellActions: () => created.shell.describeShellActions?.() ?? Object.freeze([]), submitShellAction: (actionId) => execute(undefined, false, undefined, actionId), retry: () => execute(undefined, true), dispose });
+    const recover = async (input) => {
+      assertIdle();
+      const prior = await lease.read();
+      assertIdle();
+      if (prior?.state === 'uncertain' && !retryPending) throw new Error(RECOVERY_REOPEN);
+      if (retryPending) {
+        if (input !== undefined) throw new Error('Restore and report the interrupted run before supplying new input');
+        return execute(undefined, true);
+      }
+      if (typeof input !== 'string' || !input.trim()) throw new Error('Recovery of a paused task requires a Boss instruction');
+      return execute(input, false);
+    };
+    return Object.freeze({ sessionId, host: created.host, shell: created.shell, lease, read: () => lease.read(), handleBossTurn: (input) => execute(input, false), recover, listRuntimeActions: () => created.shell.describeRuntimeActions?.() ?? Object.freeze([]), submitRuntimeAction: (actionId) => execute(undefined, false, actionId), listShellActions: () => created.shell.describeShellActions?.() ?? Object.freeze([]), submitShellAction: (actionId) => execute(undefined, false, undefined, actionId), retry: () => execute(undefined, true), dispose });
   } catch (cause) {
     const failures = [cause];
     let disposed = true;

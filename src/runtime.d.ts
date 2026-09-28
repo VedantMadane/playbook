@@ -173,10 +173,13 @@ export type PlaybookRunResult = {
     pendingCall: PlaybookPendingCall;
 };
 export interface PlaybookPorts {
+    /** Acknowledge the durable start before work and its result before transition. */
+    recordStep?(step: PlaybookStepRecord, position?: PlaybookRuntimeSnapshot): Promise<void>;
     callPlayer(roleId: string, prompt: string, signal: AbortSignal, options: PlayerCallOptions): Promise<PlayerResult>;
     callCaptain(prompt: string, signal: AbortSignal, options: CaptainCallOptions): Promise<CaptainResult>;
     callJudge(prompt: string, signal: AbortSignal): Promise<string>;
     callPlaybook(request: PlaybookCallRequest, signal: AbortSignal): Promise<PlaybookCallStart>;
+    /** Mark question presentation with data.kind = "boss-question"; Captain relays it from pendingQuestions. */
     emitStatus(message: string, data?: unknown): Promise<void>;
     emitTelemetry(event: {
         topic: string;
@@ -275,6 +278,8 @@ export interface PlaybookEffectBoundary {
     readonly baseline: PlaybookRepositoryObservation;
     readonly after?: PlaybookRepositoryObservation;
     readonly physicalReceipt?: PlaybookRepositoryReceipt;
+    /** A later exact restoration permits replay of this standalone read-only call. */
+    readonly restored?: PlaybookRepositoryObservation;
     readonly finalText?: string;
     readonly semanticCandidate?: JsonValue;
     readonly initialSemanticCandidate?: JsonValue;
@@ -286,7 +291,7 @@ export interface PlaybookEffectBoundary {
     readonly logicalOperationId?: string;
 }
 /** One physical boundary before the host assigns attempt and sequence data. */
-export type PlaybookEffectBoundaryStart = Omit<PlaybookEffectBoundary, 'sequence' | 'attemptId' | 'attemptNumber' | 'after' | 'physicalReceipt' | 'finalText' | 'semanticCandidate' | 'initialSemanticCandidate'>;
+export type PlaybookEffectBoundaryStart = Omit<PlaybookEffectBoundary, 'sequence' | 'attemptId' | 'attemptNumber' | 'after' | 'physicalReceipt' | 'restored' | 'finalText' | 'semanticCandidate' | 'initialSemanticCandidate'>;
 /** One deferred logical operation spanning its ordered physical boundaries. */
 export interface PlaybookEffectLogicalOperation {
     readonly sequence: number;
@@ -388,7 +393,25 @@ export interface PlaybookRuntimeSnapshot {
         readonly boundaryPrefix: number;
         readonly attemptId: string | null;
     };
+    /** Interrupted invocation, captured before its external call (DR-069). */
+    recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
     suspendedCall?: PlaybookSuspendedCall;
+}
+export interface PlaybookRecoveryCheckpoint {
+    readonly id?: string;
+    readonly stateId: string;
+    readonly prompt: string;
+    readonly machine: JsonValue;
+    readonly boundaryPrefix: number;
+    /** Completed actor output supplied by the execution journal on restore. */
+    readonly result?: JsonValue;
+    readonly delivered?: true;
+}
+export interface PlaybookStepRecord {
+    readonly id: string;
+    readonly kind: 'player' | 'captain' | 'script';
+    readonly stateId: string;
+    readonly result?: JsonValue;
 }
 export type PlaybookControlStanding = 'ready' | 'no-op' | 'blocked';
 export type PlaybookControlActionReason = 'receipt-complete';
@@ -398,6 +421,20 @@ export interface PlaybookControlAction {
     standing?: PlaybookControlStanding;
     reason?: PlaybookControlActionReason;
 }
+export interface PlaybookRecoveryOffer {
+    prompt: string;
+    description?: string;
+    /** Runtime-owned conditions to satisfy; these never authorize task completion. */
+    preparation?: string;
+    /** Saved observations and result choices for diagnosing the stopped step. */
+    evidence?: JsonValue;
+    continuation: {
+        kind: 'reply';
+    } | {
+        kind: 'runtime';
+        actionId: string;
+    };
+}
 export interface PlaybookControlView {
     state: PlaybookState;
     stateDescription?: string;
@@ -405,6 +442,8 @@ export interface PlaybookControlView {
     pendingQuestions: readonly PlaybookPendingBossQuestion[];
     lastError?: NormalizedError;
     actions: readonly PlaybookControlAction[];
+    /** Context only for an explicitly authorized Captain preparation call. */
+    recovery?: PlaybookRecoveryOffer;
 }
 export type PlaybookControlReceipt = {
     disposition: 'rejected';
@@ -415,13 +454,16 @@ export type PlaybookControlReceipt = {
 } | {
     disposition: 'failed';
     error: NormalizedError;
+    run?: PlaybookRunResult;
 };
 export interface PlaybookRetainedGenerationMetadata {
     readonly unfinishedFinalStateIds: readonly string[];
 }
 export interface PlaybookRuntime {
     init(session: PlaybookSession): Promise<void>;
-    exportSnapshot?(): PlaybookRuntimeSnapshot | undefined;
+    exportSnapshot?(checkpoint?: {
+        child?: PlaybookPendingCall;
+    }): PlaybookRuntimeSnapshot | undefined;
     restore?(session: PlaybookSession, snapshot: PlaybookRuntimeSnapshot): Promise<void>;
     adopt?(session: PlaybookSession, snapshot: PlaybookRuntimeSnapshot, context: PlaybookAdoptionContext): Promise<void>;
     readonly retainedGenerationMetadata?: PlaybookRetainedGenerationMetadata;
@@ -447,6 +489,8 @@ export interface PlaybookRuntime {
     handleBossInput(turn: {
         text: string;
         signal: AbortSignal;
+        /** Called synchronously just before accepting the event, at most once. */
+        onAccepted?: () => void;
     }): Promise<PlaybookRunResult>;
     resumePlaybookCall(input: {
         callId: string;
