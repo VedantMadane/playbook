@@ -2485,7 +2485,7 @@ describe('DECIDE deferred effect continuation', () => {
     };
   }
 
-  it('binds the player identity and continues without a provider hint', async () => {
+  it("binds the player identity and continues with the store's current token", async () => {
     const fixture = stagedFixture();
     await fixture.init();
 

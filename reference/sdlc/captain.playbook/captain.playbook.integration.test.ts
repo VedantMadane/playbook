@@ -2829,6 +2829,21 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     await adoptWithoutDriving(target.harness, generation);
     expect(target.code.runtimes[0]?.describe?.()).toMatchObject({ state: { stateId: 'failed' }, lastError: { message: 'coder exploded', cause: { code: 'player-failed' } } });
     expect(target.harness.playerCalls).toEqual([]);
+    // DR-040 §4 / playbook-runtime-71: out of a governed failure whose attempt
+    // is not proven effect-free, the adopted leaf offers its checkpoint retry
+    // only — no `jump:firstPhase` back into the failed attempt's work.
+    expect(
+      target.code.runtimes[0]?.describe?.().actions.map(({ id }) => id),
+    ).toEqual(['retry:START_CODE']);
+    // DR-063 §4: the adopted failure still explains itself in the Boss-visible
+    // report, with the cause the source runtime decided and the controls list.
+    const adoptedReport = target.harness.surfaced.at(-1) ?? '';
+    expect(adoptedReport).toContain(
+      'Failure: the coder call failed with the error `coder exploded`.',
+    );
+    expect(adoptedReport).toContain('Controls:');
+    expect(adoptedReport).toContain('- Stop /code (ready)');
+    expect(adoptedReport).not.toMatch(/jump|firstPhase/);
 
     await target.harness.turn('Retry the retained failure now.', 2);
 
