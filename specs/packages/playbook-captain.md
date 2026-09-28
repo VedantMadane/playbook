@@ -496,7 +496,7 @@ Where the Playbook Captain shell uses cligent Captain primitives,
 the shell shall use one Captain agent configuration and shall
 serialize durable session-Captain calls and hidden sub-runtime judge
 calls through one abort-aware concurrency-one queue.
-The ControlView digest shall state whether recovery preparation is available and its published description, with full context reserved for preparation [[recovery-5](recovery.md#recovery-5)].
+The ControlView digest shall state whether recovery preparation is available and its published description, shall direct `recover` only at a prerequisite that must be repaired or checked before the task continues while a retry needing none keeps the advertised runtime action and an answer keeps delivery [[recovery-6](recovery.md#recovery-6)], and shall reserve the full context for preparation [[recovery-5](recovery.md#recovery-5)].
 Every session-Captain call and sub-runtime judge call shall pass
 `{ visibility: 'hidden' }` to `callCaptain`; no visible Captain call
 shall exist.

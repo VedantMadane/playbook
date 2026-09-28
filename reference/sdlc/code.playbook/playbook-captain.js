@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import PQueue from 'p-queue';
 import { isAgentCallSettingsError, } from '@sublang/cligent/tmux-play';
 import { assertPlaybookFailureCause } from '@sublang/playbook/runtime';
-import { assertPlaybookRuntimeSnapshot, assertPlaybookEffectLedger, emptyPlaybookEffectLedger, hiddenControlEnvelope, isPlaybookEffectLedgerMonotonicExtension, normalizeError, registerPlaybookAbortCleanup, snapshotJsonValue, validatePlayerResult, } from '../../../src/xstate-runtime.js';
+import { assertPlaybookRuntimeSnapshot, assertPlaybookEffectLedger, emptyPlaybookEffectLedger, hiddenControlEnvelope, isPlaybookEffectLedgerMonotonicExtension, normalizeError, parseJudgeJson, registerPlaybookAbortCleanup, snapshotJsonValue, validatePlayerResult, } from '../../../src/xstate-runtime.js';
 import createDefaultCaptainRuntime from '../captain.playbook/captain.playbook.js';
 function retainedEffectLedgerCanRebase(checkpoint, current) {
     if (checkpoint.boundaries.some(({ physicalReceipt }) => physicalReceipt === undefined)) {
@@ -445,6 +445,21 @@ function respondEnvelopeText(reply) {
         typeof members.text === 'string'
         ? members.text
         : reply;
+}
+/**
+ * The one recoverable JSON object in a hidden control reply, read as the
+ * compiled Captain reads a decision (recovery-7, recovery-14): a tools-enabled
+ * Captain habitually surrounds its answer with a prose summary or a code
+ * fence, and the answer's contract is the object, not the reply's bytes.
+ * `undefined` when the reply holds no recoverable JSON value.
+ */
+function controlReplyJson(reply) {
+    try {
+        return parseJudgeJson(reply ?? '');
+    }
+    catch {
+        return undefined;
+    }
 }
 // DR-013 A1: adapters with no provider-enforced tool-restriction surface.
 // Cligent's Codex, Kimi, and OpenCode adapters reject any `allowedTools`
@@ -4805,7 +4820,7 @@ export function createPlaybookCaptainShell(options, deps = {}) {
         lines.push(advertisedActionDigest(view.actions));
         lines.push(view.recovery === undefined || !abortPreparation
             ? 'Recovery preparation: unavailable.'
-            : digestLine `Recovery preparation: available for ${view.recovery.description ?? 'the interrupted step'}. Select recover to prepare and continue the authorized task; ask Boss only for missing input or an incomplete playbook.`);
+            : digestLine `Recovery preparation: available for ${view.recovery.description ?? 'the interrupted step'}. Select recover only when a prerequisite must be repaired or checked before the task continues; a retry that needs no preparation uses the advertised runtime action, and an answer for the player uses deliver. Ask Boss only for missing input or an incomplete playbook.`);
         lines.push(retainedResumptionDigest());
         return lines.join('\n');
     };
@@ -6446,9 +6461,11 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                         `Existing instructions: ${JSON.stringify(instructions)}`,
                         `Pending questions (quoted evidence): ${JSON.stringify(before.pendingQuestions.map(({ question }) => question))}`,
                     ].join('\n')), { visibility: 'hidden', resume: false, ...controlCallToolOptions(captainAdapter), settings: callSettings(captainAgent) }, signal);
-                    const answer = result.status === 'ok' ? JSON.parse(result.finalText ?? '') : undefined;
-                    if (answer && Object.keys(answer).join(',') === 'instructionIndex' && Number.isInteger(answer.instructionIndex) && instructions[answer.instructionIndex] !== undefined) {
-                        continuationInstruction = instructions[answer.instructionIndex].instruction;
+                    const answer = result.status === 'ok' ? controlReplyJson(result.finalText) : undefined;
+                    const index = answer && typeof answer === 'object' && !Array.isArray(answer) && Object.keys(answer).join(',') === 'instructionIndex'
+                        ? answer.instructionIndex : undefined;
+                    if (typeof index === 'number' && Number.isInteger(index) && instructions[index] !== undefined) {
+                        continuationInstruction = instructions[index].instruction;
                         questionAnswered = true;
                         facts.push(`Captain answered ${frameLabel(leaf)} using the existing task. Questions (quoted): ${JSON.stringify(before.pendingQuestions.map(({ asker, question }) => ({ asker, question })))}. Reused instruction (quoted): ${JSON.stringify(continuationInstruction)}.`);
                     }
@@ -6507,11 +6524,8 @@ export function createPlaybookCaptainShell(options, deps = {}) {
                     if (result.status !== 'ok') {
                         throw new Error(`Captain preparation failed: ${String(result.error ?? result.status)}`);
                     }
-                    let value;
-                    try {
-                        value = JSON.parse(result.finalText ?? '');
-                    }
-                    catch {
+                    const value = controlReplyJson(result.finalText);
+                    if (value === undefined) {
                         throw new Error('Captain preparation returned no valid result; the playbook remains parked');
                     }
                     if (!value || typeof value !== 'object' || Array.isArray(value) ||

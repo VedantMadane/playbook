@@ -30,6 +30,7 @@ class RecoveryAdapter implements AgentAdapter {
   static cwd = '';
   static startWithQuestion = false;
   static preparation = 'ready';
+  static proseWrapped = false;
   static holdInitial = false;
   static commitContinuation = false;
   static longContinuation = false;
@@ -137,6 +138,10 @@ class RecoveryAdapter implements AgentAdapter {
                   : preparation === 'missing-transition' ? 'The playbook has no transition for this outcome. Boss must clarify the playbook before it can continue.'
                   : 'The tool needs Boss input.',
             });
+      // A tools-enabled Captain summarizes before it answers; the contract is
+      // the one JSON object in the reply, not the reply's bytes (recovery-7).
+      if (RecoveryAdapter.proseWrapped && preparation !== 'malformed')
+        result = `Checked the tool and the working tree.\n\n\`\`\`json\n${result}\n\`\`\`\n`;
     } else if (kind === 'decision') {
       result = JSON.stringify(RecoveryAdapter.composedStart && !RecoveryAdapter.calls.some(({ kind }) => kind === 'player') ? { action: 'start', playbookId: 'code', input: 'implement the original task. Use the small test target.' } : {
         action: prompt.includes('answer only') ? 'deliver' : 'recover',
@@ -307,7 +312,9 @@ describe('Captain preparation through a durable session', () => {
     { startWithQuestion: true, preparation: 'ready', alreadyAnswered: true, automatic: true, composedStart: true },
     ...['codex', 'kimi', 'opencode', 'gemini'].map((captainAdapter) => ({ startWithQuestion: true, preparation: 'ready', alreadyAnswered: true, automatic: true, captainAdapter })),
     { startWithQuestion: false, preparation: 'ready', interrupted: true, nested: true, settleAbort: true, interactive: true },
-    ...['{"instructionIndex":9}', 'not JSON', 'error', '{"instructionIndex":0}'].map((questionReply) => ({ startWithQuestion: true, preparation: 'ready', alreadyAnswered: true, automatic: true, questionReply })),
+    ...['{"instructionIndex":9}', 'not JSON', 'error', '{"instructionIndex":0}', 'Both instructions were checked.\n\n{"instructionIndex":0}'].map((questionReply) => ({ startWithQuestion: true, preparation: 'ready', alreadyAnswered: true, automatic: true, questionReply })),
+    { startWithQuestion: false, preparation: 'ready', proseWrapped: true },
+    { startWithQuestion: false, preparation: 'blocked', proseWrapped: true },
     { startWithQuestion: false, preparation: 'ready', interrupted: true, nested: true, settleAbort: true },
     { startWithQuestion: false, preparation: 'ready', interrupted: true, nested: true, settleAbort: true, cliStart: true },
     { startWithQuestion: false, preparation: 'ready', interruptContinuation: true, crashBeforeSave: true },
@@ -339,7 +346,7 @@ describe('Captain preparation through a durable session', () => {
     ].map((preparation) => ({ startWithQuestion: false, preparation })),
   ])
     it(
-      `restored ${'nested' in scenario ? 'nested ' : ''}${'throws' in scenario ? 'throwing ' : ''}${scenario.startWithQuestion ? 'question' : 'failed step'} with ${scenario.preparation} preparation${'interrupted' in scenario ? ' after preparation interruption' : ''}${'cliRetry' in scenario ? ' from SDK to CLI' : 'cliStart' in scenario ? ' from CLI to SDK' : ''}${'longContinuation' in scenario ? ' during a long continuation' : ''}${'hostRetry' in scenario ? ' after a host retry' : ''}${'interruptContinuation' in scenario ? ' after a committed continuation' : ''}${'alreadyAnswered' in scenario ? ' for an already answered question' : ''}${'admissionFailure' in scenario ? ' after rejected admission' : ''}${'questionReply' in scenario ? ` with check ${scenario.questionReply}` : ''}${'settleAbort' in scenario ? ' with drained cancellation' : ''}${'crashBeforeSave' in scenario ? ' before saving progress' : ''}${'captainAdapter' in scenario ? ` using ${scenario.captainAdapter}` : ''}${'interactive' in scenario ? ' in the interactive pane' : ''}${'composedStart' in scenario ? ' with the agreed handoff' : ''}`,
+      `restored ${'nested' in scenario ? 'nested ' : ''}${'throws' in scenario ? 'throwing ' : ''}${scenario.startWithQuestion ? 'question' : 'failed step'} with ${scenario.preparation} preparation${'interrupted' in scenario ? ' after preparation interruption' : ''}${'cliRetry' in scenario ? ' from SDK to CLI' : 'cliStart' in scenario ? ' from CLI to SDK' : ''}${'longContinuation' in scenario ? ' during a long continuation' : ''}${'hostRetry' in scenario ? ' after a host retry' : ''}${'interruptContinuation' in scenario ? ' after a committed continuation' : ''}${'alreadyAnswered' in scenario ? ' for an already answered question' : ''}${'admissionFailure' in scenario ? ' after rejected admission' : ''}${'questionReply' in scenario ? ` with check ${scenario.questionReply}` : ''}${'settleAbort' in scenario ? ' with drained cancellation' : ''}${'crashBeforeSave' in scenario ? ' before saving progress' : ''}${'captainAdapter' in scenario ? ` using ${scenario.captainAdapter}` : ''}${'interactive' in scenario ? ' in the interactive pane' : ''}${'composedStart' in scenario ? ' with the agreed handoff' : ''}${'proseWrapped' in scenario ? ' from a prose-wrapped reply' : ''}`,
       withFixture('captain-preparation-', async (dir) => {
         const { startWithQuestion, preparation } = scenario;
         const nested = 'nested' in scenario && scenario.nested;
@@ -374,6 +381,7 @@ describe('Captain preparation through a durable session', () => {
         RecoveryAdapter.cwd = cwd;
         RecoveryAdapter.startWithQuestion = startWithQuestion;
         RecoveryAdapter.preparation = preparation;
+        RecoveryAdapter.proseWrapped = 'proseWrapped' in scenario;
         RecoveryAdapter.calls = [];
         RecoveryAdapter.inputs = [];
         RecoveryAdapter.questionReply = 'questionReply' in scenario ? scenario.questionReply : undefined;
@@ -646,7 +654,7 @@ describe('Captain preparation through a durable session', () => {
               expect(RecoveryAdapter.calls.filter(({ kind }) => kind === 'prepare')).toHaveLength(0);
               const calls = RecoveryAdapter.calls.filter(({ kind }) => kind === 'player');
               const checkCount = RecoveryAdapter.calls.filter(({ kind }) => kind === 'question-check').length;
-              const invalid = 'questionReply' in scenario && scenario.questionReply !== '{"instructionIndex":0}';
+              const invalid = 'questionReply' in scenario && !scenario.questionReply.endsWith('{"instructionIndex":0}');
                             expect(calls).toHaveLength(invalid ? 1 : 2);
               expect(checkCount).toBe(invalid ? 1 : 2);
               const instruction = 'implement the original task. Use the small test target.';
