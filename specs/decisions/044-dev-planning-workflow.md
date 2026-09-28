@@ -9,6 +9,7 @@ Accepted.
 Amended by [DR-050](050-pull-request-delivery.md): DEV's planning result gains two pull-request outcomes, and DEV composes `branch` before and `pr` after its paths.
 Seeded-lineup scope amended by [DR-053](053-seeding-picks-a-ready-adapter.md): the seeded agents' adapter and model are selected from the adapters whose credentials are present rather than fixed; the players, their role bindings, and everything else here stand.
 Planning-result scope amended by [DR-061](061-dev-analyst-plans-the-path.md): the Analyst's result is the chosen path and a bounded planning note, a Boss question serves only that choice, and analysis, design, and implementation stay with the called playbooks; the outcomes, composition, governance, and suspension here stand.
+Seeded-model scope amended by [DR-074](074-seeds-name-the-latest-models.md): `dev.analyst` takes its adapter's current seeded model, the latest of that adapter's line, rather than `claude-opus-5`; the player, its binding, and everything else here stand.
 
 ## Context
 
