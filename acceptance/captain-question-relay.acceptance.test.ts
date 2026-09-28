@@ -40,7 +40,7 @@ notifications: { player_finished: off, turn_finished: off, turn_aborted: off }
 players:
   worker:
     adapter: codex
-    model: gpt-5.6-sol
+    model: gpt-6-sol
     effort: low
     permissions: { mode: auto }
 playbooks:

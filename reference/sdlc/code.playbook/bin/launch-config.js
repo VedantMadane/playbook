@@ -1380,10 +1380,12 @@ function assertLegacyRelocationLocatorsSafe(
 
 // PBCLI-11 / DR-053: the adapters a seeded lineup may take, highest
 // precedence first. A fixed order — not whichever the probe answers
-// first — is what makes one machine seed one file twice.
+// first — is what makes one machine seed one file twice. DR-074: each
+// row names the latest model of its adapter's line; the template names
+// the first row's model, because the default seed is its byte copy.
 const SEED_LINEUP = Object.freeze([
-  Object.freeze({ adapter: "claude", model: "claude-opus-5" }),
-  Object.freeze({ adapter: "codex", model: "gpt-5.6-sol" }),
+  Object.freeze({ adapter: "claude", model: "claude-opus-5-5" }),
+  Object.freeze({ adapter: "codex", model: "gpt-6-sol" }),
 ]);
 
 /**
