@@ -8,7 +8,7 @@
 Accepted.
 [DR-040](040-outcome-authority-effect-reconciliation.md) requires an adopted retained generation to preserve and reenter an unresolved reconciliation state, prevents adopted work from resuming or exposing ordinary actions until every outstanding effect boundary resolves, forbids duplicate-effect replay from an unresolved generation, and makes explicit unresolved abandonment clear the root's prior retained generation rather than preserve a dismissal candidate.
 
-Amended by [DR-068](068-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-069](069-host-owned-interrupted-work-settlement.md).
+Amended by [DR-071](071-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-072](072-host-owned-interrupted-work-settlement.md).
 
 ## Context
 

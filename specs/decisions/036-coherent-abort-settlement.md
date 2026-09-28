@@ -8,7 +8,7 @@
 Accepted.
 Records the abort-settlement model the post-[DR-034](034-durable-failure-retry-continuity.md) review rounds converged on piecemeal, so conformance replaces per-round design relitigation.
 
-Amended by [DR-068](068-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-069](069-host-owned-interrupted-work-settlement.md).
+Amended by [DR-071](071-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-072](072-host-owned-interrupted-work-settlement.md).
 
 ## Context
 

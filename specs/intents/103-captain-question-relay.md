@@ -9,7 +9,7 @@ Completed on `codex/captain-recovery`; not merged or released.
 
 ## Intent
 
-Make playbooks usable through Captain alone under [DR-067](../decisions/067-captain-relays-player-questions.md).
+Make playbooks usable through Captain alone under [DR-070](../decisions/070-captain-relays-player-questions.md).
 
 ## Deliverables
 

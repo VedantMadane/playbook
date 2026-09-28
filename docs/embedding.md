@@ -38,7 +38,7 @@ tree, which pnpm's strict linking will not allow.
 
 ```ts
 import createPlaybookRuntime, {
-  type ReviewPlaybookHostCapabilities,
+  type PlaybookHostCapabilities,
 } from '@sublang/playbook/review/playbook';
 import type {
   CaptainCallOptions,
@@ -156,7 +156,7 @@ const playbookSessionId = randomUUID();
 // machine input, or a persisted snapshot. A host outside the CLI constructs
 // the repository and effect-ledger members through the facade described in
 // "Constructing worktree host capabilities" below.
-declare const hostCapabilities: ReviewPlaybookHostCapabilities;
+declare const hostCapabilities: PlaybookHostCapabilities;
 
 const runtime = createPlaybookRuntime({
   configuredOptions: {},
@@ -418,7 +418,7 @@ Captain may answer a player from the original task when it already answers the q
 
 If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
 
-All applications sharing a session store, including Spex and the CLI, must upgrade together before running this version. Hosts from 15.1.x cannot read the extended records.
+All applications sharing a session store, including Spex and the CLI, must upgrade together before running this version. Hosts through 16.0.x cannot read the extended records.
 
 A single recovery entry point handles either a paused step or an uncertain attempt:
 

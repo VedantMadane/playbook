@@ -23,7 +23,9 @@ import type {
   JsonValue,
   PlaybookAdoptionContext,
   PlaybookCallResult,
+  PlaybookControlReceipt,
   PlaybookControlView,
+  PlaybookFailureCause,
   PlaybookPorts,
   PlaybookRunResult,
   PlaybookRuntime,
@@ -31,11 +33,14 @@ import type {
   PlaybookSession,
   PlaybookState,
 } from '../../../src/runtime.js';
+import { PLAYBOOK_FAILURE_CODES } from '../../../src/runtime.js';
 import {
   assertPlaybookEffectLedger,
+  attachPlaybookFailureCause,
   emptyPlaybookEffectLedger,
 } from '../../../src/xstate-runtime.js';
 import {
+  _internal,
   assertPlaybookCaptainUnresolvedEffects,
   assertPlaybookCaptainShellSnapshot,
   createPlaybookCaptainShell,
@@ -775,6 +780,98 @@ function carriedPreExistingTestLedger(
     ],
     logicalOperations: [],
   });
+}
+
+/**
+ * One standalone boundary per unresolved-effect classification, each with
+ * the HEAD evidence its report form needs: a proven commit, a move, a stay,
+ * and no after HEAD at all.
+ */
+function everyClassificationUnresolvedEffectTestLedger(
+  playbookId: string,
+  runtimeSessionId: string,
+) {
+  const observation = (head: string, projection: Record<string, string> = {}) => ({
+    worktree: '/current/worktree',
+    gitDir: '/current/worktree/.git',
+    head,
+    projection,
+    projectionDigest: `sha256:${createHash('sha256')
+      .update(JSON.stringify(projection))
+      .digest('hex')}`,
+  });
+  const baseline = observation(UNRESOLVED_EFFECT_BASELINE_HEAD);
+  const heads = {
+    proven: UNRESOLVED_EFFECT_AFTER_HEAD,
+    multiple: 'c'.repeat(40),
+    rewritten: 'd'.repeat(40),
+    foreign: 'e'.repeat(40),
+  };
+  const rows: readonly {
+    readonly classification: PlaybookCaptainUnresolvedEffect['classification'];
+    readonly after?: ReturnType<typeof observation>;
+    readonly receipt: boolean;
+    readonly dispositions: readonly string[];
+  }[] = [
+    { classification: 'one-descendant-commit', after: observation(heads.proven), receipt: true, dispositions: ['one-descendant-commit'] },
+    { classification: 'multiple-commits', after: observation(heads.multiple), receipt: true, dispositions: ['one-descendant-commit'] },
+    { classification: 'rewritten-or-non-descendant', after: observation(heads.rewritten), receipt: true, dispositions: ['one-descendant-commit'] },
+    {
+      classification: 'worktree-only-change',
+      after: observation(UNRESOLVED_EFFECT_BASELINE_HEAD, { 'stray.txt': 'changed' }),
+      receipt: true,
+      dispositions: ['one-descendant-commit'],
+    },
+    { classification: 'concurrent-or-foreign-change', after: observation(heads.foreign), receipt: true, dispositions: ['unchanged'] },
+    { classification: 'observation-ambiguous', receipt: true, dispositions: ['one-descendant-commit'] },
+    { classification: 'incomplete', receipt: false, dispositions: ['one-descendant-commit'] },
+  ];
+  const boundaries = rows.map((row, index) => ({
+    sequence: index + 1,
+    boundaryId: `9a000000-0000-4000-8000-00000000000${index + 1}`,
+    attemptId: `9b000000-0000-4000-8000-00000000000${index + 1}`,
+    attemptNumber: 1,
+    playbookId,
+    runtimeSessionId,
+    turnId: 1,
+    callId: `${playbookId}:coder:classification-${index + 1}`,
+    roleId: 'coder',
+    sourceStateId: 'working',
+    sourceOutcomeSchema: { committed: {} },
+    dispositions: row.dispositions,
+    canonicalWorktree: {
+      worktree: baseline.worktree,
+      gitDir: baseline.gitDir,
+    },
+    baseline,
+    ...(row.after === undefined ? {} : { after: row.after }),
+    ...(row.receipt
+      ? {
+          physicalReceipt: {
+            classification: row.classification,
+            baseline,
+            ...(row.after === undefined ? {} : { after: row.after }),
+            ...(row.classification === 'one-descendant-commit'
+              ? { commitOid: heads.proven }
+              : {}),
+          },
+        }
+      : {}),
+    correctionBudget: { limit: 1, spent: false },
+  }));
+  return {
+    heads,
+    ledger: assertPlaybookEffectLedger({
+      schemaVersion: 1,
+      revision: 1,
+      boundaries,
+      logicalOperations: [],
+    }),
+    references: boundaries.map(({ boundaryId }) => ({
+      kind: 'boundary' as const,
+      boundaryId,
+    })),
+  };
 }
 
 function terminalResult(
@@ -3098,8 +3195,8 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       parked.context,
     );
     const possibleEffectLine =
-      `Possible repository effect; a change could not be excluded (observation-ambiguous); ` +
-      `baseline HEAD ${UNRESOLVED_EFFECT_BASELINE_HEAD}; after HEAD was not available.`;
+      'Possible repository effect, which could not be excluded: the repository could not be observed after the step; ' +
+      `the repository stood at ${UNRESOLVED_EFFECT_BASELINE_HEAD} before it; no HEAD was available after it.`;
     expect(turnSummaryCalls(parked)[0]?.prompt).toContain(possibleEffectLine);
     expect(parked.replies[0]).toContain(possibleEffectLine);
     expect(parked.replies[0]).toContain(
@@ -3260,8 +3357,8 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
     expect(turnSummaryCalls(restoredTurn)).toHaveLength(0);
     expect(restoredTurn.replies).toHaveLength(1);
     expect(restoredTurn.replies[0]).toContain(
-      `Possible repository effect; a change could not be excluded (observation-ambiguous); ` +
-        `baseline HEAD ${UNRESOLVED_EFFECT_BASELINE_HEAD}; after HEAD was not available.`,
+      'Possible repository effect, which could not be excluded: the repository could not be observed after the step; ' +
+        `the repository stood at ${UNRESOLVED_EFFECT_BASELINE_HEAD} before it; no HEAD was available after it.`,
     );
     expect(restoredTurn.replies[0]).not.toContain('/current/worktree');
     expect(restoredTurn.replies[0]).not.toContain(
@@ -3440,15 +3537,89 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       },
     ]);
     const rendered = context.replies[0] ?? '';
+    // Each classification in Boss words, never its code (CAPTAIN-58).
     expect(rendered).toContain(
-      `Observed repository change (multiple-commits); baseline HEAD ${UNRESOLVED_EFFECT_BASELINE_HEAD}; after HEAD ${'c'.repeat(40)}.`,
+      `1. Observed repository change: the step made more than one commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to ${'c'.repeat(40)}.`,
     );
     expect(rendered).toContain(
-      `Observed repository change (one-descendant-commit); baseline HEAD ${UNRESOLVED_EFFECT_BASELINE_HEAD}; after HEAD ${UNRESOLVED_EFFECT_AFTER_HEAD}; proven commit OID ${UNRESOLVED_EFFECT_AFTER_HEAD}.`,
+      `2. Observed repository change: the step made one new commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to the proven commit ${UNRESOLVED_EFFECT_AFTER_HEAD}.`,
     );
+    expect(rendered).not.toMatch(/\((?:multiple-commits|one-descendant-commit)\)/);
     expect(rendered).not.toContain('/current/worktree');
     expect(rendered).not.toContain('projection');
     expect(rendered).not.toContain(UNRESOLVED_EFFECT_BOUNDARY_ID);
+    await shell.dispose?.();
+  });
+
+  // CAPTAIN-58/59: every classification by its clause, never its code, and
+  // every HEAD form — a proven commit, a move, a stay, and no after HEAD.
+  it('names every classification by its clause and each HEAD by its form', async () => {
+    const rootSessionId = '21000000-0000-4000-8000-000000000041';
+    const { heads, ledger, references } =
+      everyClassificationUnresolvedEffectTestLedger('code', rootSessionId);
+    const registry = fakeCodeEntry(async (runtime) => {
+      runtime.snapshot = runtimeSnapshot(
+        'code',
+        playbookState('effectReconciliationRequired'),
+        { turn: 1, effectLedger: ledger },
+      );
+      return quiescentResult('effectReconciliationRequired');
+    });
+    const createRuntime = registry.entry.createRuntime as unknown as
+      PlaybookCaptainRegistryEntryV3['createRuntime'];
+    registry.entry.createRuntime = ((options, hostCapabilities) => {
+      const runtime = createRuntime(options, hostCapabilities) as FakeRuntime;
+      runtime.unresolvedEffectEnvelopes = () => references;
+      return runtime;
+    }) as typeof registry.entry.createRuntime;
+    const capabilities: PlaybookHostConstructionCapabilities = {
+      ...fakeHostCapabilities(registry.entry, 'every-classification-lease'),
+      effectLedger: {
+        snapshot: vi.fn(() => ledger),
+        writeAhead: vi.fn(async () => ledger),
+      },
+    };
+    const shell = makeShell(registry, {
+      sessionIds: [rootSessionId],
+      hostCapabilities: { code: capabilities },
+    });
+    await shell.init!(stubSession().session);
+    const context = stubContext();
+    await shell.handleBossTurn(turn('/code classify every effect'), context.context);
+
+    const base = UNRESOLVED_EFFECT_BASELINE_HEAD;
+    const lines = [
+      `1. Observed repository change: the step made one new commit; HEAD moved from ${base} to the proven commit ${heads.proven}.`,
+      `2. Observed repository change: the step made more than one commit; HEAD moved from ${base} to ${heads.multiple}.`,
+      `3. Observed repository change: the repository history was rewritten; HEAD moved from ${base} to ${heads.rewritten}.`,
+      `4. Observed repository change: the step left changes uncommitted; HEAD stayed at ${base}.`,
+      `5. Observed repository change: the repository changed outside this step; HEAD moved from ${base} to ${heads.foreign}.`,
+      `6. Possible repository effect, which could not be excluded: the repository could not be observed after the step; the repository stood at ${base} before it; no HEAD was available after it.`,
+      `7. Possible repository effect, which could not be excluded: the step's effect on the repository was not fully recorded; the repository stood at ${base} before it; no HEAD was available after it.`,
+    ];
+    const reply = context.replies[0] ?? '';
+    expect(reply).toContain(
+      [
+        'Repository-effect evidence:',
+        ...lines.map((line) => `- ${line}`),
+        'This evidence does not establish workflow completion or attribute any repository change or commit to this workflow.',
+      ].join('\n'),
+    );
+    const closing = context.captainCalls.find((call) =>
+      isClosingReplyPrompt(call.prompt),
+    );
+    expect(closing?.prompt).toContain(
+      [
+        'Repository-effect evidence (canonical, in ledger order):',
+        ...lines.map((line) => `- ${line}`),
+      ].join('\n'),
+    );
+    for (const text of [reply, closing?.prompt ?? '']) {
+      expect(text).not.toMatch(
+        /\((?:one-descendant-commit|multiple-commits|rewritten-or-non-descendant|worktree-only-change|concurrent-or-foreign-change|observation-ambiguous|incomplete)\)/,
+      );
+      expect(text).not.toContain('stray.txt');
+    }
     await shell.dispose?.();
   });
 
@@ -3617,7 +3788,7 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
     expect(reply).not.toContain('fresh.txt');
     // The closing-reply prompt reads the same information as a settlement fact.
     const fact =
-      `The commit ${CARRIED_COMMIT_OID} carries 2 changes that were uncommitted before the step: boss.txt, notes/draft.md.`;
+      `The commit ${CARRIED_COMMIT_OID} carries changes that were uncommitted before the step: absorbed as found boss.txt; altered before committing notes/draft.md.`;
     expect(
       context.captainCalls.some(({ prompt }) => prompt.includes(fact)),
     ).toBe(true);
@@ -3671,6 +3842,103 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
 
     expect(context.replies).toHaveLength(1);
     expect(context.replies[0]).not.toContain('Pre-existing changes carried');
+    await shell.dispose?.();
+  });
+
+  // CAPTAIN-69: a shell-composed reply says each report once. The fallback
+  // lists the carried-changes facts, which say all that report says, so the
+  // report is omitted; the unresolved-effect report joins no fact and stays.
+  const unusableClosing = {
+    status: 'ok' as const,
+    turnId: 1,
+    finalText: 'Pick the actionId you want.',
+  };
+
+  it('omits a carried-changes report its listed facts state (CAPTAIN-69)', async () => {
+    const rootSessionId = '21000000-0000-4000-8000-000000000037';
+    const settled = carriedPreExistingTestLedger('code', rootSessionId);
+    let current = emptyPlaybookEffectLedger();
+    const registry = fakeCodeEntry(async (runtime) => {
+      current = settled;
+      runtime.snapshot = runtimeSnapshot(
+        'code',
+        playbookState('editing'),
+        { turn: 1, effectLedger: settled },
+      );
+      return quiescentResult('editing');
+    });
+    const capabilities: PlaybookHostConstructionCapabilities = {
+      ...fakeHostCapabilities(registry.entry, 'carried-fallback-lease'),
+      effectLedger: {
+        snapshot: vi.fn(() => current),
+        writeAhead: vi.fn(async () => current),
+      },
+    };
+    const shell = makeShell(registry, {
+      sessionIds: [rootSessionId],
+      hostCapabilities: { code: capabilities },
+    });
+
+    await shell.init!(stubSession().session);
+    const context = stubContext([unusableClosing, unusableClosing]);
+    await shell.handleBossTurn(turn('/code build on the boss dirt'), context.context);
+
+    expect(context.replies).toEqual([
+      [
+        'I could not finish reporting that turn, but the reported action completed — please do not send it again.',
+        'Here is what happened:',
+        '- Started /code with the selected request.',
+        `- The commit ${CARRIED_COMMIT_OID} carries changes that were uncommitted before the step: absorbed as found boss.txt; altered before committing notes/draft.md.`,
+        'Ask me where things stand and I will report the current state.',
+      ].join('\n'),
+    ]);
+    await shell.dispose?.();
+  });
+
+  it('keeps an unresolved-effect report no listed fact states (CAPTAIN-69)', async () => {
+    const rootSessionId = '21000000-0000-4000-8000-000000000038';
+    const { ledger, references } = orderedLogicalUnresolvedEffectTestLedger(
+      'code',
+      rootSessionId,
+    );
+    const registry = fakeCodeEntry(async (runtime) => {
+      runtime.snapshot = runtimeSnapshot(
+        'code',
+        playbookState('effectReconciliationRequired'),
+        { turn: 1, effectLedger: ledger },
+      );
+      return quiescentResult('effectReconciliationRequired');
+    });
+    const createRuntime = registry.entry.createRuntime as unknown as
+      PlaybookCaptainRegistryEntryV3['createRuntime'];
+    registry.entry.createRuntime = ((options, hostCapabilities) => {
+      const runtime = createRuntime(options, hostCapabilities) as FakeRuntime;
+      runtime.unresolvedEffectEnvelopes = () => references;
+      return runtime;
+    }) as typeof registry.entry.createRuntime;
+    const capabilities: PlaybookHostConstructionCapabilities = {
+      ...fakeHostCapabilities(registry.entry, 'unresolved-fallback-lease'),
+      effectLedger: {
+        snapshot: vi.fn(() => ledger),
+        writeAhead: vi.fn(async () => ledger),
+      },
+    };
+    const shell = makeShell(registry, {
+      sessionIds: [rootSessionId],
+      hostCapabilities: { code: capabilities },
+    });
+
+    await shell.init!(stubSession().session);
+    const context = stubContext([unusableClosing, unusableClosing]);
+    await shell.handleBossTurn(turn('/code preserve ordered evidence'), context.context);
+
+    expect(context.replies).toHaveLength(1);
+    const reply = context.replies[0]!;
+    expect(reply).toMatch(/^I could not finish reporting that turn/);
+    expect(reply.split('Repository-effect evidence:')).toHaveLength(2);
+    expect(reply).toContain(
+      `- 1. Observed repository change: the step made more than one commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to ${'c'.repeat(40)}.`,
+    );
     await shell.dispose?.();
   });
 
@@ -7636,8 +7904,9 @@ describe('createPlaybookCaptainShell nested playbooks', () => {
     const report = turnSummaryCalls(context).at(-1)?.prompt ?? '';
     expect(report).toContain('Settlement status: failed');
     expect(report).toContain('Dismissed /docs and returned to its caller.');
-    expect(report).toContain('Cleanup while removing /docs failed');
-    expect(report).toContain('child dispose failed');
+    expect(report).toContain(
+      'Cleanup after /docs failed with the error `child dispose failed`.',
+    );
 
     await shell.handleBossTurn(turn('/code continue root', 3), context.context);
     expect(code.runtimes[0]?.inputs.map((input) => input.text)).toEqual([
@@ -10530,7 +10799,9 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
     projectionDigest:
       'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
   };
-  const incompleteRetainedLedger = () =>
+  // One incomplete boundary, or a second at the same baseline: two records
+  // that read alike apart from their number (CAPTAIN-69).
+  const incompleteRetainedLedger = (boundaries: 1 | 2 = 1) =>
     assertPlaybookEffectLedger({
       schemaVersion: 1,
       revision: 1,
@@ -10555,6 +10826,30 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
           baseline: retainedObservation,
           correctionBudget: { limit: 1, spent: false },
         },
+        ...(boundaries === 1
+          ? []
+          : [
+              {
+                sequence: 2,
+                boundaryId: '81000000-0000-4000-8000-000000000009',
+                attemptId: '82000000-0000-4000-8000-00000000000a',
+                attemptNumber: 1,
+                playbookId: 'code',
+                runtimeSessionId: ABSENT_DESCENDANT_ID,
+                turnId: 1,
+                callId: 'code:coder:2',
+                roleId: 'coder',
+                sourceStateId: 'editing',
+                sourceOutcomeSchema: { committed: {} },
+                dispositions: ['one-descendant-commit'],
+                canonicalWorktree: {
+                  worktree: retainedObservation.worktree,
+                  gitDir: retainedObservation.gitDir,
+                },
+                baseline: retainedObservation,
+                correctionBudget: { limit: 1, spent: false },
+              },
+            ]),
       ],
       logicalOperations: [],
     });
@@ -10662,8 +10957,14 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
     };
   };
 
-  it.each(['incomplete', 'unchanged'] as const)('gives up a retained nested generation with %s effects', async (effect) => {
-    let authoritativeLedger = incompleteRetainedLedger();
+  it.each([
+    ['incomplete', 'a model reply', 1],
+    ['incomplete', 'the fallback', 1],
+    ['incomplete', 'a model reply', 2],
+    ['incomplete', 'the fallback', 2],
+    ['unchanged', 'a model reply', 1],
+  ] as const)('gives up a retained nested generation with %s effects after %s over %i boundaries', async (effect, closingReply, boundaries) => {
+    let authoritativeLedger = incompleteRetainedLedger(boundaries);
     const code = fakeCodeEntry();
     const review = fakePlaybookEntry('review', 'review');
     enableGenerationRetention(code, [], async (runtime, _session, snapshot, context) => {
@@ -10676,12 +10977,11 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
           checkpoint: snapshot.effectLedger,
         },
       };
-      runtime.unresolvedEffectEnvelopes = () => [
-        {
-          kind: 'boundary',
-          boundaryId: authoritativeLedger.boundaries[0]!.boundaryId,
-        },
-      ];
+      runtime.unresolvedEffectEnvelopes = () =>
+        authoritativeLedger.boundaries.map(({ boundaryId }) => ({
+          kind: 'boundary' as const,
+          boundaryId,
+        }));
     });
     enableGenerationRetention(
       review,
@@ -10737,13 +11037,23 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
     const generationBytes = JSON.stringify(generation);
     await shell.installRetainedGenerations({ code: generation });
 
+    const fallback = closingReply === 'the fallback';
     const resumed = stubContext([
       captainJson({ action: 'resume', playbookId: 'code' }),
-      {
-        status: 'ok',
-        turnId: 1,
-        finalText: 'The retained edit remains parked for reconciliation.',
-      },
+      // The fallback: the closing reply stays unusable after its re-ask.
+      ...(fallback
+        ? [1, 2].map(() => ({
+            status: 'ok' as const,
+            turnId: 1,
+            finalText: 'Pick the actionId you want.',
+          }))
+        : [
+            {
+              status: 'ok' as const,
+              turnId: 1,
+              finalText: 'The retained edit remains parked for reconciliation.',
+            },
+          ]),
     ]);
     await shell.handleBossTurn(turn('continue safely'), resumed.context);
 
@@ -10755,17 +11065,47 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
     expect(resumed.replies[0]).toContain(
       'remains parked until its repository-effect evidence is reconciled',
     );
-    expect(resumed.replies[0]).toContain(
-      `Possible repository effect; a change could not be excluded (incomplete); ` +
-        `baseline HEAD ${retainedObservation.head}; after HEAD was not available.`,
+    const incompleteLine =
+      "Possible repository effect, which could not be excluded: the step's effect on the repository was not fully recorded; " +
+      `the repository stood at ${retainedObservation.head} before it; no HEAD was available after it.`;
+    // CAPTAIN-69: every entry is a boundary's own record, so two that read
+    // alike apart from their number are both listed, numbered as the
+    // result-phase prompt numbers them.
+    for (let n = 1; n <= boundaries; n += 1) {
+      expect(resumed.replies[0]).toContain(`\n- ${n}. ${incompleteLine}`);
+      expect(turnSummaryCalls(resumed)[0]?.prompt).toContain(
+        `\n- ${n}. ${incompleteLine}`,
+      );
+    }
+    expect(resumed.replies[0]).not.toContain(`- ${boundaries + 1}. `);
+    // The fenced failure's `Failure:` line — and, in the fallback, the
+    // listed fact of that failure — would say what an entry already says, so
+    // the reply names the reason and the baseline once per entry and keeps
+    // only the controls.
+    expect(resumed.replies[0]).not.toContain('Failure:');
+    expect(resumed.replies[0]!.split(retainedObservation.head)).toHaveLength(
+      boundaries + 1,
     );
-    expect(turnSummaryCalls(resumed)[0]?.prompt).toContain(
-      `Possible repository effect; a change could not be excluded (incomplete); ` +
-        `baseline HEAD ${retainedObservation.head}; after HEAD was not available.`,
-    );
+    expect(
+      resumed.replies[0]!.split(
+        "the step's effect on the repository was not fully recorded",
+      ),
+    ).toHaveLength(boundaries + 1);
+    if (fallback) {
+      expect(resumed.replies[0]).toContain('Here is what happened:');
+      expect(resumed.replies[0]).not.toContain('/review failed');
+      // The result-phase prompt still reads the failure as one fact.
+      expect(turnSummaryCalls(resumed)[0]?.prompt).toContain(
+        `- /review failed: the step's effect on the repository was not fully recorded; the repository stood at ${retainedObservation.head} before it.`,
+      );
+    }
+    expect(resumed.replies[0]).toMatch(/\n\nControls:\n- Stop \/code \(ready\)$/);
     expect(resumed.replies[0]).not.toContain('may duplicate external effects');
     expect(shell.exportSettlement()).toMatchObject({
-      unresolvedEffects: incompleteUnresolvedEffectTestProjection(),
+      unresolvedEffects: Array.from(
+        { length: boundaries },
+        () => incompleteUnresolvedEffectTestProjection()[0],
+      ),
       snapshot: {
         mode: 'engaged.parked',
         effectLedger: authoritativeLedger,
@@ -12469,6 +12809,11 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
     expect(context.replies).toEqual([
       expect.stringContaining('may duplicate external effects'),
     ]);
+    // The fallback lists the warning among its facts, so the appended copy of
+    // it is not stated again (CAPTAIN-69).
+    expect(
+      context.replies[0]!.split('may duplicate external effects'),
+    ).toHaveLength(2);
     expect(closingPrompt).toContain(
       'no published root-state description was retained',
     );
@@ -12843,6 +13188,13 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     standing: 'ready',
   });
 
+  const FLAG_MISSING =
+    'The verify step failed: the flag file is missing, so the step cannot continue.';
+  // Evidence punctuation inside a message is the message's, not a doubled
+  // terminal mark: only the statement's own end is normalized (CAPTAIN-69).
+  const RANGE_MISSING =
+    'The verify step failed: git log main..HEAD lists no commit, and ../config.yaml is missing.';
+
   function advertising(
     actions: readonly { id: string; label: string }[],
     applied: { actionId: string; key: string }[] = [],
@@ -13037,12 +13389,12 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
         ...describe(),
         lastError: {
           name: 'Error',
-          message: 'coder is down',
+          message: 'The coder is down.',
           cause: {
             code: 'player-failed',
             evidence: {
               roleId: 'coder',
-              error: { name: 'Error', message: 'coder is down' },
+              error: { name: 'Error', message: 'The coder is down.' },
             },
           },
         },
@@ -13055,7 +13407,7 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     await shell.handleBossTurn(turn('/code first task'), started.context);
 
     const report = [
-      'Failure: the coder call failed: coder is down.',
+      'Failure: the coder call failed: The coder is down.',
       'Controls:',
       '- Retry: run the failing step again (ready)',
       '- Stop /code (ready)',
@@ -13066,8 +13418,1328 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     expect(started.replies.at(-1)!.split('Failure: ')).toHaveLength(2);
     // The closing-reply prompt sees the same failure as one settlement fact,
     // so a host without a phrase catalogue still gets the shell's sentence.
-    expect(started.captainCalls.at(-1)?.prompt).toContain(
-      'The workflow failed: the coder call failed: coder is down.',
+    expect(
+      (started.captainCalls.at(-1)?.prompt ?? '')
+        .split('\n')
+        .filter((line) => line.includes('coder is down.') && line.startsWith('- ')),
+    ).toEqual([
+      '- /code failed: the coder call failed: The coder is down.',
+    ]);
+    await shell.dispose?.();
+  });
+
+  // CAPTAIN-71/74/76: every cause code reaches the Boss as one plain
+  // sentence. A reason the runtime mints from a closed set is said by its
+  // phrase; any other reason a cause records is quoted where it reads as
+  // prose — no error-class name first, a space, a capital letter first, a
+  // terminal mark last, and no machine-shaped word — and is otherwise shown
+  // once, whole, as recorded, in a code span, never replaced.
+  const HEAD_BEFORE = 'a'.repeat(40);
+  const HEAD_AFTER = 'b'.repeat(40);
+  const REPOSITORY_EVIDENCE =
+    "the repository evidence for the step is missing or inconsistent, so the step's outcome was not accepted.";
+  const RESULT_EVIDENCE =
+    "the step's reported result is incomplete or inconsistent, so its outcome was not accepted.";
+  const defect = (reason: string): PlaybookFailureCause => ({
+    code: 'runtime-defect',
+    evidence: { reason },
+  });
+  const CAUSE_SENTENCES: readonly {
+    readonly cause: PlaybookFailureCause;
+    /** The `Failure:` line's sentence. */
+    readonly sentence: string;
+    /** The leaf's fact, where it is not `/code failed: <sentence>`. */
+    readonly fact?: string;
+  }[] = [
+    {
+      cause: {
+        code: 'commit-missing',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'worktree-only-change',
+          baselineHead: HEAD_BEFORE,
+          afterHead: HEAD_BEFORE,
+          paths: { uncommitted: ['src/a.ts'] },
+        },
+      },
+      sentence:
+        'the step had to commit its work and committed nothing; these changes are uncommitted: src/a.ts.',
+    },
+    {
+      cause: {
+        code: 'commit-residual',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'one-descendant-commit',
+          baselineHead: HEAD_BEFORE,
+          afterHead: HEAD_AFTER,
+          commitOid: HEAD_AFTER,
+          paths: { uncommitted: ['stray.txt'], altered: [] },
+        },
+      },
+      sentence: `the commit ${HEAD_AFTER} left changes uncommitted: stray.txt.`,
+    },
+    {
+      cause: {
+        code: 'pre-existing-lost',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'one-descendant-commit',
+          baselineHead: HEAD_BEFORE,
+          paths: { lost: ['notes.md'] },
+        },
+      },
+      sentence: 'uncommitted changes you had were lost: notes.md.',
+    },
+    {
+      cause: {
+        code: 'commits-more-than-one',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'multiple-commits',
+          baselineHead: HEAD_BEFORE,
+          afterHead: HEAD_AFTER,
+        },
+      },
+      sentence: `the step made more than one commit; HEAD moved from ${HEAD_BEFORE} to ${HEAD_AFTER}.`,
+    },
+    {
+      cause: {
+        code: 'history-rewritten',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'rewritten-or-non-descendant',
+          baselineHead: HEAD_BEFORE,
+          afterHead: HEAD_AFTER,
+        },
+      },
+      sentence: `the repository history was rewritten; HEAD moved from ${HEAD_BEFORE} to ${HEAD_AFTER}.`,
+    },
+    {
+      cause: {
+        code: 'foreign-change',
+        evidence: {
+          required: 'unchanged',
+          observed: 'concurrent-or-foreign-change',
+          baselineHead: HEAD_BEFORE,
+          afterHead: HEAD_AFTER,
+          paths: { changed: ['README.md'] },
+        },
+      },
+      sentence: 'the repository changed outside this step: README.md.',
+    },
+    {
+      cause: {
+        code: 'observation-unstable',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'observation-ambiguous',
+          baselineHead: HEAD_BEFORE,
+        },
+      },
+      sentence: `the repository could not be observed after the step; the repository stood at ${HEAD_BEFORE} before it.`,
+    },
+    {
+      cause: {
+        code: 'attribution-ambiguous',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'observation-ambiguous',
+          baselineHead: HEAD_BEFORE,
+        },
+      },
+      sentence:
+        'the repository change could not be attributed to this step: it should have left one new commit but left a state that could not be read.',
+    },
+    {
+      cause: { code: 'receipt-missing', evidence: { baselineHead: HEAD_BEFORE } },
+      sentence: `the step's effect on the repository was not fully recorded; the repository stood at ${HEAD_BEFORE} before it.`,
+    },
+    // The judge's closed reasons and its transport error stay in the
+    // cause's data; the Boss reads the phrase alone.
+    {
+      cause: {
+        code: 'judge-failed',
+        evidence: {
+          reason: 'corrective semantic candidate is invalid',
+          error: { name: 'TypeError', message: 'judgeTransport reset' },
+        },
+      },
+      sentence: "the step's outcome could not be decided.",
+    },
+    {
+      cause: {
+        code: 'judge-failed',
+        evidence: {
+          reason: 'judge transport failed',
+          error: { name: 'Error', message: 'Rate limit exceeded' },
+        },
+      },
+      sentence: "the step's outcome could not be decided.",
+    },
+    // A player's message is said as any recorded message is: by the
+    // runtime's phrase where the runtime minted it, quoted where it reads as
+    // prose, and otherwise shown once as recorded.
+    ...[
+      { message: 'The coder is down.', reason: ': The coder is down.' },
+      {
+        message: 'TypeError: The coder is down.',
+        reason: ' with the error `TypeError: The coder is down.`.',
+      },
+      { message: 'Rate limit exceeded', reason: ' with the error `Rate limit exceeded`.' },
+      { message: 'coder exploded', reason: ' with the error `coder exploded`.' },
+      {
+        message: 'callPlayer status "error"',
+        reason: ': the player reported an error without a message.',
+      },
+      { message: 'Unknown error', reason: ': an unknown error.' },
+    ].map(({ message, reason }) => ({
+      cause: {
+        code: 'player-failed' as const,
+        evidence: { roleId: 'coder', error: { name: 'Error', message } },
+      },
+      sentence: `the coder call failed${reason}`,
+    })),
+    {
+      cause: { code: 'aborted', evidence: {} },
+      sentence: 'the turn was aborted before the work settled.',
+    },
+    {
+      cause: {
+        code: 'child-failed',
+        evidence: {
+          playbookId: 'review',
+          cause: {
+            code: 'player-failed',
+            evidence: {
+              roleId: 'reviewer',
+              error: { name: 'Error', message: 'reviewer is down' },
+            },
+          },
+        },
+      },
+      sentence:
+        'the nested review run failed: the reviewer call failed with the error `reviewer is down`.',
+    },
+    // A reason that reads as prose — a space, a capital first, a terminal
+    // mark last, and no word CAPTAIN-9's identifier grammar tells apart from
+    // English — is quoted, whatever punctuation it holds.
+    ...[
+      FLAG_MISSING,
+      'Status "error" was returned.',
+      'Calling render() failed.',
+      'The `verify` step found no flag file.',
+    ].map((reason) => ({ cause: defect(reason), sentence: reason })),
+    // A reason the runtime mints from a closed set is said by its phrase.
+    ...[
+      'missing-repository-receipt',
+      'invalid-repository-receipt',
+      'repository-disposition-mismatch',
+      'missing-effect-evidence',
+    ].map((reason) => ({ cause: defect(reason), sentence: REPOSITORY_EVIDENCE })),
+    ...[
+      'missing-presentation-evidence',
+      'missing-runtime-evidence',
+      'inconsistent-runtime-evidence',
+      'deferred player result has no semantic evidence',
+    ].map((reason) => ({ cause: defect(reason), sentence: RESULT_EVIDENCE })),
+    ...[
+      'judge transport failed',
+      'corrective judge failed',
+      'corrective semantic candidate is invalid',
+      'semantic correction budget is unavailable',
+    ].map((reason) => ({
+      cause: defect(reason),
+      sentence: "the step's outcome could not be decided.",
+    })),
+    ...[
+      {
+        reason: 'no-matching-outcome',
+        sentence: 'the playbook has no next step for this result.',
+      },
+      {
+        reason: 'No declared outcome matches: The request needs a choice Boss has not made.',
+        sentence: 'No declared outcome matches: The request needs a choice Boss has not made.',
+      },
+      {
+        reason: 'host omitted governed semantic settlement',
+        sentence: "the host did not settle the step's outcome.",
+      },
+      {
+        reason: 'deferred question did not receive an eligible durable binding',
+        sentence: "the step's question could not be kept for a later reply.",
+      },
+      {
+        reason: 'callPlayer status "error"',
+        sentence: 'the player reported an error without a message.',
+      },
+      {
+        reason: 'callPlayer status "aborted"',
+        sentence: 'the player call was aborted.',
+      },
+      {
+        reason: 'captainBridge: callPlayer status "error"',
+        sentence: 'the player reported an error without a message.',
+      },
+      {
+        reason: 'captainBridge: callPlayer status "aborted"',
+        sentence: 'the player call was aborted.',
+      },
+      {
+        reason: 'captainBridge: callPlayer returned status=ok with no finalText',
+        sentence: 'the player call returned nothing.',
+      },
+      {
+        reason: 'captainActor: callCaptain status "error"',
+        sentence: 'the Captain call did not complete.',
+      },
+      {
+        reason: 'captainActor: callCaptain status "aborted"',
+        sentence: 'the Captain call did not complete.',
+      },
+      {
+        reason: 'captainActor: callCaptain returned status=ok with no finalText',
+        sentence: 'the Captain call returned nothing.',
+      },
+      // Reasons the runtime mints behind its diagnostic label, whatever the
+      // label is.
+      {
+        reason: 'playbook retained governed semantic envelope is no longer exact',
+        sentence: "the step's retained result no longer matches.",
+      },
+      {
+        reason: 'CODE parallel state reviewing cohort failed',
+        sentence: 'a parallel step failed.',
+      },
+      {
+        reason: 'playbook governed semantic reconciliation remains unresolved',
+        sentence: "the step's outcome could not be reconciled.",
+      },
+      {
+        reason:
+          'CAPTAIN reconstructed governed output changed before FSM acceptance',
+        sentence: "the step's result changed before it was accepted.",
+      },
+      {
+        reason: 'playbook deferred continuation remains unresolved',
+        sentence: 'the deferred step is still unresolved.',
+      },
+      {
+        reason: 'CODE deferred player returned no result',
+        sentence: 'the deferred player returned nothing.',
+      },
+      {
+        reason:
+          'playbook governed outcome remains unresolved: host omitted governed semantic settlement',
+        sentence: "the step's outcome could not be settled.",
+      },
+      {
+        reason: 'unknown runtime defect',
+        sentence: 'the runtime failed without saying why.',
+      },
+      { reason: 'Unknown error', sentence: 'an unknown error.' },
+      {
+        reason: 'apply settled with outcome failed',
+        sentence: 'the action did not complete.',
+      },
+      {
+        reason: 'apply settled with outcome aborted',
+        sentence: 'the action was stopped.',
+      },
+      {
+        reason: 'playbook actor entered error status',
+        sentence: "the step's actor failed.",
+      },
+      {
+        reason: 'action "retry:step" is not currently advertised',
+        sentence: 'that action is no longer offered.',
+      },
+      // Looked up once its control characters are spaced and its ends
+      // trimmed.
+      {
+        reason: '  judge transport failed \n',
+        sentence: "the step's outcome could not be decided.",
+      },
+      {
+        reason: 'playbook parallel state reviewing\u0007cohort failed',
+        sentence: 'a parallel step failed.',
+      },
+    ].map(({ reason, sentence }) => ({ cause: defect(reason), sentence })),
+    // Anything else is shown once, whole, as recorded, in a code span sized
+    // to the backticks it holds: an error-class name first, which marks
+    // machine text however the rest reads; a word with an internal capital, a
+    // digit, an underscore, a dot, a hyphen, or a colon — an error code
+    // included; no space, no capital first, or no terminal mark last; and a
+    // minted reason inside a longer text, which is no minted reason.
+    ...[
+      { reason: 'ChildFailure: The review failed.', span: '`ChildFailure: The review failed.`' },
+      { reason: 'Error: The config file is missing.', span: '`Error: The config file is missing.`' },
+      {
+        reason: "TypeError: Cannot read properties of undefined (reading 'x').",
+        span: "`TypeError: Cannot read properties of undefined (reading 'x').`",
+      },
+      {
+        reason: 'Retry failed: action "x" is not currently advertised',
+        span: '`Retry failed: action "x" is not currently advertised`',
+      },
+      {
+        reason: 'CODE deferred player returned no result twice',
+        span: '`CODE deferred player returned no result twice`',
+      },
+      { reason: 'Connection to localhost:8080 was refused.', span: '`Connection to localhost:8080 was refused.`' },
+      { reason: 'The macOS keychain is locked.', span: '`The macOS keychain is locked.`' },
+      { reason: 'The up-to-date check failed.', span: '`The up-to-date check failed.`' },
+      { reason: 'Version 1.5.2 of the tool is too old.', span: '`Version 1.5.2 of the tool is too old.`' },
+      { reason: 'The callPlayer function threw.', span: '`The callPlayer function threw.`' },
+      { reason: 'The config.yaml file is missing.', span: '`The config.yaml file is missing.`' },
+      { reason: 'The file my_file.txt is missing.', span: '`The file my_file.txt is missing.`' },
+      { reason: 'Fetching https://example.test failed.', span: '`Fetching https://example.test failed.`' },
+      { reason: 'The HEAD commit is missing.', span: '`The HEAD commit is missing.`' },
+      { reason: 'ENOENT: The config file is missing.', span: '`ENOENT: The config file is missing.`' },
+      { reason: 'callPlayer status "error".', span: '`callPlayer status "error".`' },
+      { reason: 'ECONNREFUSED 127.0.0.1:8080', span: '`ECONNREFUSED 127.0.0.1:8080`' },
+      { reason: 'Aborted.', span: '`Aborted.`' },
+      { reason: 'Connection refused by the provider', span: '`Connection refused by the provider`' },
+      { reason: 'the session log is unwritable.', span: '`the session log is unwritable.`' },
+      { reason: 'TypeError', span: '`TypeError`' },
+      { reason: 'TypeError: guard lookup exploded', span: '`TypeError: guard lookup exploded`' },
+      {
+        reason: "ENOENT: no such file or directory, open '/x/config.yaml'",
+        span: "`ENOENT: no such file or directory, open '/x/config.yaml'`",
+      },
+      { reason: 'the `verify` step exploded', span: '``the `verify` step exploded``' },
+    ].map(({ reason, span }) => ({
+      cause: defect(reason),
+      sentence: `the step failed with the error ${span}.`,
+      fact: `/code failed with the error ${span}.`,
+    })),
+  ];
+
+  it('covers every failure code with a Boss sentence', () => {
+    expect(new Set(CAUSE_SENTENCES.map(({ cause }) => cause.code))).toEqual(
+      new Set(PLAYBOOK_FAILURE_CODES),
+    );
+  });
+
+  it('covers every reason the runtime mints with a Boss sentence', () => {
+    const { RUNTIME_REASON_PHRASES, LABELLED_RUNTIME_REASONS } = _internal;
+    const minted = CAUSE_SENTENCES.flatMap(({ cause, sentence }) =>
+      cause.code === 'runtime-defect'
+        ? [{ reason: cause.evidence.reason!, sentence }]
+        : [],
+    );
+    for (const [reason, phrase] of Object.entries(RUNTIME_REASON_PHRASES)) {
+      expect(minted).toContainEqual({ reason, sentence: phrase });
+    }
+    for (const [pattern, phrase] of LABELLED_RUNTIME_REASONS) {
+      expect(
+        minted.some(
+          ({ reason, sentence }) => pattern.test(reason) && sentence === phrase,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it.each(CAUSE_SENTENCES.map((row) => ({ ...row, code: row.cause.code })))(
+    'states a $code cause to the Boss as "$sentence"',
+    async ({ cause, sentence, fact }) => {
+      const code = advertising([RETRY]);
+      const createRuntime = code.entry.createRuntime;
+      code.entry.createRuntime = (options, hostCapabilities) => {
+        const runtime = createRuntime(options, hostCapabilities) as FakeRuntime;
+        const describe = runtime.describe!;
+        runtime.describe = () => ({
+          ...describe(),
+          lastError: { name: 'Error', message: 'the step failed', cause },
+        });
+        return runtime;
+      };
+      const shell = makeShell(code);
+      await shell.init!(stubSession().session);
+      const started = stubContext();
+      await shell.handleBossTurn(turn('/code first task'), started.context);
+
+      // After a model-composed reply the `Failure:` line stays, once.
+      const reply = started.replies.at(-1)!;
+      expect(reply).toContain(`\n\nFailure: ${sentence}\nControls:\n`);
+      expect(reply.match(/^Failure: /gm)).toHaveLength(1);
+      // The result-phase prompt reads the same failure as the leaf's fact.
+      const closing = started.captainCalls.find((call) =>
+        isClosingReplyPrompt(call.prompt),
+      );
+      expect(closing!.prompt.split('\n')).toContain(
+        `- ${fact ?? `/code failed: ${sentence}`}`,
+      );
+      // A recorded text the sentence does not show reaches neither the Boss
+      // nor the leaf's fact; the data carrying the cause keeps it.
+      for (const recorded of [
+        cause.evidence.reason,
+        cause.evidence.error?.message,
+      ]) {
+        if (recorded === undefined || sentence.includes(recorded)) continue;
+        expect(reply).not.toContain(recorded);
+        expect(closing!.prompt).not.toContain(`failed: ${recorded}`);
+      }
+      await shell.dispose?.();
+    },
+  );
+
+  // CAPTAIN-67/69/71/74: every failure path the Boss can read, crossed with
+  // every kind of recorded reason, while the closing reply stays unusable
+  // after its corrective re-ask, so the shell's own words are what the Boss
+  // reads.
+  interface RecordedReasonCase {
+    readonly kind: string;
+    readonly message: string;
+    readonly cause?: PlaybookFailureCause;
+    /** The reason as a statement says it: quoted prose, or a code span. */
+    readonly phrase?: string;
+    readonly span?: string;
+    /** What every line carrying this failure holds. */
+    readonly evidence: string;
+    /** Recorded text the Boss never reads. */
+    readonly hidden?: string;
+  }
+  /** The lines of the result-phase prompt's outcome-report facts block. */
+  const outcomeReportFacts = (prompt: string): string[] => {
+    const lines = prompt.split('\n');
+    const at = lines.indexOf('Outcome report facts (verbatim):');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const facts: string[] = [];
+    for (const line of lines.slice(at + 1)) {
+      if (!line.startsWith('- ')) break;
+      facts.push(line);
+    }
+    return facts;
+  };
+  /** `text` with each of its code spans read as `§`. */
+  const outsideSpans = (text: string): string =>
+    text.replace(/(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, '§');
+  const RECORDED_REASONS: readonly RecordedReasonCase[] = [
+    {
+      kind: 'a mapped cause',
+      message: 'ChildFailure: missing-repository-receipt',
+      cause: defect('missing-repository-receipt'),
+      phrase: REPOSITORY_EVIDENCE,
+      evidence: 'repository evidence for the step',
+      hidden: 'missing-repository-receipt',
+    },
+    {
+      kind: 'a sentence behind a class name',
+      message: 'ChildFailure: The worktree lock is held.',
+      span: '`ChildFailure: The worktree lock is held.`',
+      evidence: 'worktree lock is held',
+    },
+    {
+      kind: 'a sentence with a doubled end',
+      message: 'The build cache is stale..',
+      phrase: 'The build cache is stale.',
+      evidence: 'build cache is stale',
+    },
+    {
+      kind: 'prose behind a class name with quotes and parentheses',
+      message: "TypeError: Cannot read properties of undefined (reading 'x').",
+      span: "`TypeError: Cannot read properties of undefined (reading 'x').`",
+      evidence: 'Cannot read properties',
+    },
+    {
+      kind: 'a sentence naming a file',
+      message: 'The file my_file.txt is missing.',
+      span: '`The file my_file.txt is missing.`',
+      evidence: 'my_file.txt',
+    },
+    {
+      kind: 'a sentence naming a dotted file',
+      message: 'The config.yaml file is missing.',
+      span: '`The config.yaml file is missing.`',
+      evidence: 'config.yaml file',
+    },
+    {
+      kind: 'a sentence naming a camelCase word',
+      message: 'The callPlayer function threw.',
+      span: '`The callPlayer function threw.`',
+      evidence: 'callPlayer function',
+    },
+    {
+      kind: 'capitalized words',
+      message: 'Rate limit exceeded',
+      span: '`Rate limit exceeded`',
+      evidence: 'Rate limit exceeded',
+    },
+    {
+      kind: 'a code',
+      message: 'guardLookup returned null',
+      span: '`guardLookup returned null`',
+      evidence: 'guardLookup returned',
+    },
+    {
+      kind: 'a code with a terminal mark',
+      message: 'callPlayer status "error".',
+      span: '`callPlayer status "error".`',
+      evidence: 'callPlayer status',
+    },
+    {
+      kind: 'a path behind a class name',
+      message: 'ChildFailure: ../config.yaml missing',
+      span: '`ChildFailure: ../config.yaml missing`',
+      evidence: '../config.yaml missing',
+    },
+    {
+      kind: 'a lowercase phrase',
+      message: 'coder exploded',
+      span: '`coder exploded`',
+      evidence: 'coder exploded',
+    },
+    {
+      kind: 'an error code before no prose',
+      message: "ENOENT: no such file or directory, open '/x/config.yaml'",
+      span: "`ENOENT: no such file or directory, open '/x/config.yaml'`",
+      evidence: 'no such file or directory',
+    },
+    {
+      kind: 'an all-caps code',
+      message: 'ECONNREFUSED 127.0.0.1:8080',
+      span: '`ECONNREFUSED 127.0.0.1:8080`',
+      evidence: 'ECONNREFUSED',
+    },
+    {
+      kind: 'a reason the runtime mints',
+      message: 'callPlayer status "error"',
+      phrase: 'the player reported an error without a message.',
+      evidence: 'reported an error without a message',
+      hidden: 'callPlayer status',
+    },
+    {
+      kind: 'the runtime’s refusal reason',
+      message: 'action "retry:step" is not currently advertised',
+      phrase: 'that action is no longer offered.',
+      evidence: 'no longer offered',
+      hidden: 'currently advertised',
+    },
+  ];
+  /** `<Subject> failed: <reason>.`, as CAPTAIN-71 states it. */
+  const stated = (reason: RecordedReasonCase, subject: string): string =>
+    reason.span === undefined
+      ? `${subject} failed: ${reason.phrase}`
+      : `${subject} failed with the error ${reason.span}.`;
+  const UNCONFIRMED =
+    'Its complete outcome could not be confirmed, and it may have changed the session. It was not repeated automatically.';
+  const CLASSIFICATION_CODE =
+    /\((?:one-descendant-commit|multiple-commits|rewritten-or-non-descendant|worktree-only-change|concurrent-or-foreign-change|observation-ambiguous|incomplete)\)/;
+  const FAILURE_PATHS = [
+    'a returned failed run',
+    'a thrown first turn',
+    'a thrown delivery',
+    'a thrown runtime action',
+    'a failed receipt with the leaf’s error',
+    'a failed receipt with another error',
+    'a give-up whose disposal fails',
+    'a nested cleanup that fails',
+    'a failed run beside unresolved repository effects',
+  ] as const;
+  /** The matrix's paths, and the probe rows' paths beside them. */
+  type FailurePath =
+    | (typeof FAILURE_PATHS)[number]
+    | 'a thrown runtime action on a ready leaf'
+    | 'a refused runtime action on a ready leaf'
+    | 'a failed receipt on a ready leaf'
+    | 'a nested cleanup that fails, its caller failing with the same error'
+    | 'a thrown delivery beside unresolved repository effects'
+    | 'a thrown delivery beside unresolved repository effects on a ready leaf';
+  /** The failure statements the Boss reads, and the prompt's form of each. */
+  const statementsFor = (
+    path: (typeof FAILURE_PATHS)[number],
+    reason: RecordedReasonCase,
+  ): { readonly boss: readonly string[]; readonly prompt?: readonly string[] } => {
+    switch (path) {
+      case 'a returned failed run':
+      case 'a failed run beside unresolved repository effects': {
+        const fact = stated(reason, '/code');
+        return { boss: [fact], prompt: [fact] };
+      }
+      case 'a thrown first turn': {
+        const fact = stated(reason, 'The first turn of /code');
+        return { boss: [fact], prompt: [fact] };
+      }
+      case 'a thrown delivery': {
+        const fact = `${stated(reason, 'The deliver action')} ${UNCONFIRMED}`;
+        return { boss: [fact], prompt: [fact] };
+      }
+      case 'a thrown runtime action': {
+        const fact = `${stated(reason, 'The runtime action')} ${UNCONFIRMED}`;
+        return { boss: [fact], prompt: [fact] };
+      }
+      case 'a failed receipt with the leaf’s error':
+      case 'a failed receipt with another error':
+        return {
+          boss: [stated(reason, `Applying "${RETRY.label}"`)],
+          prompt: [stated(reason, `Applying "${RETRY.id}"`)],
+        };
+      case 'a give-up whose disposal fails':
+        return { boss: [stated(reason, 'Dismissing /code')] };
+      case 'a nested cleanup that fails': {
+        const fact = stated(reason, 'Cleanup after /docs');
+        return { boss: [fact], prompt: [fact] };
+      }
+    }
+  };
+  const NESTED_ROOT_ID = '31000000-0000-4000-8000-000000000001';
+  const NESTED_CHILD_ID = '31000000-0000-4000-8000-000000000002';
+  const EFFECTS_ROOT_ID = '21000000-0000-4000-8000-000000000039';
+  const unusableClosing = (turnId: number) => ({
+    status: 'ok' as const,
+    turnId,
+    finalText: 'Pick the actionId you want.',
+  });
+  /** Drives `path` to its settlement; the reply and the prompt's facts. */
+  async function settleFailure(
+    path: FailurePath,
+    reason: Pick<RecordedReasonCase, 'message' | 'cause'> & {
+      /** The advertised Retry's label, where it is not RETRY's own. */
+      readonly label?: string;
+      /** The advertised Retry's id, where it is not RETRY's own. */
+      readonly id?: string;
+      /** The nested child's command, where it is not `docs`. */
+      readonly childCommand?: string;
+      /** The root's command, where it is not `code`. */
+      readonly command?: string;
+    },
+  ): Promise<{ readonly reply: string; readonly facts?: readonly string[] }> {
+    const recorded = { name: 'TypeError', message: reason.message };
+    const retry = {
+      ...RETRY,
+      ...(reason.label === undefined ? {} : { label: reason.label }),
+      ...(reason.id === undefined ? {} : { id: reason.id }),
+    };
+    const command = reason.command ?? 'code';
+    const thrown = (): TypeError =>
+      reason.cause === undefined
+        ? new TypeError(reason.message)
+        : attachPlaybookFailureCause(new TypeError(reason.message), reason.cause);
+    const closingFacts = (context: StubContext): readonly string[] => {
+      const closing = context.captainCalls.find((call) =>
+        isClosingReplyPrompt(call.prompt),
+      );
+      return outcomeReportFacts(closing!.prompt);
+    };
+    if (path === 'a give-up whose disposal fails') {
+      const code = fakeCodeEntry(undefined, async () => {
+        throw thrown();
+      });
+      const shell = makeShell(code);
+      await shell.init!(stubSession().session);
+      await shell.handleBossTurn(turn('/code first task'), stubContext().context);
+      const stopped = stubContext();
+      await shell.handleBossTurn(
+        turn(shell.submitShellAction!(GIVE_UP.id), 2),
+        stopped.context,
+      );
+      expect(stopped.captainCalls).toEqual([]);
+      await shell.dispose?.().catch(() => undefined);
+      return { reply: stopped.replies.at(-1)! };
+    }
+    if (path.startsWith('a nested cleanup that fails')) {
+      const relayed = path.endsWith('its caller failing with the same error');
+      const code = fakeCodeEntry(
+        async (runtime, runtimeTurn) => {
+          if (runtimeTurn.text !== 'call docs') {
+            return quiescentResult('readyAfterDismiss');
+          }
+          const start = await runtime.ports!.callPlaybook(
+            {
+              callId: 'code:docs:cleanup-failure',
+              playbookId: 'docs',
+              text: 'draft docs',
+            },
+            runtimeTurn.signal,
+          );
+          if (start.state !== 'suspended') throw new Error('docs must suspend');
+          return suspendedResult({
+            callId: 'code:docs:cleanup-failure',
+            playbookId: 'docs',
+            childSessionId: start.childSessionId,
+          });
+        },
+        undefined,
+        undefined,
+        async () =>
+          relayed
+            ? { outcome: 'failed', state: playbookState('failed'), error: recorded }
+            : quiescentResult('readyAfterDismiss'),
+      );
+      const docs = fakePlaybookEntry(
+        'docs',
+        reason.childCommand ?? 'docs',
+        async () => quiescentResult('drafting'),
+        async () => {
+          throw thrown();
+        },
+      );
+      delete code.entry.summaryPolicy;
+      delete docs.entry.summaryPolicy;
+      const shell = makeShell([code, docs], {
+        sessionIds: [NESTED_ROOT_ID, NESTED_CHILD_ID],
+      });
+      await shell.init!(stubSession().session);
+      await shell.handleBossTurn(turn('/code call docs'), stubContext().context);
+      const failing = stubContext([
+        captainJson({ action: 'dismiss' }),
+        unusableClosing(2),
+        unusableClosing(2),
+      ]);
+      await shell.handleBossTurn(turn('stop the child', 2), failing.context);
+      await shell.dispose?.();
+      return { reply: failing.replies.at(-1)!, facts: closingFacts(failing) };
+    }
+    // Every other path parks the leaf in its failure state, recording the
+    // reason — or, where a receipt fails with another error, the leaf's own —
+    // except where the leaf stays ready.
+    const other = path === 'a failed receipt with another error';
+    const ready = path.endsWith('on a ready leaf');
+    const leafError = other
+      ? { name: 'TypeError', message: FLAG_MISSING }
+      : { ...recorded, ...(reason.cause === undefined ? {} : { cause: reason.cause }) };
+    const effects = path.includes('beside unresolved repository effects');
+    const delivery = path.startsWith('a thrown delivery');
+    const action =
+      path.startsWith('a thrown runtime action') ||
+      path.startsWith('a failed receipt') ||
+      path.startsWith('a refused runtime action');
+    const { ledger, references } = orderedLogicalUnresolvedEffectTestLedger(
+      'code',
+      EFFECTS_ROOT_ID,
+    );
+    let parked = false;
+    const code = fakeCodeEntry(async (runtime) => {
+      if ((delivery || ready) && runtime.inputs.length === 1) {
+        return quiescentResult();
+      }
+      if (!ready) parked = true;
+      if (effects) {
+        runtime.snapshot = runtimeSnapshot(
+          'code',
+          playbookState(parked ? 'failed' : 'ready'),
+          { turn: 1, effectLedger: ledger },
+        );
+      }
+      if (path === 'a thrown first turn' || delivery) throw thrown();
+      return { outcome: 'failed', state: playbookState('failed'), error: leafError };
+    });
+    delete code.entry.summaryPolicy;
+    const createRuntime = code.entry.createRuntime;
+    code.entry.createRuntime = (options, hostCapabilities) => {
+      const runtime = createRuntime(options, hostCapabilities) as FakeRuntime;
+      runtime.describe = () =>
+        parked
+          ? {
+              state: playbookState('failed'),
+              stateDescription: 'The step failed and is waiting for Boss.',
+              pendingQuestions: [],
+              actions: [retry],
+              lastError: leafError,
+            }
+          : {
+              state: playbookState('ready'),
+              stateDescription: 'The step is waiting for Boss.',
+              pendingQuestions: [],
+              actions: ready ? [retry] : [],
+            };
+      if (path.startsWith('a thrown runtime action')) {
+        runtime.apply = async () => {
+          throw thrown();
+        };
+      } else if (path.startsWith('a refused runtime action')) {
+        runtime.apply = async () => ({
+          disposition: 'rejected',
+          reason: reason.message,
+        });
+      } else if (path.startsWith('a failed receipt')) {
+        runtime.apply = async () => ({
+          disposition: 'failed',
+          error: {
+            ...recorded,
+            ...(reason.cause === undefined ? {} : { cause: reason.cause }),
+          },
+        });
+      }
+      if (effects) runtime.unresolvedEffectEnvelopes = () => references;
+      return runtime;
+    };
+    const shell = makeShell(
+      code,
+      effects
+        ? {
+            ...(command === 'code' ? {} : { commands: { code: command } }),
+            sessionIds: [EFFECTS_ROOT_ID],
+            hostCapabilities: {
+              code: {
+                ...fakeHostCapabilities(code.entry, 'failure-effects-lease'),
+                effectLedger: {
+                  snapshot: vi.fn(() => ledger),
+                  writeAhead: vi.fn(async () => ledger),
+                },
+              },
+            },
+          }
+        : command === 'code'
+          ? {}
+          : { commands: { code: command } },
+    );
+    await shell.init!(stubSession().session);
+    const started = turn(`/${command} first task`);
+    let failing: StubContext;
+    if (delivery) {
+      await shell.handleBossTurn(started, stubContext().context);
+      failing = stubContext([
+        captainJson({ action: 'deliver' }),
+        unusableClosing(2),
+        unusableClosing(2),
+      ]);
+      await shell.handleBossTurn(turn('go on', 2), failing.context);
+    } else if (action) {
+      // The Boss picks the advertised Retry; the host routes it with no
+      // decision call.
+      await shell.handleBossTurn(started, stubContext().context);
+      failing = stubContext([unusableClosing(2), unusableClosing(2)]);
+      await shell.handleBossTurn(
+        turn(shell.submitRuntimeAction!(retry.id), 2),
+        failing.context,
+      );
+    } else {
+      failing = stubContext([unusableClosing(1), unusableClosing(1)]);
+      await shell.handleBossTurn(started, failing.context);
+    }
+    await shell.dispose?.();
+    return { reply: failing.replies.at(-1)!, facts: closingFacts(failing) };
+  }
+
+  /** What no Boss-facing text shows outside a code span. */
+  const expectNothingRawOutsideSpans = (
+    text: string,
+    raw: readonly string[] = [],
+  ): void => {
+    const words = outsideSpans(text);
+    expect(words).not.toMatch(/(?:Error|Exception|Failure|Defect): /);
+    expect(words).not.toMatch(/\b[A-Z]{4,}: /);
+    expect(text).not.toMatch(CLASSIFICATION_CODE);
+    for (const recorded of raw) expect(words).not.toContain(recorded);
+  };
+
+  it.each(
+    FAILURE_PATHS.flatMap((path) =>
+      RECORDED_REASONS.map((reason) => ({ path, kind: reason.kind, reason })),
+    ),
+  )('states $path with $kind once, in Boss words', async ({ path, reason }) => {
+    const { reply, facts } = await settleFailure(path, reason);
+    const { boss, prompt } = statementsFor(path, reason);
+    const other = path === 'a failed receipt with another error';
+    const carries = (line: string): boolean =>
+      line.includes(reason.evidence) ||
+      (other && line.includes('the flag file is missing'));
+    // Exactly one statement carries each failure, in the Boss reply and in
+    // the result-phase facts.
+    expect(reply.split('\n').filter(carries)).toEqual(
+      [...boss, ...(other ? [`/code failed: ${FLAG_MISSING}`] : [])].map(
+        (fact) => `- ${fact}`,
+      ),
+    );
+    if (prompt !== undefined) {
+      expect(facts!.filter(carries)).toEqual(
+        [...prompt, ...(other ? [`/code failed: ${FLAG_MISSING}`] : [])].map(
+          (fact) => `- ${fact}`,
+        ),
+      );
+    }
+    // No error-class name, error code, classification code, or mapped code
+    // reaches the Boss outside a code span, and no `Failure:` line repeats a
+    // listed statement's reason.
+    for (const text of [reply, ...(facts ?? [])]) {
+      expectNothingRawOutsideSpans(
+        text,
+        reason.span === undefined ? [] : [reason.evidence],
+      );
+      if (reason.hidden !== undefined) expect(text).not.toContain(reason.hidden);
+    }
+    if (path === 'a failed run beside unresolved repository effects') {
+      expect(reply).toContain(
+        `- 1. Observed repository change: the step made more than one commit; HEAD moved from ${HEAD_BEFORE} to ${'c'.repeat(40)}.`,
+      );
+    }
+    // A parked leaf's controls stay whatever the statements said.
+    if (!path.startsWith('a give-up') && !path.startsWith('a nested')) {
+      expect(reply).toMatch(
+        /\n\nControls:\n- Retry: run the failing step again \(ready\)\n- Stop \/code \(ready\)$/,
+      );
+    }
+  });
+
+  // CAPTAIN-69/76: probe rows beside the matrix — a reason whose words
+  // CAPTAIN-9 withholds, a runtime's refusal, a label or subject CAPTAIN-9
+  // refuses, and a repository failure beside the unresolved-effect entry that
+  // carries its reason — each stated exactly once, nothing raw outside a code
+  // span, and never zero times.
+  const MORE_THAN_ONE_COMMIT: PlaybookFailureCause = {
+    code: 'commits-more-than-one',
+    evidence: {
+      required: 'one-descendant-commit',
+      observed: 'multiple-commits',
+      baselineHead: HEAD_BEFORE,
+      afterHead: 'c'.repeat(40),
+    },
+  };
+  const MORE_THAN_ONE_COMMIT_REASON = `the step made more than one commit; HEAD moved from ${HEAD_BEFORE} to ${'c'.repeat(40)}`;
+  const ADJUDICATOR_PATH_CAUSE: PlaybookFailureCause = {
+    code: 'commit-missing',
+    evidence: {
+      required: 'one-descendant-commit',
+      observed: 'worktree-only-change',
+      baselineHead: HEAD_BEFORE,
+      afterHead: HEAD_BEFORE,
+      paths: { uncommitted: ['src/adjudicator.ts'] },
+    },
+  };
+  const NOT_ADVERTISED = 'action "retry:step" is not currently advertised';
+  const PROBE_ROWS: readonly {
+    readonly row: string;
+    readonly path: FailurePath;
+    readonly message: string;
+    readonly cause?: PlaybookFailureCause;
+    readonly label?: string;
+    readonly id?: string;
+    readonly childCommand?: string;
+    readonly command?: string;
+    /** What marks a line as carrying the failure. */
+    readonly marks: string;
+    readonly boss: readonly string[];
+    readonly prompt?: readonly string[];
+    /** Recorded text the Boss never reads. */
+    readonly withheld?: readonly string[];
+    /** Other statements the reply still lists as they are. */
+    readonly kept?: readonly string[];
+  }[] = [
+    {
+      row: 'a thrown runtime action naming the supplied action id',
+      path: 'a thrown runtime action on a ready leaf',
+      message: 'apply retry:step settled with outcome aborted',
+      marks: 'The runtime action failed',
+      boss: [`The runtime action failed with an internal error. ${UNCONFIRMED}`],
+      prompt: [
+        `The runtime action failed with the error \`apply retry:step settled with outcome aborted\`. ${UNCONFIRMED}`,
+      ],
+      withheld: ['retry:step', 'settled with outcome'],
+    },
+    {
+      // The runtime's own refusal reason, on a receipt as on a refusal, is
+      // said by its phrase and never as an internal error.
+      row: 'a failed receipt whose error is the runtime’s refusal reason',
+      path: 'a failed receipt with the leaf’s error',
+      message: NOT_ADVERTISED,
+      marks: 'failed',
+      boss: [`Applying "${RETRY.label}" failed: that action is no longer offered.`],
+      prompt: ['Applying "retry:step" failed: that action is no longer offered.'],
+      withheld: ['retry:step', 'currently advertised', 'internal error'],
+    },
+    {
+      row: 'the runtime’s refusal of an action it no longer advertises',
+      path: 'a refused runtime action on a ready leaf',
+      message: NOT_ADVERTISED,
+      marks: 'refused',
+      boss: [`The runtime refused "${RETRY.label}": that action is no longer offered.`],
+      prompt: ['The runtime refused "retry:step": that action is no longer offered.'],
+      withheld: ['retry:step', 'currently advertised', 'internal error'],
+    },
+    {
+      // A runtime action's id is renamed to its label outside code spans
+      // only: the recorded text quoting the id keeps it inside its span, and
+      // that span still carries the leaf's failure, so it is said once.
+      row: 'a failed receipt whose recorded text quotes the action id',
+      path: 'a failed receipt with the leaf’s error',
+      message: 'the host rejected "retry" as stale',
+      id: 'retry',
+      marks: 'failed',
+      boss: [
+        `Applying "${RETRY.label}" failed with the error \`the host rejected "retry" as stale\`.`,
+      ],
+      prompt: [
+        'Applying "retry" failed with the error `the host rejected "retry" as stale`.',
+      ],
+    },
+    {
+      // The same text quoting a machine-shaped id, which the guard withholds
+      // inside the span it stays in.
+      row: 'a failed receipt whose recorded text quotes the supplied action id',
+      path: 'a failed receipt with the leaf’s error',
+      message: 'the host rejected "retry:step" as stale',
+      marks: 'failed',
+      boss: [`Applying "${RETRY.label}" failed with an internal error.`],
+      prompt: [
+        'Applying "retry:step" failed with the error `the host rejected "retry:step" as stale`.',
+      ],
+      withheld: ['retry:step', 'as stale'],
+    },
+    {
+      row: 'a refusal whose reason reads as prose',
+      path: 'a refused runtime action on a ready leaf',
+      message: 'The step is already running.',
+      marks: 'refused',
+      boss: [`The runtime refused "${RETRY.label}": The step is already running.`],
+      prompt: ['The runtime refused "retry:step": The step is already running.'],
+    },
+    {
+      // An action label CAPTAIN-9 refuses is said neutrally, never dropped
+      // with the statement it names.
+      row: 'a failed receipt whose action label names control vocabulary',
+      path: 'a failed receipt on a ready leaf',
+      message: 'The retry stopped early.',
+      label: 'Ask the adjudicator again',
+      marks: 'The retry stopped early',
+      boss: ['Applying the selected action failed: The retry stopped early.'],
+      prompt: ['Applying "retry:step" failed: The retry stopped early.'],
+    },
+    {
+      row: 'a refusal whose action label names control vocabulary',
+      path: 'a refused runtime action on a ready leaf',
+      message: NOT_ADVERTISED,
+      label: 'Remove the undeclared files',
+      marks: 'refused',
+      boss: ['The runtime refused the selected action: that action is no longer offered.'],
+      prompt: ['The runtime refused "retry:step": that action is no longer offered.'],
+      withheld: ['retry:step'],
+    },
+    {
+      row: 'a give-up whose disposal names control vocabulary',
+      path: 'a give-up whose disposal fails',
+      message: 'the adjudicator timed out',
+      marks: 'Dismissing /code',
+      boss: ['Dismissing /code failed with the error `the adjudicator timed out`.'],
+    },
+    {
+      row: 'a give-up whose disposal says control vocabulary as prose',
+      path: 'a give-up whose disposal fails',
+      message: 'The adjudicator timed out.',
+      marks: 'Dismissing /code',
+      boss: ['Dismissing /code failed with the error `The adjudicator timed out.`.'],
+    },
+    {
+      row: 'a returned failed run naming control vocabulary',
+      path: 'a returned failed run',
+      message: 'the adjudicator timed out',
+      marks: 'adjudicator',
+      boss: ['/code failed with the error `the adjudicator timed out`.'],
+      prompt: ['/code failed with the error `the adjudicator timed out`.'],
+    },
+    {
+      row: 'a nested cleanup naming a live state',
+      path: 'a nested cleanup that fails',
+      message: 'state readyAfterDismiss is not reachable',
+      marks: 'Cleanup after /docs',
+      boss: ['Cleanup after /docs failed with an internal error.'],
+      prompt: [
+        'Cleanup after /docs failed with the error `state readyAfterDismiss is not reachable`.',
+      ],
+      withheld: ['readyAfterDismiss'],
+    },
+    {
+      // A subject CAPTAIN-9 refuses is said neutrally, never dropped with
+      // the statement it begins.
+      row: 'a nested cleanup whose subject names control vocabulary',
+      path: 'a nested cleanup that fails',
+      message: 'The draft could not be saved.',
+      childCommand: 'undeclared',
+      marks: 'The draft could not be saved',
+      boss: ['The step failed: The draft could not be saved.'],
+      prompt: ['Cleanup after /undeclared failed: The draft could not be saved.'],
+      // A statement whose remaining words still fail is kept as it is.
+      kept: ['Dismissed /undeclared and returned to its caller.'],
+    },
+    {
+      // Only a failure subject beginning its statement is said neutrally:
+      // another statement naming the same command keeps it.
+      row: 'a returned failed run of a command naming control vocabulary',
+      path: 'a returned failed run',
+      message: 'The draft could not be saved.',
+      command: 'undeclared',
+      marks: 'The draft could not be saved',
+      boss: ['The step failed: The draft could not be saved.'],
+      prompt: ['/undeclared failed: The draft could not be saved.'],
+      kept: ['Started /undeclared with the selected request.'],
+    },
+    {
+      // Two failures whose recorded text is identical are said once, the
+      // earlier statement staying (DR-063 §4 residual).
+      row: 'a caller failing with its child cleanup’s identical error',
+      path: 'a nested cleanup that fails, its caller failing with the same error',
+      message: 'the draft store is locked',
+      marks: 'the draft store is locked',
+      boss: ['Cleanup after /docs failed with the error `the draft store is locked`.'],
+      prompt: [
+        'Cleanup after /docs failed with the error `the draft store is locked`.',
+        '/code failed with the error `the draft store is locked`.',
+      ],
+    },
+    {
+      // Shell words that fail CAPTAIN-9 — a path in a cause's phrase — are
+      // withheld with the reason they stand in, never the statement.
+      row: 'a repository cause whose path names control vocabulary',
+      path: 'a returned failed run',
+      message: 'the step committed nothing',
+      cause: ADJUDICATOR_PATH_CAUSE,
+      marks: '/code failed',
+      boss: ['/code failed with an internal error.'],
+      prompt: [
+        '/code failed: the step had to commit its work and committed nothing; these changes are uncommitted: src/adjudicator.ts.',
+      ],
+      withheld: ['adjudicator'],
+    },
+    {
+      // The entry carries the failure's reason, so it stays alone and names
+      // the reason and the baseline once.
+      row: 'a repository failure beside the unresolved-effect entry carrying its reason',
+      path: 'a failed run beside unresolved repository effects',
+      message: 'the step made more than one commit',
+      cause: MORE_THAN_ONE_COMMIT,
+      marks: 'more than one commit',
+      boss: [`1. Observed repository change: ${MORE_THAN_ONE_COMMIT_REASON}.`],
+      prompt: [`/code failed: ${MORE_THAN_ONE_COMMIT_REASON}.`],
+    },
+    {
+      // An entry is never dropped for a fact that says more: the delivery's
+      // statement goes, whatever else it says, parked leaf or not.
+      row: 'a thrown delivery beside the unresolved-effect entry carrying its reason',
+      path: 'a thrown delivery beside unresolved repository effects',
+      message: 'the step made more than one commit',
+      cause: MORE_THAN_ONE_COMMIT,
+      marks: 'more than one commit',
+      boss: [`1. Observed repository change: ${MORE_THAN_ONE_COMMIT_REASON}.`],
+      prompt: [`The deliver action failed: ${MORE_THAN_ONE_COMMIT_REASON}. ${UNCONFIRMED}`],
+    },
+    {
+      row: 'a thrown delivery beside the unresolved-effect entry carrying its reason on a ready leaf',
+      path: 'a thrown delivery beside unresolved repository effects on a ready leaf',
+      message: 'the step made more than one commit',
+      cause: MORE_THAN_ONE_COMMIT,
+      marks: 'more than one commit',
+      boss: [`1. Observed repository change: ${MORE_THAN_ONE_COMMIT_REASON}.`],
+      prompt: [`The deliver action failed: ${MORE_THAN_ONE_COMMIT_REASON}. ${UNCONFIRMED}`],
+    },
+  ];
+
+  it.each(PROBE_ROWS)('states $row once, in Boss words', async (row) => {
+    const { reply, facts } = await settleFailure(row.path, row);
+    const lines = reply.split('\n').map((line) => line.replace(/^- /, ''));
+    expect(lines.filter((line) => line.includes(row.marks))).toEqual(row.boss);
+    if (row.prompt !== undefined) {
+      expect(
+        facts!.filter((line) => line.includes(row.marks)),
+      ).toEqual(row.prompt.map((fact) => `- ${fact}`));
+    }
+    expectNothingRawOutsideSpans(reply, row.withheld);
+    for (const recorded of row.withheld ?? []) {
+      expect(reply).not.toContain(recorded);
+    }
+    for (const statement of row.kept ?? []) {
+      expect(lines).toContain(statement);
+    }
+    // A reply the guard shortened still lists what happened, and no
+    // `Failure:` line repeats a reason a listed statement carries.
+    if (row.boss.some((line) => !/^\d+\. /.test(line))) {
+      expect(reply).toContain('Here is what happened:');
+    }
+    expect(reply).not.toContain('Failure:');
+    if (row.path.includes('beside unresolved repository effects')) {
+      expect(reply.split(MORE_THAN_ONE_COMMIT_REASON)).toHaveLength(2);
+      expect(reply).toContain(
+        `- 2. Observed repository change: the step made one new commit; HEAD moved from ${HEAD_BEFORE} to the proven commit ${'b'.repeat(40)}.`,
+      );
+      expect(reply).toContain(
+        'This evidence does not establish workflow completion or attribute any repository change or commit to this workflow.',
+      );
+    }
+  });
+
+  // CAPTAIN-69: after a model's reply the `Failure:` line passes the same
+  // guard the fallback's statements pass, so the two never disagree: a code
+  // span repeating a supplied id, and a phrased reason whose own words fail,
+  // each leave the line reading the step's failure with an internal error.
+  it.each([
+    {
+      row: 'a recorded reason repeating the supplied id',
+      cause: defect('apply retry:step settled with outcome aborted'),
+      withheld: 'retry:step',
+    },
+    {
+      row: 'a phrased reason whose path names control vocabulary',
+      cause: ADJUDICATOR_PATH_CAUSE,
+      withheld: 'adjudicator',
+    },
+  ])('says a `Failure:` line after a model reply as the fallback would: $row', async ({ cause, withheld }) => {
+    const code = advertising([RETRY]);
+    const createRuntime = code.entry.createRuntime;
+    code.entry.createRuntime = (options, hostCapabilities) => {
+      const runtime = createRuntime(options, hostCapabilities) as FakeRuntime;
+      const describe = runtime.describe!;
+      runtime.describe = () => ({
+        ...describe(),
+        lastError: { name: 'Error', message: 'the step failed', cause },
+      });
+      return runtime;
+    };
+    const shell = makeShell(code);
+    await shell.init!(stubSession().session);
+    const started = stubContext();
+    await shell.handleBossTurn(turn('/code first task'), started.context);
+    const reply = started.replies.at(-1)!;
+    expect(reply).toContain(
+      '\n\nFailure: the step failed with an internal error.\nControls:\n',
+    );
+    expect(reply).not.toContain(withheld);
+    await shell.dispose?.();
+  });
+
+  // CAPTAIN-67: a thrown error restates the leaf's parked failure only when
+  // it is that failure; a different error the leaf does not record is a
+  // second failure and keeps its own fact.
+  it('keeps a thrown failure the leaf does not record as its own fact', async () => {
+    const code = fakeCodeEntry(async (runtime) => {
+      if (runtime.inputs.length === 1) {
+        return {
+          outcome: 'failed',
+          state: playbookState('failed'),
+          error: { name: 'TypeError', message: FLAG_MISSING },
+        };
+      }
+      throw new TypeError('The session log is unwritable.');
+    });
+    delete code.entry.summaryPolicy;
+    const createRuntime = code.entry.createRuntime;
+    code.entry.createRuntime = (options, hostCapabilities) => {
+      const runtime = createRuntime(options, hostCapabilities) as FakeRuntime;
+      runtime.describe = () => ({
+        state: playbookState('failed'),
+        stateDescription: 'The step failed and is waiting for Boss.',
+        pendingQuestions: [],
+        actions: [RETRY],
+        lastError: { name: 'TypeError', message: FLAG_MISSING },
+      });
+      return runtime;
+    };
+    const shell = makeShell(code);
+    await shell.init!(stubSession().session);
+    await shell.handleBossTurn(turn('/code first task'), stubContext().context);
+    const failing = stubContext([
+      captainJson({ action: 'deliver' }),
+      unusableClosing(2),
+      unusableClosing(2),
+    ]);
+    await shell.handleBossTurn(turn('go on', 2), failing.context);
+
+    expect(failing.replies[0]).toContain(
+      [
+        'Here is what happened:',
+        `- The deliver action failed: The session log is unwritable. ${UNCONFIRMED}`,
+        `- /code failed: ${FLAG_MISSING}`,
+        'Ask me where things stand and I will report the current state.',
+      ].join('\n'),
     );
     await shell.dispose?.();
   });
@@ -13189,6 +14861,33 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     await unreadable.dispose?.();
   });
 
+  // CAPTAIN-63/69: the give-up's own reply lists its facts in Boss's words,
+  // as the fallback does — prose quoted with one terminal mark.
+  it('lists the give-up settlement in Boss words', async () => {
+    const code = fakeCodeEntry(undefined, async () => {
+      throw new TypeError('The worktree lock is held..');
+    });
+    const shell = makeShell(code);
+    await shell.init!(stubSession().session);
+    await shell.handleBossTurn(turn('/code first task'), stubContext().context);
+
+    const stopped = stubContext();
+    await shell.handleBossTurn(
+      turn(shell.submitShellAction!(GIVE_UP.id), 2),
+      stopped.context,
+    );
+    expect(stopped.captainCalls).toEqual([]);
+    expect(stopped.replies).toEqual([
+      [
+        'I could not confirm that the workflow was stopped.',
+        'Here is what happened:',
+        '- Dismissing /code failed: The worktree lock is held.',
+        'The stop did not settle successfully; recover the session before continuing.',
+      ].join('\n'),
+    ]);
+    await shell.dispose?.().catch(() => undefined);
+  });
+
   it('refuses a control it does not advertise and one named by nothing', async () => {
     const shell = makeShell(advertising([RETRY]));
     await shell.init!(stubSession().session);
@@ -13206,6 +14905,331 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
       /does not advertise/,
     );
     await shell.dispose?.();
+  });
+});
+
+// The renderer and the report assembly on their own inputs: the shell's sites
+// compose each failure once and end it in one mark, so no settlement feeds the
+// assembly the repeats, containments, and doubled marks it exists to remove.
+describe('Boss-facing failure words (CAPTAIN-69, CAPTAIN-71, CAPTAIN-74)', () => {
+  const { failureStatement, bossReport } = _internal;
+
+  it('drops a fact an earlier fact carries, and never the earlier one', () => {
+    expect(bossReport(['The step failed.', 'The step failed.'])).toEqual([
+      'The step failed.',
+    ]);
+    // A fact the renderer gave no reason is weighed as itself, case and
+    // terminal mark aside.
+    expect(
+      bossReport([
+        '/code failed: the flag file is missing.',
+        'The flag file is missing!',
+      ]),
+    ).toEqual(['/code failed: the flag file is missing.']);
+    expect(
+      bossReport([
+        'The flag file is missing.',
+        '/code failed: the flag file is missing.',
+      ]),
+    ).toEqual([
+      'The flag file is missing.',
+      '/code failed: the flag file is missing.',
+    ]);
+    // A failure statement is weighed by its reason, and of two facts the
+    // earlier stays, whichever says more.
+    expect(
+      bossReport(
+        [
+          'The flag file is missing.',
+          '/code failed: the flag file is missing.',
+        ],
+        ['the flag file is missing.'],
+      ),
+    ).toEqual(['The flag file is missing.']);
+    expect(
+      bossReport(
+        [
+          '/code failed with the error `x`.',
+          'Applying "Retry" failed with the error `x`. It was not repeated automatically.',
+        ],
+        ['`x`'],
+      ),
+    ).toEqual(['/code failed with the error `x`.']);
+    expect(
+      bossReport(
+        [
+          '/code failed with the error `x`.',
+          'Applying "Retry" failed with the error `xy`.',
+        ],
+        ['`x`', '`xy`'],
+      ),
+    ).toEqual([
+      '/code failed with the error `x`.',
+      'Applying "Retry" failed with the error `xy`.',
+    ]);
+    // A fact holding two reasons is carried only where both are.
+    const nested =
+      'the nested review run failed: the reviewer call failed with the error `down`.';
+    expect(
+      bossReport(
+        [
+          'Applying "Retry" failed with the error `down`.',
+          `/code failed: ${nested}`,
+        ],
+        [nested, '`down`'],
+      ),
+    ).toEqual([
+      'Applying "Retry" failed with the error `down`.',
+      `/code failed: ${nested}`,
+    ]);
+    expect(
+      bossReport(
+        [
+          `/code failed: ${nested}`,
+          'Applying "Retry" failed with the error `down`.',
+        ],
+        [nested, '`down`'],
+      ),
+    ).toEqual([`/code failed: ${nested}`]);
+    // Only a fact that stays weighs a later one: what a dropped fact held
+    // and no entry carries is still said.
+    expect(
+      bossReport(
+        [
+          '/code failed: the step stalled. It was not repeated automatically.',
+          'It was not repeated automatically.',
+          {
+            kind: 'entry',
+            text: '1. Possible repository effect, which could not be excluded: the step stalled; no HEAD was available after it.',
+          },
+        ],
+        ['the step stalled.'],
+      ),
+    ).toEqual([
+      'It was not repeated automatically.',
+      '1. Possible repository effect, which could not be excluded: the step stalled; no HEAD was available after it.',
+    ]);
+  });
+
+  it('never drops an unresolved-effect entry, and drops a fact one carries', () => {
+    const reason = 'the step stalled; the repository stood at X before it.';
+    const fact = `/review failed: ${reason}`;
+    const entry = (n: number) => ({
+      kind: 'entry' as const,
+      text: `${n}. Possible repository effect, which could not be excluded: the step stalled; the repository stood at X before it; no HEAD was available after it.`,
+    });
+    // Wherever each stands, and whatever else the fact says.
+    expect(bossReport([fact, entry(1)], [reason])).toEqual([entry(1).text]);
+    expect(bossReport([entry(1), fact], [reason])).toEqual([entry(1).text]);
+    const longer = `The deliver action failed: ${reason} Its complete outcome could not be confirmed, and it may have changed the session. It was not repeated automatically.`;
+    expect(bossReport([longer, entry(1)], [reason])).toEqual([entry(1).text]);
+    // Two entries that read alike record two boundaries, and both stay.
+    expect(bossReport([entry(1), entry(2), fact], [reason])).toEqual([
+      entry(1).text,
+      entry(2).text,
+    ]);
+    // A fact never drops an entry, even one whose words it holds whole.
+    expect(bossReport([`Seen: ${entry(1).text}`, entry(1)])).toEqual([
+      `Seen: ${entry(1).text}`,
+      entry(1).text,
+    ]);
+    // A reason nobody rendered is no reason: the fact is weighed as itself.
+    expect(bossReport([fact, entry(1)])).toEqual([fact, entry(1).text]);
+  });
+
+  it('keeps words standing inside a longer word or command', () => {
+    expect(bossReport(['The decoder failed.', 'coder failed.'])).toEqual([
+      'The decoder failed.',
+      'coder failed.',
+    ]);
+    expect(bossReport(['/code failed.', 'code failed.'])).toEqual([
+      '/code failed.',
+      'code failed.',
+    ]);
+    expect(bossReport(['Stopped /docs-v2.', 'Stopped /docs.'])).toEqual([
+      'Stopped /docs-v2.',
+      'Stopped /docs.',
+    ]);
+  });
+
+  it('ends each statement in exactly one terminal mark and nothing else', () => {
+    expect(
+      bossReport([
+        'It stopped..',
+        'Is it done?!',
+        'No mark here',
+        '  Padded.  ',
+        'git log main..HEAD lists no commit, and ../config.yaml is missing.',
+      ]),
+    ).toEqual([
+      'It stopped.',
+      'Is it done?',
+      'No mark here.',
+      'Padded.',
+      'git log main..HEAD lists no commit, and ../config.yaml is missing.',
+    ]);
+  });
+
+  it('says a `Failure:` line only where no statement carries its reason', () => {
+    const failure = {
+      text: 'Failure: the step failed with the error `x`.',
+      kind: 'failure' as const,
+      reason: '`x`',
+    };
+    // A `Failure:` line is weighed by its reason alone, against every fact.
+    expect(bossReport(['/code failed with the error `x`.', failure])).toEqual([
+      '/code failed with the error `x`.',
+    ]);
+    expect(bossReport([failure, '/code failed with the error `x`.'])).toEqual([
+      '/code failed with the error `x`.',
+    ]);
+    expect(bossReport(['/code failed with the error `xy`.', failure])).toEqual([
+      '/code failed with the error `xy`.',
+      failure.text,
+    ]);
+    expect(
+      bossReport([
+        {
+          kind: 'entry',
+          text: '1. Possible repository effect, which could not be excluded: the flag file is missing; no HEAD was available after it.',
+        },
+        {
+          text: 'Failure: the flag file is missing.',
+          kind: 'failure',
+          reason: 'the flag file is missing.',
+        },
+      ]),
+    ).toHaveLength(1);
+    // Neither a fact nor an entry is ever dropped for a `Failure:` line.
+    expect(
+      bossReport([
+        { text: 'Failure: the step failed.', kind: 'failure', reason: 'the step failed.' },
+        'The step failed.',
+      ]),
+    ).toEqual(['The step failed.']);
+    expect(bossReport([failure])).toEqual([failure.text]);
+  });
+
+  it('states a failure as `<Subject> failed: <reason>.`', () => {
+    const cases: readonly [string, Parameters<typeof failureStatement>[1], string][] = [
+      // Prose — a space, a capital first, a terminal mark last, and no word
+      // with an internal capital, a digit, an underscore, a dot, a hyphen, or
+      // a colon — is quoted with one terminal mark, whatever punctuation it
+      // holds.
+      ['the step', { message: 'The worktree lock is held.' }, 'The step failed: The worktree lock is held.'],
+      ['the step', { message: 'The file is missing..' }, 'The step failed: The file is missing.'],
+      ['the step', { message: 'The disk is full!' }, 'The step failed: The disk is full!'],
+      ['/code', { message: 'Status "error" was returned.' }, '/code failed: Status "error" was returned.'],
+      ['/code', { message: 'Calling render() failed.' }, '/code failed: Calling render() failed.'],
+      // Anything else is shown once, whole, as recorded, in a code span: a
+      // machine-shaped word, no space, no capital, or no terminal mark.
+      ['the step', { message: 'Connection to localhost:8080 was refused.' }, 'The step failed with the error `Connection to localhost:8080 was refused.`.'],
+      ['the step', { message: 'Version 1.5.2 is too old!' }, 'The step failed with the error `Version 1.5.2 is too old!`.'],
+      ['/code', { message: 'The callPlayer function threw.' }, '/code failed with the error `The callPlayer function threw.`.'],
+      ['/code', { message: 'The config.yaml file is missing.' }, '/code failed with the error `The config.yaml file is missing.`.'],
+      ['/code', { message: 'The file my_file.txt is missing.' }, '/code failed with the error `The file my_file.txt is missing.`.'],
+      ['/code', { message: 'The up-to-date check failed.' }, '/code failed with the error `The up-to-date check failed.`.'],
+      ['/code', { message: 'Fetching https://example.test failed.' }, '/code failed with the error `Fetching https://example.test failed.`.'],
+      ['/code', { message: 'The file ../config.yaml is missing.' }, '/code failed with the error `The file ../config.yaml is missing.`.'],
+      ['/code', { message: 'The HEAD commit is gone.' }, '/code failed with the error `The HEAD commit is gone.`.'],
+      ['/code', { message: 'ECONNREFUSED 127.0.0.1:8080' }, '/code failed with the error `ECONNREFUSED 127.0.0.1:8080`.'],
+      ['/code', { message: 'Aborted.' }, '/code failed with the error `Aborted.`.'],
+      ['/code', { message: 'coder exploded' }, '/code failed with the error `coder exploded`.'],
+      ['/code', { message: 'the session log is unwritable.' }, '/code failed with the error `the session log is unwritable.`.'],
+      ['the step', { message: 'Rate limit exceeded' }, 'The step failed with the error `Rate limit exceeded`.'],
+      ['/code', { message: 'callPlayer status "error".' }, '/code failed with the error `callPlayer status "error".`.'],
+      ['/code', { message: 'the `verify` step exploded' }, '/code failed with the error ``the `verify` step exploded``.'],
+      ['/code', { message: '`boom`' }, '/code failed with the error `` `boom` ``.'],
+      ['/code', { message: 'line one\nline two' }, '/code failed with the error `line one line two`.'],
+      // A leading error-class name marks machine text, however the rest
+      // reads, and stays with it in the code span.
+      ['the step', { message: 'ChildFailure: The review failed.' }, 'The step failed with the error `ChildFailure: The review failed.`.'],
+      ['the step', { message: 'Error: The disk is full.' }, 'The step failed with the error `Error: The disk is full.`.'],
+      ['the step', { message: 'Failure: The disk is full.' }, 'The step failed with the error `Failure: The disk is full.`.'],
+      ['the step', { message: 'Exception: The disk is full.' }, 'The step failed with the error `Exception: The disk is full.`.'],
+      ['the step', { message: 'Defect: The disk is full.' }, 'The step failed with the error `Defect: The disk is full.`.'],
+      ['the step', { message: 'SmokeDefect: Error: The run stopped.' }, 'The step failed with the error `SmokeDefect: Error: The run stopped.`.'],
+      [
+        'the step',
+        { message: "TypeError: Cannot read properties of undefined (reading 'x')." },
+        "The step failed with the error `TypeError: Cannot read properties of undefined (reading 'x').`.",
+      ],
+      ['the step', { message: 'ENOENT: The config file is missing.' }, 'The step failed with the error `ENOENT: The config file is missing.`.'],
+      ['the first turn of /code', { message: 'TypeError: callPlayer status "error"' }, 'The first turn of /code failed with the error `TypeError: callPlayer status "error"`.'],
+      ['the step', { message: 'SmokeDefect: Error: boom' }, 'The step failed with the error `SmokeDefect: Error: boom`.'],
+      [
+        'the step',
+        { message: "ENOENT: no such file or directory, open '/x/config.yaml'" },
+        "The step failed with the error `ENOENT: no such file or directory, open '/x/config.yaml'`.",
+      ],
+      ['the step', { message: 'TypeError' }, 'The step failed with the error `TypeError`.'],
+      // Only a leading error-class name marks machine text; one later in
+      // prose is a word like any other.
+      ['the step', { message: 'The run ended in Failure: the disk is full.' }, 'The step failed: The run ended in Failure: the disk is full.'],
+      // A reason the runtime mints from a closed set is said by its phrase.
+      ['/code', { message: 'callPlayer status "error"' }, '/code failed: the player reported an error without a message.'],
+      ['/code', { message: 'unknown runtime defect' }, '/code failed: the runtime failed without saying why.'],
+      ['/code', { message: 'host omitted governed semantic settlement' }, "/code failed: the host did not settle the step's outcome."],
+      ['/code', { message: 'captainActor: callCaptain status "aborted"' }, '/code failed: the Captain call did not complete.'],
+      ['/code', { message: 'captainActor: callCaptain returned status=ok with no finalText' }, '/code failed: the Captain call returned nothing.'],
+      ['the coder call', { message: 'Unknown error' }, 'The coder call failed: an unknown error.'],
+      ['/code', { message: 'playbook parallel state reviewing cohort failed' }, '/code failed: a parallel step failed.'],
+      ['/code', { message: 'My Playbook deferred player returned no result' }, '/code failed: the deferred player returned nothing.'],
+      ['the coder call', { message: 'captainBridge: callPlayer returned status=ok with no finalText' }, 'The coder call failed: the player call returned nothing.'],
+      ['/code', { message: 'CODE governed outcome remains unresolved: judge transport failed' }, "/code failed: the step's outcome could not be settled."],
+      ['/code', { message: '\tunknown runtime defect \n' }, '/code failed: the runtime failed without saying why.'],
+      // Only a whole minted reason is phrased: one inside a longer text, or
+      // one missing its label, is not.
+      ['/code', { message: 'deferred player returned no result' }, '/code failed with the error `deferred player returned no result`.'],
+      ['/code', { message: 'Retry failed: action "x" is not currently advertised' }, '/code failed with the error `Retry failed: action "x" is not currently advertised`.'],
+      ['/code', { message: 'unknown runtime defect occurred' }, '/code failed with the error `unknown runtime defect occurred`.'],
+      [
+        'applying "Retry"',
+        { message: 'action "retry:step" is not currently advertised' },
+        'Applying "Retry" failed: that action is no longer offered.',
+      ],
+      [
+        'applying "Retry"',
+        { message: 'action "jump:\\"x\\"" is not currently advertised' },
+        'Applying "Retry" failed: that action is no longer offered.',
+      ],
+      // A cause's phrase takes precedence over the message it came with.
+      [
+        '/code',
+        {
+          message: 'missing-repository-receipt',
+          cause: { code: 'runtime-defect', evidence: { reason: 'missing-repository-receipt' } },
+        },
+        "/code failed: the repository evidence for the step is missing or inconsistent, so the step's outcome was not accepted.",
+      ],
+      [
+        '/code',
+        {
+          message: 'judge transport failed',
+          cause: { code: 'judge-failed', evidence: { reason: 'judge transport failed' } },
+        },
+        "/code failed: the step's outcome could not be decided.",
+      ],
+      [
+        'applying "Retry"',
+        {
+          message: 'The coder is down.',
+          cause: {
+            code: 'player-failed',
+            evidence: { roleId: 'coder', error: { name: 'Error', message: 'The coder is down.' } },
+          },
+        },
+        'Applying "Retry" failed: the coder call failed: The coder is down.',
+      ],
+      // A cause the closed validator refuses is not a cause.
+      ['/code', { message: 'coder exploded', cause: { code: 'nonsense', evidence: {} } }, '/code failed with the error `coder exploded`.'],
+      // Nothing recorded is nothing quoted.
+      ['/code', undefined, '/code failed.'],
+      ['/code', { message: '  ' }, '/code failed.'],
+    ];
+    for (const [subject, failure, statement] of cases) {
+      expect(failureStatement(subject, failure)).toBe(statement);
+    }
   });
 });
 

@@ -19,7 +19,7 @@ When loading the source FSM, the helper shall accept JavaScript on supported Nod
 
 ### link-materialization-3
 
-The helper shall accept only schema `sublang.playbook.link.v1`, profiles `flat-defaults` and `flat-quoted-relays` for flat ordinary player/script machines, the `flat-labelled-relays` profile for flat player/script/nested-playbook machines, and unconstrained string, boolean, or finite-number options with explicit requiredness.
+The helper shall accept only schema `sublang.playbook.link.v1`, profiles `flat-defaults` and `flat-quoted-relays` for ordinary player/script machines and the `flat-labelled-relays` profile for player/script/nested-playbook machines — each over flat root states plus any root `type: 'parallel'` state, whose compiled shape it leaves to the shared factory's validation [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)] — and unconstrained string, boolean, or finite-number options with explicit requiredness.
 
 ### link-materialization-4
 
@@ -37,6 +37,7 @@ The descriptor shall carry the exact erased and authored metadata through these 
 | `placeholderFields` | Authored placeholder-token to input-field string map. |
 | `resumableStateIds` | Explicit duplicate-free delegated-player state ids allowed to suspend for and resume from a Boss reply, according to the FSM's resumption registry or `BOSS_REPLY` branches, independently of its interrupt targets. |
 | `transitionEventFields`, `verbatimPayloadFields`, `unfinishedFinalStateIds`, `controlContextFields` | Explicit duplicate-free string arrays, including empty arrays. |
+| `fsmSpecifier` | Optional relative runtime specifier ending in `.js` that names the emitted JavaScript sibling of the `--fsm` file — same directory, same basename — for a module inside a package that ships JavaScript beside its sources [[playbook-runtime-5](playbook-runtime.md#playbook-runtime-5)]; when absent, the helper derives the specifier from the `--fsm` path. |
 
 ### link-materialization-5
 
@@ -44,7 +45,7 @@ When validating metadata, the helper shall reject unknown descriptor members wit
 
 ### link-materialization-6
 
-When materializing an accepted descriptor, the helper shall derive the emitted module's player identities, roles and labels from the loaded FSM, schema-3 compatibility from the installed engine [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], and option types, immutable JSON validation with the public validator and identical snapshot binding of [[compiler-entry-options-1](compiler-entry-options.md#compiler-entry-options-1)] and [[compiler-entry-options-2](compiler-entry-options.md#compiler-entry-options-2)], input mappings, factory wiring and applicable default-composer verification exports from the validated descriptor.
+When materializing an accepted descriptor, the helper shall derive the emitted module's player identities, roles and labels from every player-invoking state of the loaded FSM, keyed by its stable state id and including parallel region leaves, schema-3 compatibility from the installed engine [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], and option types, immutable JSON validation with the public validator and identical snapshot binding of [[compiler-entry-options-1](compiler-entry-options.md#compiler-entry-options-1)] and [[compiler-entry-options-2](compiler-entry-options.md#compiler-entry-options-2)], input mappings, factory wiring and applicable default-composer verification exports from the validated descriptor.
 
 ### link-materialization-7
 
@@ -122,7 +123,7 @@ Where that profile declares an identity placeholder, the emitted composer shall 
 
 ### link-materialization-25
 
-Where that profile encounters a nested `playbook` invocation, the helper shall leave its input, text, target, output guards, recovery, and terminal semantics in the unchanged FSM and let the shared factory provide the bridge [[playbook-runtime-42](playbook-runtime.md#playbook-runtime-42)]; direct Captain actors, compound or parallel topology, structured/custom prompt strategies, and nonprimitive option contracts shall remain outside this profile [[link-materialization-5](#link-materialization-5)].
+Where that profile encounters a nested `playbook` invocation, the helper shall leave its input, text, target, output guards, recovery, and terminal semantics in the unchanged FSM and let the shared factory provide the bridge [[playbook-runtime-42](playbook-runtime.md#playbook-runtime-42)]; direct Captain actors, compound topology beyond [[link-materialization-3](#link-materialization-3)], structured/custom prompt strategies, and nonprimitive option contracts shall remain outside this profile [[link-materialization-5](#link-materialization-5)].
 
 ## Verification
 
@@ -133,6 +134,8 @@ Where the real CLI emits an ordinary workflow against the actual shared engine, 
 ### link-materialization-18
 
 When the integration suite invokes the real CLI over supported and unsupported source loading, profile, topology, actor, option shape, invalid metadata and output failure cases, it shall verify each diagnostic and existing-target preservation [[link-materialization-2](#link-materialization-2)] [[link-materialization-3](#link-materialization-3)] [[link-materialization-5](#link-materialization-5)] [[link-materialization-10](#link-materialization-10)] [[link-materialization-11](#link-materialization-11)].
+It shall also verify that a declared `fsmSpecifier` is emitted verbatim as the FSM import of a module materialized from a TypeScript FSM and that one naming another directory or basename is rejected with the target preserved [[link-materialization-4](#link-materialization-4)].
+It shall also verify that a compiled two-region root parallel state is emitted with its region working leaves as role states and loads and constructs with the shared engine, while a malformed parallel state fails factory preflight with the target preserved [[link-materialization-3](#link-materialization-3)] [[link-materialization-6](#link-materialization-6)] [[link-materialization-9](#link-materialization-9)].
 
 ### link-materialization-19
 
@@ -148,4 +151,4 @@ When the real CLI emits and loads a quoted-relay module against each supported i
 
 ### link-materialization-26
 
-When the real CLI emits the labelled profile and loads it with the shared factory, the integration suite shall verify exact optional-line and multiline literal rendering, field and identity mapping, fresh/resumed Q&A, legacy-profile bytes preserved except the explicit common public-validator export and absent-slice normalization of [[link-materialization-6](#link-materialization-6)], strict typing against the declared FSM input, rejection with existing-target preservation, and maintained CODE/DEV nested-call execution without altering their FSMs [[link-materialization-22](#link-materialization-22)] [[link-materialization-23](#link-materialization-23)] [[link-materialization-24](#link-materialization-24)] [[link-materialization-25](#link-materialization-25)].
+When the real CLI emits the labelled profile and loads it with the shared factory, the integration suite shall verify exact optional-line and multiline literal rendering, field and identity mapping, fresh/resumed Q&A, legacy-profile bytes preserved except the explicit common public-validator export and absent-slice normalization of [[link-materialization-6](#link-materialization-6)], strict typing against the declared FSM input, rejection with existing-target preservation, and maintained CODE/DEV nested-call and DECIDE parallel-proposal execution without altering their FSMs [[link-materialization-3](#link-materialization-3)] [[link-materialization-22](#link-materialization-22)] [[link-materialization-23](#link-materialization-23)] [[link-materialization-24](#link-materialization-24)] [[link-materialization-25](#link-materialization-25)].

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
 const exec = promisify(execFile);
-it.each(['root', 'nested'])('settles loss through the maintained DECIDE runtime (%s)', async (kind) => {
+it.each(['root', 'nested', 'parallel-root', 'parallel-nested'])('settles loss through the maintained DECIDE runtime (%s)', async (kind) => {
   const dir = await mkdtemp(join(tmpdir(), 'captain-bespoke-kill-'));
   const bespoke = fileURLToPath(new URL('./fixtures/recovery-bespoke-loss.mjs', import.meta.url));
   try {

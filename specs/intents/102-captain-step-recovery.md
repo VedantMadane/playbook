@@ -9,7 +9,7 @@ Completed on the feature branches; not merged or released.
 
 ## Intent
 
-Implement and verify [DR-066](../decisions/066-captain-prepares-step-recovery.md).
+Implement and verify [DR-069](../decisions/069-captain-prepares-step-recovery.md).
 
 ## Deliverables
 

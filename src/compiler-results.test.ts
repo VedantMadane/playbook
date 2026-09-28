@@ -150,7 +150,7 @@ describe.runIf(compiler !== undefined)(
       expect(after[0].result.complete).toContain(returnDuty);
     });
 
-    it("represents authored Boss-wait questions as whole-final-text fields without changing the authored guard", async () => {
+    it("represents an authored routing question as a whole-final-text field without changing the authored guard", async () => {
       const { checkGearsResultContract, parseGearsItems } = await import(
         pathToFileURL(join(compiler!, "dist/verify.js")).href
       );
@@ -163,11 +163,13 @@ describe.runIf(compiler !== undefined)(
             ),
           ).href
         );
+      // The routing contract's own `question` result: the one authored Boss
+      // question text2gears declares (compiler-results-5).
       const prompt =
-        "When the selected IR is ambiguous, Captain shall prompt Coder:\n\n> Ask Boss which IR to continue.";
+        "When Boss gives an intent, Captain shall decide how to handle it:\n\n> Ask Boss which IR to continue when the intent names none.";
       const continuation =
-        "When Boss answers, the same Coder phase resumes with the answer.";
-      const unannotated = `${heading}${prompt}\n\nResults:\n- \`askBoss\`: Coder asks Boss which IR to continue and waits. Output shall include \`question\` and \`selectedIr: <IR identity>\`. ${continuation}\n`;
+        "When Boss answers, the same routing decision resumes with the answer.";
+      const unannotated = `${heading}${prompt}\n\nResults:\n- \`question\`: Captain asked which IR to continue and waits. Output shall include \`question\` and \`selectedIr: <IR identity>\`. ${continuation}\n`;
       const annotated = unannotated.replace(
         "`question` and `selectedIr: <IR identity>`",
         "`question: <verbatim final text>` and `selectedIr: <IR identity>`",
@@ -177,26 +179,26 @@ describe.runIf(compiler !== undefined)(
       const [before] = parseGearsItems(unannotated);
       const [after] = parseGearsItems(annotated);
       expect(after.prompt).toBe(before.prompt);
-      expect(Object.keys(after.result)).toEqual(["askBoss"]);
-      expect(after.result.askBoss).toContain(
+      expect(Object.keys(after.result)).toEqual(["question"]);
+      expect(after.result.question).toContain(
         "Output shall include `question: <verbatim final text>`",
       );
-      expect(after.result.askBoss).toContain("`selectedIr: <IR identity>`");
-      expect(defaultExtractRequiredFields(after.result.askBoss)).toEqual([
+      expect(after.result.question).toContain("`selectedIr: <IR identity>`");
+      expect(defaultExtractRequiredFields(after.result.question)).toEqual([
         "question",
         "selectedIr",
       ]);
 
       const rendered = renderGovernedOutcomeContract(
-        "askBoss",
-        after.result.askBoss,
+        "question",
+        after.result.question,
         {
           fields: { question: "presentation", selectedIr: "semantic" },
           repositoryDisposition: "deferred",
         },
       );
       expect(rendered).toContain(
-        '  Reply exactly: { "guard": "askBoss", "selectedIr": <IR identity> }',
+        '  Reply exactly: { "guard": "question", "selectedIr": <IR identity> }',
       );
       expect(rendered.join("\n")).toContain(
         "Semantic fields as authored: `selectedIr: <IR identity>`",
@@ -209,3 +211,84 @@ describe.runIf(compiler !== undefined)(
     });
   },
 );
+
+it("keeps a delegated Boss question framework-owned and confines output properties to consumed values", () => {
+  const definition = readFileSync(
+    new URL("../slc/text2gears.md", import.meta.url),
+    "utf8",
+  ).replace(/\s+/g, " ");
+  // compiler-results-5: no second guard beside the universal needsBossReply.
+  expect(definition).toContain(
+    "an authored Boss question is the framework-owned `needsBossReply` outcome",
+  );
+  expect(definition).toContain("shall declare no result for it");
+  expect(definition).toContain(
+    "Only the routing contract's own `question` and `followUpQuestion` results declare the question",
+  );
+  // compiler-results-9: properties for consumers only.
+  expect(definition).toContain(
+    "shall declare an output property only where a consumer requires it: a later item's `<placeholder>`, the workflow's terminal return, or the workflow's declared public interface",
+  );
+  expect(definition).toContain(
+    "travels in the result's verbatim final-text property and is not a separate judge-authored property",
+  );
+});
+
+it("keeps a created commit under latestCommit while the Source reads it through its own placeholder", () => {
+  const flat = (file: string) =>
+    readFileSync(new URL(file, import.meta.url), "utf8").replace(/\s+/g, " ");
+  expect(flat("../slc/text2gears.md")).toContain(
+    "its producer declares `latestCommit: <commit identity>` whatever placeholder a later prompt reads it through",
+  );
+  expect(flat("../slc/gears2fsm.md")).toContain(
+    "binds to a typed context field named by its canonical mapping, assigned from that call's accepted `latestCommit`",
+  );
+  for (const [workflow, placeholder] of [
+    ["code", "<code-commit>"],
+    ["decide", "<decide-commit>"],
+  ] as const) {
+    const gears = readFileSync(
+      new URL(`../reference/sdlc/${workflow}.playbook/${workflow}.gears.md`, import.meta.url),
+      "utf8",
+    );
+    expect(gears).toContain("`latestCommit: <commit identity>`");
+    expect(gears).toContain(placeholder);
+    expect(gears).not.toMatch(/`(codeCommit|decideCommit)[:`]/);
+  }
+});
+
+it("carries an outcome's evidence qualification in the result description the judge reads", () => {
+  const definition = readFileSync(
+    new URL("../slc/text2gears.md", import.meta.url),
+    "utf8",
+  ).replace(/\s+/g, " ");
+  expect(definition).toContain(
+    "shall be carried in that outcome's result description, the only text the adjudicator reads when it selects the guard",
+  );
+  expect(definition).toContain("left in the item's prose, it reaches no judge");
+  // A single qualified outcome still gets its one bullet (DECIDE-1's `proposed`).
+  expect(definition).toContain(
+    "the behavior carries exactly one `Results:` bullet naming that outcome and carrying the qualification",
+  );
+});
+
+it("marks every accepted governed arm so the runtime publishes the outcome", () => {
+  const definition = readFileSync(
+    new URL("../slc/gears2fsm.md", import.meta.url),
+    "utf8",
+  ).replace(/\s+/g, " ");
+  expect(definition).toContain(
+    "every accepted `onDone` arm — each arm that routes a declared outcome, not the malformed-output fallback — shall carry, first among its actions, the root-machine action `{ type: 'playbook.acceptedOutcome'",
+  );
+  for (const workflow of ["code", "review", "decide", "dev", "branch", "pr"]) {
+    const fsm = readFileSync(
+      new URL(`../reference/sdlc/${workflow}.playbook/${workflow}.fsm.ts`, import.meta.url),
+      "utf8",
+    );
+    expect(fsm, `${workflow} declares the marker action`).toContain("'playbook.acceptedOutcome':");
+    expect(
+      fsm.split("type: 'playbook.acceptedOutcome'").length - 1,
+      `${workflow} marks its accepted arms`,
+    ).toBeGreaterThan(0);
+  }
+});

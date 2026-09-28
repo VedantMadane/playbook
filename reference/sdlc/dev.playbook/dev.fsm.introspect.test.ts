@@ -3,7 +3,11 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { devMachine, type DevContext } from './dev.fsm.js';
+import {
+  devMachine,
+  renderDiscussionExchange,
+  type DevContext,
+} from './dev.fsm.js';
 import {
   enumerateAwaitBossReply,
   enumerateNestedPlaybookStates,
@@ -14,11 +18,10 @@ import {
 const CONTEXT: DevContext = {
   runResults: 'unit tests passed',
   developmentRequest: 'Plan the request.',
-  discussionExchanges: [{ question: 'Narrow or broad?', answer: 'Narrow.' }],
+  discussionContext: renderDiscussionExchange('Narrow or broad?', 'Narrow.'),
   planningResult: 'Proceed with code.',
   decideCommit: 'decide123',
   evaluatedRevision: 'rev456',
-  deliveryViaPullRequest: true,
   pullRequestPath: 'code',
   branch: 'issue-12-flaky-retry',
   baseRevision: 'base789',

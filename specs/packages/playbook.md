@@ -72,7 +72,7 @@ When the nested REVIEW call fails outside that authored result contract, CODE sh
 
 #### playbook-21
 
-When REVIEW receives its caller's intent, scope, and context, REVIEW shall have Reviewer evaluate the review scope in its cumulative committed state against the relayed original intent, relay the complete caller input every round plus the receipt-derived review-fix commit and Coder feedback after each disposition, ask Coder to accept or reject every finding with one new review-fix commit or a no-commit all-rejected rebuttal, and begin a new receipt-validated Reviewer round after each disposition under [[playbook-34](#playbook-34)] until Reviewer affirmatively reports the requested review complete with no unsettled findings; a progress report, status update, or promise of a later result supports no review outcome.
+When REVIEW receives its caller's intent, scope, and context, REVIEW shall have Reviewer evaluate the review scope in its cumulative committed state against the relayed original intent, relay the complete caller input every round and to Coder plus the receipt-derived review-fix commit and Coder feedback after each disposition, ask Coder to accept or reject every finding with one new review-fix commit or a no-commit all-rejected rebuttal, and begin a new receipt-validated Reviewer round after each disposition under [[playbook-34](#playbook-34)] until Reviewer affirmatively reports the requested review complete with no unsettled findings; a progress report, status update, or promise of a later result supports no review outcome.
 
 #### playbook-26
 
@@ -80,7 +80,7 @@ When Reviewer affirmatively reports the requested review complete with no unsett
 
 #### playbook-22
 
-When DECIDE receives a topic, DECIDE shall request independent Coder and Reviewer proposals concurrently under [[playbook-36](#playbook-36)], reveal neither proposal before both proposal outcomes are receipt-validated complete proposals, then have Coder synthesize both proposals into one DECIDE-owned commit whose identity a qualifying repository receipt proves, call REVIEW with the original intent, the review scope naming that exact commit, and the Coder output, and on REVIEW's establishing success terminate successfully returning the DECIDE-owned commit and the exact evaluated repository revision.
+When DECIDE receives a topic, DECIDE shall request independent Coder and Reviewer proposals concurrently under [[playbook-36](#playbook-36)], reveal neither proposal before both proposal outcomes are receipt-validated complete proposals, then have Coder synthesize both proposals into one DECIDE-owned commit whose identity a qualifying repository receipt proves, call REVIEW with the original intent, the review scope naming that exact commit, Coder's independent proposal, and the Coder output, and on REVIEW's establishing success terminate successfully returning the DECIDE-owned commit and the exact evaluated repository revision.
 
 #### playbook-25
 
@@ -156,13 +156,13 @@ Where BRANCH or PR runs under artifact schema `3`, its compiled FSM shall declar
 | --- | --- | --- | --- | --- |
 | BRANCH | `branched` | success | `status: 'branched'`; semantic `branch` and `issueSummary`; effect `baseRevision` | branched [[playbook-43](#playbook-43)] |
 | BRANCH | `refused` | failure | `status: 'refused'`; verbatim `coderOutput` | refused [[playbook-43](#playbook-43)] |
-| PR | `merged` | success | `status: 'merged'`; semantic `pullRequest` and `pullRequestUrl`; `localDefaultUpdated: true` | local update exit zero [[playbook-47](#playbook-47)] |
-| PR | `mergedLocalBehind` | success | as `merged` with `localDefaultUpdated: false` | local update exit nonzero [[playbook-47](#playbook-47)] |
+| PR | `mergedLocalUpdated` | success | `status: 'merged'`; semantic `pullRequest` and `pullRequestUrl`; `localDefaultUpdated: true` | local update exit zero [[playbook-47](#playbook-47)] |
+| PR | `mergedLocalNotUpdated` | success | as `mergedLocalUpdated` with `localDefaultUpdated: false` | local update exit nonzero [[playbook-47](#playbook-47)] |
 | PR | `notPublished` | failure | `status: 'not-merged'`; `reason: 'not-published'`; verbatim `coderOutput` | not published [[playbook-44](#playbook-44)] |
 | PR | `fixFailed` | failure | `status: 'not-merged'`; `reason: 'fix-failed'`; `pullRequest`; `pullRequestUrl`; `childResult` relaying `code`'s canonical result | the authored `code` failure [[playbook-46](#playbook-46)] |
 | PR | `fixNotPublished` | failure | `status: 'not-merged'`; `reason: 'fix-not-published'`; `pullRequest`; `pullRequestUrl` | fix publication exit nonzero [[playbook-46](#playbook-46)] |
-| PR | `checksStillFailing` | failure | `status: 'not-merged'`; `reason: 'checks-failed'`; `pullRequest`; `pullRequestUrl` | second check wait exit nonzero [[playbook-46](#playbook-46)] |
-| PR | `mergeRefused` | failure | `status: 'merge-unconfirmed'`; `pullRequest`; `pullRequestUrl` | merge exit nonzero [[playbook-47](#playbook-47)] |
+| PR | `checksFailed` | failure | `status: 'not-merged'`; `reason: 'checks-failed'`; `pullRequest`; `pullRequestUrl` | second check wait exit nonzero [[playbook-46](#playbook-46)] |
+| PR | `mergeUnconfirmed` | failure | `status: 'merge-unconfirmed'`; `pullRequest`; `pullRequestUrl` | merge exit nonzero [[playbook-47](#playbook-47)] |
 
 - `pullRequest` is a string, as `irNumber` is, and no final state carries a merge-commit field.
 - The recoverable parked `failed` state of either workflow is not final and carries no output.
@@ -177,7 +177,7 @@ Where a workflow declares more than one authored terminal outcome, its compiled 
 | DECIDE | entered only when REVIEW establishes the DECIDE-owned commit's scope evaluated with no unsettled findings [[playbook-22](#playbook-22)] | entered on those same authored REVIEW outcomes [[playbook-25](#playbook-25)] |
 | DEV | entered only by the final child's proven canonical success [[playbook-38](#playbook-38)] | entered on an authored child abort, failure, or insufficient terminal result [[playbook-38](#playbook-38)] |
 | BRANCH | `branched`, entered only by an affirmatively supported branched outcome whose receipt proves the repository exact [[playbook-43](#playbook-43)] | `refused`, entered only by an affirmatively supported refusal [[playbook-43](#playbook-43)] |
-| PR | `merged` and `mergedLocalBehind`, entered only after the merge command exits zero and distinguished only by the local update's exit status [[playbook-47](#playbook-47)] | `notPublished`, `fixFailed`, `fixNotPublished`, `checksStillFailing`, and `mergeRefused`, each entered only from its own step's failure [[playbook-48](#playbook-48)] |
+| PR | `mergedLocalUpdated` and `mergedLocalNotUpdated`, entered only after the merge command exits zero and distinguished only by the local update's exit status [[playbook-47](#playbook-47)] | `notPublished`, `fixFailed`, `fixNotPublished`, `checksFailed`, and `mergeUnconfirmed`, each entered only from its own step's failure [[playbook-48](#playbook-48)] |
 
 - DEV declares a third terminal state for discussion complete, entered only after a Boss reply with no child call [[playbook-38](#playbook-38)].
 - DEV's pull-request paths add no terminal state: on them the success state is entered by `pr`'s proven canonical success, and the failure-relay state relays a `branch` or `pr` failure like any child's [[playbook-38](#playbook-38)].
@@ -189,15 +189,15 @@ Where a workflow declares more than one authored terminal outcome, its compiled 
 
 Every maintained workflow's compiled FSM shall declare each of its final states' terminal kind in `meta.playbook.terminal`, so a caller routes a completed child from the machine that child reached rather than from that child's output fields [[playbook-runtime-83](playbook-runtime.md#playbook-runtime-83)]:
 
-- each success terminal state of [[playbook-27](#playbook-27)] — BRANCH's `branched` and both of PR's `merged` and `mergedLocalBehind` among them — REVIEW's one completion, and DEV's discussion-complete state declare `success`;
-- each failure-relay terminal state of [[playbook-27](#playbook-27)] — BRANCH's `refused` and each of PR's `notPublished`, `fixFailed`, `fixNotPublished`, `checksStillFailing`, and `mergeRefused` among them — declares `failure`;
+- each success terminal state of [[playbook-27](#playbook-27)] — BRANCH's `branched` and both of PR's `mergedLocalUpdated` and `mergedLocalNotUpdated` among them — REVIEW's one completion, and DEV's discussion-complete state declare `success`;
+- each failure-relay terminal state of [[playbook-27](#playbook-27)] — BRANCH's `refused` and each of PR's `notPublished`, `fixFailed`, `fixNotPublished`, `checksFailed`, and `mergeUnconfirmed` among them — declares `failure`;
 - the recoverable parked `failed` state is not final and declares no kind.
 
 A caller's compiled FSM shall therefore route a maintained child's failure terminal through its `invoke.onError` authored-outcome arm [[playbook-runtime-84](playbook-runtime.md#playbook-runtime-84)], relaying the child's own output as its relayed failure evidence.
 
 #### playbook-28
 
-Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall apply the automatic-replay fence of [[playbook-runtime-71](playbook-runtime.md#playbook-runtime-71)] at every governed delegated-player state regardless of whether linking emits the shared flat runtime or DECIDE's bespoke parallel runtime.
+Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall apply the automatic-replay fence of [[playbook-runtime-71](playbook-runtime.md#playbook-runtime-71)] at every governed delegated-player state, whether the shared factory interprets a flat machine or DECIDE's proposal pair through its parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)].
 
 #### playbook-32
 
@@ -205,14 +205,14 @@ Where CODE runs under artifact schema `3`, each delegated Coder outcome shall de
 
 | Source state | Accepted outcome | Payload authority | Repository disposition | Target state |
 | --- | --- | --- | --- | --- |
-| `runFirstPhase` | `directCommit` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewFirstCommit` |
-| `runFirstPhase` | `irCommit` | presentation `coderOutput`; semantic `irNumber`; effect `latestCommit` | `one-descendant-commit` | `reviewFirstCommit` |
-| `runFirstPhase` | `moreTasks` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTask` |
-| `runFirstPhase` | `finalTask` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTask` |
-| `runFirstPhase` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
-| `runIrTask` | `moreTasks` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTask` |
-| `runIrTask` | `finalTask` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTask` |
-| `runIrTask` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
+| `firstPhase` | `directCommit` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewNewIntentPhase` |
+| `firstPhase` | `irCommit` | presentation `coderOutput`; semantic `irNumber`; effect `latestCommit` | `one-descendant-commit` | `reviewNewIntentPhase` |
+| `firstPhase` | `moreTasks` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTaskPhase` |
+| `firstPhase` | `finalTask` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTaskPhase` |
+| `firstPhase` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
+| `irTaskPhase` | `moreTasks` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTaskPhase` |
+| `irTaskPhase` | `finalTask` | presentation `coderOutput`; semantic `irNumber`, `irTask`; effect `latestCommit` | `one-descendant-commit` | `reviewIrTaskPhase` |
+| `irTaskPhase` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
 
 The Coder prompts shall continue to require the phase's one commit but shall prescribe no `Commit:` marker or other response formatting, while the reconciler shall treat `coderOutput` as opaque presentation, obtain `latestCommit` only from the matching receipt OID, and retain `irNumber`, `irTask` naming the exact implemented task, and the `moreTasks` versus `finalTask` choice as exact semantic evidence under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)].
 Each accepted matrix arm shall execute one stable `playbook.acceptedOutcome` marker carrying its exact source, target, and accepted outcome under [[playbook-runtime-81](playbook-runtime.md#playbook-runtime-81)], and each deferred arm shall use the checkpoint-bound continuation of [[playbook-30](#playbook-30)].
@@ -224,18 +224,18 @@ Where REVIEW runs under artifact schema `3`, each delegated outcome shall declar
 
 | Source state | Accepted outcome | Payload authority | Repository disposition | Target state |
 | --- | --- | --- | --- | --- |
-| `reviewInitial` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `addressFindings` |
-| `reviewInitial` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
-| `reviewInitial` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
-| `addressFindings` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewAfterCommit` |
-| `addressFindings` | `rejectedAll` | presentation `coderOutput` | `unchanged` | `reviewAfterRebuttal` |
-| `addressFindings` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
-| `reviewAfterCommit` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `addressFindings` |
-| `reviewAfterCommit` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
-| `reviewAfterCommit` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
-| `reviewAfterRebuttal` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `addressFindings` |
-| `reviewAfterRebuttal` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
-| `reviewAfterRebuttal` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
+| `firstReview` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `fixFindings` |
+| `firstReview` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
+| `firstReview` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
+| `fixFindings` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewAfterFix` |
+| `fixFindings` | `rejectedAll` | presentation `coderOutput` | `unchanged` | `reviewAfterRejection` |
+| `fixFindings` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
+| `reviewAfterFix` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `fixFindings` |
+| `reviewAfterFix` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
+| `reviewAfterFix` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
+| `reviewAfterRejection` | `hasFindings` | presentation `reviewerOutput` | `unchanged` | `fixFindings` |
+| `reviewAfterRejection` | `noFindings` | effect `evaluatedRevision` | `unchanged` | `done` |
+| `reviewAfterRejection` | `needsBossReply` | presentation `question` | `unchanged` | `awaitBossReply` |
 
 The reconciler shall treat `reviewerOutput`, `coderOutput`, and `question` as opaque presentation and shall require a matching `unchanged` receipt for every Reviewer arm, including each question and its separately governed authored continuation under [[playbook-12](#playbook-12)].
 The reconciler shall obtain `latestCommit` only from the matching receipt OID and `evaluatedRevision` only from the matching `unchanged` receipt's observed HEAD per [DR-045](../decisions/045-unchanged-receipt-revision-authority.md).
@@ -250,21 +250,21 @@ Where DECIDE runs under artifact schema `3`, each delegated outcome shall declar
 
 | Source state | Accepted outcome | Payload authority | Repository disposition | Target state |
 | --- | --- | --- | --- | --- |
-| `askCoderProposal` | `proposed` | presentation `coderProposal` | `unchanged` | `coderProposalComplete` when Coder finishes first; `commitCoderProposal` when Coder completes the pair |
-| `askCoderProposal` | `needsBossReply` | presentation `question` | `unchanged` | `waitCoderProposalReply` |
-| `askReviewerProposal` | `proposed` | presentation `reviewerProposal` | `unchanged` | `reviewerProposalComplete` when Reviewer finishes first; `commitCoderProposal` when Reviewer completes the pair |
-| `askReviewerProposal` | `needsBossReply` | presentation `question` | `unchanged` | `waitReviewerProposalReply` |
-| `commitCoderProposal` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewCommit` |
-| `commitCoderProposal` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
+| `askCoderProposal` | `proposed` | presentation `coderProposal` | `unchanged` | `coderProposalStaged` when Coder finishes first; `synthesizeCommit` when Coder completes the pair |
+| `askCoderProposal` | `needsBossReply` | presentation `question` | `unchanged` | `awaitCoderProposalReply` |
+| `askReviewerProposal` | `proposed` | presentation `reviewerProposal` | `unchanged` | `reviewerProposalStaged` when Reviewer finishes first; `synthesizeCommit` when Reviewer completes the pair |
+| `askReviewerProposal` | `needsBossReply` | presentation `question` | `unchanged` | `awaitReviewerProposalReply` |
+| `synthesizeCommit` | `committed` | presentation `coderOutput`; effect `latestCommit` | `one-descendant-commit` | `reviewCommit` |
+| `synthesizeCommit` | `needsBossReply` | presentation `question` | `deferred` | `awaitBossReply` |
 
-The two proposal calls shall execute as one declared concurrent all-`unchanged` cohort under [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)], while `commitCoderProposal` shall begin only after both cohort receipts complete and shall execute through the exclusive host transaction of [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)].
-Each proposal `proposed` or `needsBossReply` arm shall require an exact matching `unchanged` receipt under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)] before staging its presentation or publishing its question.
+The two proposal calls shall execute as one declared concurrent all-`unchanged` cohort under [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)] and [[playbook-runtime-90](playbook-runtime.md#playbook-runtime-90)], while `synthesizeCommit` shall begin only after both cohort receipts complete and shall execute through the exclusive host transaction of [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)].
+Each proposal `proposed` or `needsBossReply` arm shall require an exact matching `unchanged` receipt under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)] before staging its result or publishing its question.
 Each proposal question's authored continuation shall run as a new separately governed `unchanged` boundary under [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)].
 The commit prompt shall continue to require one commit but shall prescribe no `Commit:` marker or other response formatting, while the reconciler shall treat `coderOutput` as opaque presentation and obtain `latestCommit` only from the matching receipt OID under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)].
 Missing, incomplete, mismatched, concurrent, foreign, or ambiguous evidence shall remain unresolved under [[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)] without revealing a proposal early, starting REVIEW, or replaying either player.
 Each accepted matrix arm shall execute one stable `playbook.acceptedOutcome` marker carrying its exact source, target, and accepted outcome under [[playbook-runtime-81](playbook-runtime.md#playbook-runtime-81)], and the deferred merge arm shall use the checkpoint-bound continuation of [[playbook-30](#playbook-30)].
-The bespoke runtime's hidden adjudicator shall render each arm's judge-facing reply contract from this matrix through the shared renderer of [[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)] under [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], so every arm asks the judge for `guard` alone and names its presentation and effect fields as runtime-supplied.
-The DECIDE source, GEARS, FSM, bespoke linked runtime, declarations, and registry shall move atomically to artifact schema `3` while preserving their agreement under [[playbook-1](#playbook-1)] and their declared parallel role set under [[playbook-captain-5](playbook-captain.md#playbook-captain-5)].
+The shared factory's hidden adjudicator shall render each arm's judge-facing reply contract from this matrix through the shared renderer of [[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)] under [[playbook-runtime-10](playbook-runtime.md#playbook-runtime-10)], so every arm asks the judge for `guard` alone and names its presentation and effect fields as runtime-supplied.
+The DECIDE source, GEARS, FSM, linked runtime — a thin module over the shared factory's parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)] per [DR-067](../decisions/067-parallel-proposals-through-the-shared-factory.md) — declarations, and registry shall move atomically to artifact schema `3` under runtime ABI `1` [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)] while preserving their agreement under [[playbook-1](#playbook-1)] and their declared parallel role set under [[playbook-captain-5](playbook-captain.md#playbook-captain-5)].
 
 #### playbook-39
 
@@ -314,15 +314,15 @@ Where execution leaves a delegated-role state without suspending for its Boss qu
 
 #### playbook-30
 
-Where a maintained workflow runs under artifact schema `3` and one governed delegated-role arm declares `needsBossReply` with repository disposition `deferred`, its compiled runtime shall apply the checkpoint-bound logical-operation continuation of [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)] identically whether the workflow uses the shared flat runtime or DECIDE's bespoke parallel runtime.
+Where a maintained workflow runs under artifact schema `3` and one governed delegated-role arm declares `needsBossReply` with repository disposition `deferred`, its compiled runtime shall apply the checkpoint-bound logical-operation continuation of [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)] identically whether the shared factory interprets a flat machine or DECIDE's machine through its parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)].
 
 #### playbook-54
 
-Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall end every effect-authorized player call prompt — the initial call and each deferred continuation — with the pre-existing-changes block of that call's own baseline [[playbook-runtime-94](playbook-runtime.md#playbook-runtime-94)] and shall add none to a call declared exclusively `unchanged`, whether linking emits the shared flat runtime or DECIDE's bespoke parallel runtime.
+Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall end every effect-authorized player call prompt — the initial call and each deferred continuation — with the pre-existing-changes block of that call's own baseline [[playbook-runtime-94](playbook-runtime.md#playbook-runtime-94)] and shall add none to a call declared exclusively `unchanged`, whether the shared factory interprets a flat machine or DECIDE's machine through its parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)].
 
 #### playbook-55
 
-Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall decide the failure cause of [[playbook-runtime-96](playbook-runtime.md#playbook-runtime-96)] where each failure is decided and publish it from the failed state's status data, telemetry, run result, control view, and exported snapshot alike, whether linking emits the shared flat runtime or DECIDE's bespoke parallel runtime.
+Where a maintained workflow runs under artifact schema `3`, its compiled runtime shall decide the failure cause of [[playbook-runtime-96](playbook-runtime.md#playbook-runtime-96)] where each failure is decided and publish it from the failed state's status data, telemetry, run result, control view, and exported snapshot alike, whether the shared factory interprets a flat machine or DECIDE's machine through its parallel profile of [[playbook-runtime-87](playbook-runtime.md#playbook-runtime-87)].
 A cancellation the runtime itself issues — a parallel proposal cancelled because its sibling failed — decides no cause of its own, and the cohort's failure carries the cause of the member that failed first.
 
 ## Verification
@@ -372,7 +372,7 @@ When the CODE, REVIEW, and DECIDE workflow suites run, they shall fail unless CO
 
 #### playbook-29
 
-When maintained-workflow conformance drives equivalent artifact-schema-3 governed boundaries through the shared flat runtimes and DECIDE's bespoke parallel runtime, it shall fail unless both apply the same host-acknowledged `unchanged`-only gates to empty-`ok` correction and ordinary failure-state retry, both retain evidence and start no automatic player call for a missing, incomplete, or non-`unchanged` receipt, and DECIDE's authored and generated runtime siblings stay behaviorally identical (verifying [[playbook-28](#playbook-28)]).
+When maintained-workflow conformance drives equivalent artifact-schema-3 governed boundaries through the shared factory's flat runtimes and its parallel DECIDE runtime, it shall fail unless both apply the same host-acknowledged `unchanged`-only gates to empty-`ok` correction and ordinary failure-state retry, both retain evidence and start no automatic player call for a missing, incomplete, or non-`unchanged` receipt, and DECIDE's authored and generated runtime siblings stay behaviorally identical (verifying [[playbook-28](#playbook-28)]).
 
 #### playbook-33
 
@@ -380,14 +380,15 @@ When the CODE conformance suites drive its real artifact-schema-3 runtime, they 
 
 #### playbook-35
 
-When the REVIEW conformance suites drive its real artifact-schema-3 runtime, they shall fail unless every outcome from all three Reviewer states accepts only a matching `unchanged` receipt, including each question and separately governed answer continuation; Coder `committed` accepts only `one-descendant-commit`; Coder `rejectedAll` accepts only `unchanged`; `latestCommit` and `evaluatedRevision` come only from their matching receipts, with a judge-authored value for either rejected as a structural error; the post-commit round relays the exact receipt OID; mismatched or ambiguous evidence remains unresolved without replaying Coder; and Coder `needsBossReply` uses one exact-checkpoint cumulative deferred operation (verifying [[playbook-12](#playbook-12)], [[playbook-21](#playbook-21)], [[playbook-30](#playbook-30)], and [[playbook-34](#playbook-34)]).
+When the REVIEW conformance suites drive its real artifact-schema-3 runtime, they shall fail unless every outcome from all three Reviewer states accepts only a matching `unchanged` receipt, including each question and separately governed answer continuation; Coder `committed` accepts only `one-descendant-commit`; Coder `rejectedAll` accepts only `unchanged`; `latestCommit` and `evaluatedRevision` come only from their matching receipts, with a judge-authored value for either rejected as a structural error; every Reviewer and Coder prompt relays the caller's complete request; the post-commit round relays the exact receipt OID; mismatched or ambiguous evidence remains unresolved without replaying Coder; and Coder `needsBossReply` uses one exact-checkpoint cumulative deferred operation (verifying [[playbook-12](#playbook-12)], [[playbook-21](#playbook-21)], [[playbook-30](#playbook-30)], and [[playbook-34](#playbook-34)]).
 The suites shall further fail unless every accepted matrix row publishes its exact confirmed marker and status while an unaccepted fallback publishes neither, and the source, GEARS, FSM, linked runtime, declarations, and registry agree on schema `3`, runtime ABI `1`, and the matrix of [[playbook-34](#playbook-34)] (verifying [[playbook-1](#playbook-1)]).
 
 #### playbook-37
 
 When the DECIDE conformance suites drive its real artifact-schema-3 runtime, they shall fail unless the source, GEARS, and compiled prompts contain no `Commit:` response-format instruction; no presentation parser influences a transition; missing, glued, fenced, quoted, duplicated, or misleading `Commit:` prose leaves the accepted arm unchanged under equal semantic and effect evidence; both proposal calls overlap from one common baseline without revealing either proposal early; every proposal `proposed` and `needsBossReply` outcome and every separately governed proposal answer continuation accepts only a matching `unchanged` receipt; the merge waits for both proposal receipts and then runs exclusively; `committed` accepts only a matching `one-descendant-commit` receipt and obtains `latestCommit` from its exact OID; every mismatched or ambiguous proposal or merge receipt remains unresolved without an unauthorized player call; and merge `needsBossReply` uses one exact-checkpoint cumulative deferred operation (verifying [[playbook-12](#playbook-12)], [[playbook-22](#playbook-22)], [[playbook-30](#playbook-30)], and [[playbook-36](#playbook-36)]).
-The suites shall further fail unless each accepted matrix row publishes its exact confirmed marker and status, including the completion-order-specific proposal target, while an unaccepted fallback publishes neither, and the source, GEARS, FSM, bespoke linked runtime, declarations, and registry agree on schema `3` and the matrix of [[playbook-36](#playbook-36)] (verifying [[playbook-1](#playbook-1)]).
+The suites shall further fail unless each accepted matrix row publishes its exact confirmed marker and status, including the completion-order-specific proposal target, while an unaccepted fallback publishes neither, and the source, GEARS, FSM, linked runtime, declarations, and registry agree on schema `3`, runtime ABI `1`, and the matrix of [[playbook-36](#playbook-36)] (verifying [[playbook-1](#playbook-1)]).
 The suites shall further fail unless the proposal and merge adjudicator prompts carry no `Output shall include` clause, state each arm's exact reply JSON of `guard` alone, name `coderProposal`, `reviewerProposal`, `coderOutput`, and `question` as presentation-owned and `latestCommit` as effect-owned runtime-supplied fields to omit, and a guard-only reply resolves each arm with its correction budget unspent while the runtime supplies the omitted fields (verifying [[playbook-36](#playbook-36)]).
+The suites shall further fail unless the REVIEW call's input carries Coder's independent proposal and never Reviewer's (verifying [[playbook-22](#playbook-22)]).
 
 #### playbook-40
 
@@ -403,7 +404,7 @@ When the BRANCH conformance suites drive its real artifact-schema-3 runtime, the
 
 #### playbook-51
 
-When the PR conformance suites drive its real artifact-schema-3 runtime, they shall fail unless the Coder outcome accepts only a matching `unchanged` receipt, including the question and its separately governed answer continuation, with `pullRequest` and `pullRequestUrl` coming only from exact semantic candidates and not published settling in its failure terminal with Coder's complete report and no later step; the compiled GEARS `## Optimizations` section lists exactly `PR-2`, `PR-4`, `PR-5`, `PR-6`, and `PR-7` as `captain → script`, the FSM invokes only a `script` actor for each of them with no player, judge, adjudication, or governance boundary, each script's command preserves its source text except for binding the target placeholder under [[playbook-45](#playbook-45)], and each script state routes on exit status alone with a fixture for both exits; a failed first wait calls `code` exactly once with the composed coding request, a failed second wait reaches `checksStillFailing` with no `code` target, and a failed fix publication reaches `fixNotPublished`; a `code` result that does not prove success reaches `fixFailed` through PR's `invoke.onError` authored-outcome arm with the child's own output relayed, a resolved result that does not prove success reaches that same terminal through the retained `onDone` field check, and a control-plane `code` failure parks; a checkout that infers another pull request after the suspended `code` call reaches `fixNotPublished` with nothing pushed and, at the merge, `mergeRefused` with `gh pr merge` never invoked; a reported pull-request URL carrying shell syntax binds as a literal that neither executes nor satisfies either check; a pull request whose base is not the repository default branch reaches `mergeRefused` the same way, and a queued pull request whose `gh pr merge` exits zero, a failed post-merge state query, and a merged pull request whose checkout is still on the feature branch each reach it without local update; a nonzero merge script reaches `mergeRefused` carrying `status: 'merge-unconfirmed'` and no `reason`, while a zero merge script reaches `merged` or `mergedLocalBehind` by the local update's exit status alone, both carrying `localDefaultUpdated`, no merge-commit field, and no claim that either branch was deleted; each terminal state publishes its distinct truthful description; every accepted matrix row publishes its exact confirmed marker and status while an unaccepted fallback publishes neither; and the source, GEARS, FSM, linked runtime, declarations, and registry agree on schema `3`, runtime ABI `1`, and the matrix of [[playbook-49](#playbook-49)] (verifying [[playbook-1](#playbook-1)], [[playbook-12](#playbook-12)], [[playbook-44](#playbook-44)], [[playbook-45](#playbook-45)], [[playbook-46](#playbook-46)], [[playbook-47](#playbook-47)], [[playbook-48](#playbook-48)], and [[playbook-49](#playbook-49)]).
+When the PR conformance suites drive its real artifact-schema-3 runtime, they shall fail unless the Coder outcome accepts only a matching `unchanged` receipt, including the question and its separately governed answer continuation, with `pullRequest` and `pullRequestUrl` coming only from exact semantic candidates and not published settling in its failure terminal with Coder's complete report and no later step; the compiled GEARS `## Optimizations` section lists exactly `PR-2`, `PR-4`, `PR-5`, `PR-6`, and `PR-7` as `captain → script`, the FSM invokes only a `script` actor for each of them with no player, judge, adjudication, or governance boundary, each script's command preserves its source text except for binding the target placeholder under [[playbook-45](#playbook-45)], and each script state routes on exit status alone with a fixture for both exits; a failed first wait calls `code` exactly once with the composed coding request, a failed second wait reaches `checksFailed` with no `code` target, and a failed fix publication reaches `fixNotPublished`; a `code` result that does not prove success reaches `fixFailed` through PR's `invoke.onError` authored-outcome arm with the child's own output relayed, a resolved result that does not prove success reaches that same terminal through the retained `onDone` field check, and a control-plane `code` failure parks; a checkout that infers another pull request after the suspended `code` call reaches `fixNotPublished` with nothing pushed and, at the merge, `mergeUnconfirmed` with `gh pr merge` never invoked; a reported pull-request URL carrying shell syntax binds as a literal that neither executes nor satisfies either check; a pull request whose base is not the repository default branch reaches `mergeUnconfirmed` the same way, and a queued pull request whose `gh pr merge` exits zero, a failed post-merge state query, and a merged pull request whose checkout is still on the feature branch each reach it without local update; a nonzero merge script reaches `mergeUnconfirmed` carrying `status: 'merge-unconfirmed'` and no `reason`, while a zero merge script reaches `mergedLocalUpdated` or `mergedLocalNotUpdated` by the local update's exit status alone, both carrying `localDefaultUpdated`, no merge-commit field, and no claim that either branch was deleted; each terminal state publishes its distinct truthful description; every accepted matrix row publishes its exact confirmed marker and status while an unaccepted fallback publishes neither; and the source, GEARS, FSM, linked runtime, declarations, and registry agree on schema `3`, runtime ABI `1`, and the matrix of [[playbook-49](#playbook-49)] (verifying [[playbook-1](#playbook-1)], [[playbook-12](#playbook-12)], [[playbook-44](#playbook-44)], [[playbook-45](#playbook-45)], [[playbook-46](#playbook-46)], [[playbook-47](#playbook-47)], [[playbook-48](#playbook-48)], and [[playbook-49](#playbook-49)]).
 
 ### Boss-reply suspension coverage
 
@@ -417,9 +418,13 @@ When a workflow FSM leaves or abandons a Boss-reply path, its conformance suite 
 
 #### playbook-31
 
-When maintained-workflow conformance drives equivalent artifact-schema-3 deferred question chains through the shared flat runtimes and DECIDE's bespoke parallel runtime, it shall fail unless both withhold the question until its logical operation is durable, start one authored continuation only from a valid exact-checkpoint answer, preserve one original baseline and cumulative receipt across repeated questions, keep invalid answers waiting, park another exit or checkpoint mismatch without a player, and restore an eligible exact-checkpoint wait without a player or judge; authored and generated DECIDE runtime siblings shall remain behaviorally identical (verifying [[playbook-30](#playbook-30)]).
+When maintained-workflow conformance drives equivalent artifact-schema-3 deferred question chains through the shared factory's flat runtimes and its parallel DECIDE runtime, it shall fail unless both withhold the question until its logical operation is durable, start one authored continuation only from a valid exact-checkpoint answer, preserve one original baseline and cumulative receipt across repeated questions, keep invalid answers waiting, park another exit or checkpoint mismatch without a player, and restore an eligible exact-checkpoint wait without a player or judge; authored and generated DECIDE runtime siblings shall remain behaviorally identical (verifying [[playbook-30](#playbook-30)]).
 
 #### playbook-56
 
 When the DECIDE conformance suites drive its real artifact-schema-3 runtime over a nonempty baseline projection, they shall fail unless the exclusive merge call and its deferred continuation each end with the pre-existing-changes block naming the baseline's paths under their groups while both proposal calls receive none, and unless the prompt each `player.call.started` trace records is the prompt sent (verifying [[playbook-54](#playbook-54)]).
 The suites shall further fail unless a rejected player port, a non-`ok` player result, a refused adjudication, and a mismatched merge receipt each publish their own cause from the failed state's status data, the control view, the exported snapshot, and — where the turn settles rather than rejects — the run result; unless a proposal that rejects, returns a malformed result, or returns a non-`ok` result while its sibling is still running publishes that proposal's cause on every surface with no abort; and unless a later Boss turn that leaves the failure in place and a restored snapshot still publish the cause its source runtime decided (verifying [[playbook-55](#playbook-55)]).
+
+#### playbook-57
+
+When the BRANCH and PR conformance suites drive their real artifact-schema-3 runtimes, whose compiled machines keep a JSON-safe record of a failure as `lastError`, they shall fail unless a rejected Coder port and a non-`ok` Coder result each publish `player-failed` naming the Coder role and its bound player from the failed state's status data, the control view, the exported snapshot, and — where the turn settles rather than rejects — the run result (verifying [[playbook-55](#playbook-55)]).

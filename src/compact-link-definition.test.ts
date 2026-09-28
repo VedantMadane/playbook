@@ -38,7 +38,7 @@ it('ships the full contract and keeps the rejected compact recipe outside the pa
     expect(sha(recipe)).toBe('a00a5b7996d1449bff312299f804906256c6dcd5fef18d472dd99833c6d0f7dc');
     // The current helper includes an accepted labelled/nested CODE profile.
     // Frozen historical inputs remain unshipped reproduction artifacts.
-    expect(sha(read('slc/materialize-link.mjs'))).toBe('5024778548509370d899f3709829fd7609d67bc4fe5d72b2c76d5d0ab26f59eb');
+    expect(sha(read('slc/materialize-link.mjs'))).toBe('60d4254c37d64454da9160fbb0d8f63911ca73a78fe927be94ee2073646c12d1');
     expect(sha(read('scripts/experiments/materialize-link-v2.mjs'))).toBe('fe7336bc4c1511c4170ac3cdaeda4ffc30f3848b40ae7301f6660c20067e58e0');
     // Historical bytes are checked in the archive-only test below. The live
     // contract evolves; reverse-editing it into older versions couples every

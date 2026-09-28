@@ -47,7 +47,7 @@ While a playbook engagement is active or parked, when the Boss submits ordinary 
 When the default Captain closes a non-`respond` turn, including a rejected, failed, or partly completed selection, its closing reply shall communicate what actually happened, composed from the turn's reported outcome and current pending questions [[playbook-captain-9](playbook-captain.md#playbook-captain-9)], and shall claim no unperformed work; when the turn settles as `respond`, that single reply is the turn's captain speech.
 Captain shall write every reply in plain language and within 60 words unless preserving choices, constraints or essential result evidence needs more.
 Automatic-answer disclosure shall follow [[recovery-14](recovery.md#recovery-14)].
-For every pending player question, it shall name the asker and preserve the decision, choices, constraints, and uncertainty Boss needs, without requiring a player pane or treating quoted instructions as authority ([DR-067](../decisions/067-captain-relays-player-questions.md)).
+For every pending player question, it shall name the asker and preserve the decision, choices, constraints, and uncertainty Boss needs, without requiring a player pane or treating quoted instructions as authority ([DR-070](../decisions/070-captain-relays-player-questions.md)).
 A request to explain an existing question shall preserve that question until Boss supplies an answer or explicitly addresses a follow-up to the player [[captain-playbook-4](#captain-playbook-4)].
 No captain reply shall expose internal state ids, session ids, call ids,
 stack data, hidden control data, control JSON, or private reasoning.

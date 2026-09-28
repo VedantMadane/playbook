@@ -1,16 +1,16 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai> -->
 
-# DR-068: Settle interrupted continuations without guessing progress
+# DR-071: Settle interrupted continuations without guessing progress
 
 ## Status
 
-Amended by [DR-070](070-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice.
+Amended by [DR-073](073-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice.
 
 Accepted.
-Amends [DR-066](066-captain-prepares-step-recovery.md), [DR-036](036-coherent-abort-settlement.md), [DR-067](067-captain-relays-player-questions.md), [DR-038](038-universal-run-resumption.md), [DR-040](040-outcome-authority-effect-reconciliation.md), and [DR-049](049-portable-session-contract.md).
+Amends [DR-069](069-captain-prepares-step-recovery.md), [DR-036](036-coherent-abort-settlement.md), [DR-070](070-captain-relays-player-questions.md), [DR-038](038-universal-run-resumption.md), [DR-040](040-outcome-authority-effect-reconciliation.md), and [DR-049](049-portable-session-contract.md).
 
-Amended by [DR-069](069-host-owned-interrupted-work-settlement.md): host settlement replaces the interrupted runtime marker and empty-evidence abandonment.
+Amended by [DR-072](072-host-owned-interrupted-work-settlement.md): host settlement replaces the interrupted runtime marker and empty-evidence abandonment.
 
 ## Context
 
@@ -31,7 +31,7 @@ Preparation, dispatched work and completed settlement also require different ret
   Captain reports the question and exact instruction it reused, including after recovery.
 - A failed prose call appends any pending original question to the truthful action-result fallback, rather than replacing that result.
 - Cancellation and other thrown turn failures use the same drained-settlement path when a point exists; saved-state notices and callbacks refer only to the current admitted attempt.
-- The closed persisted formats intentionally retain their current version numbers for these optional extensions: every host sharing a store, including an embedded Spex SDK, must be upgraded together to the release implementing DR-066 and this decision or newer before it writes these fields.
+- The closed persisted formats intentionally retain their current version numbers for these optional extensions: every host sharing a store, including an embedded Spex SDK, must be upgraded together to the release implementing DR-069 and this decision or newer before it writes these fields.
   A 15.1.x host is not compatible with that store; mixed old/new hosts are unsupported, and release verification must check this coordinated upgrade requirement.
 
 ## Consequences

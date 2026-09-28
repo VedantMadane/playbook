@@ -1,11 +1,13 @@
+import type { PlaybookCallResult } from '@sublang/playbook/runtime';
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
 };
-export type PrStateId = 'openPullRequest' | 'waitForChecks' | 'fixChecks' | 'publishFix' | 'waitForChecksAfterFix' | 'mergePullRequest' | 'updateLocalDefault';
+export type PrStateId = 'openPullRequest' | 'waitForChecks' | 'fixChecks' | 'publishFix' | 'waitForFixChecks' | 'mergePullRequest' | 'updateLocalDefault';
 export type PrSourceItem = 'PR-1' | 'PR-2' | 'PR-3' | 'PR-4' | 'PR-5' | 'PR-6' | 'PR-7';
-export type PrScriptStateId = 'waitForChecks' | 'publishFix' | 'waitForChecksAfterFix' | 'mergePullRequest' | 'updateLocalDefault';
-export type PrScriptSourceItem = 'PR-2' | 'PR-4' | 'PR-5' | 'PR-6' | 'PR-7';
-export type PrChildPlaybookId = 'code';
+/** Working leaves a Boss reply may resume (scalar Boss-reply form). */
+export type ResumableStateId = 'openPullRequest';
+/** No parallel group: the playbook runs one delegated role at a time. */
+export declare const concurrentRoleSets: readonly (readonly string[])[];
 export type PendingBossQuestion = {
     readonly questionId: 'openPullRequest';
     readonly resumeStateId: 'openPullRequest';
@@ -22,6 +24,7 @@ export type PlayerInput = {
     readonly sourceItem: 'PR-1';
     readonly prompt: string;
     readonly result: Readonly<Record<string, string>>;
+    /** `<caller-input>`: the complete caller input, relayed in quotes. */
     readonly callerInput: string;
     readonly pendingBossQuestion?: PendingBossQuestion;
     readonly bossReply?: string;
@@ -37,16 +40,13 @@ export type PlayerOutput = {
     readonly guard: 'needsBossReply';
     readonly question: string;
 };
-export type PlaybookInput = {
-    readonly stateId: 'fixChecks';
-    readonly sourceItem: 'PR-3';
-    readonly playbookId: PrChildPlaybookId;
-    readonly text: string;
-};
+export type ScriptStateId = 'waitForChecks' | 'publishFix' | 'waitForFixChecks' | 'mergePullRequest' | 'updateLocalDefault';
 export type ScriptInput = {
-    readonly stateId: PrScriptStateId;
-    readonly sourceItem: PrScriptSourceItem;
+    readonly stateId: ScriptStateId;
+    readonly sourceItem: 'PR-2' | 'PR-4' | 'PR-5' | 'PR-6' | 'PR-7';
+    /** The script blockquote, with its runtime values bound as shell literals. */
     readonly command: string;
+    /** Zero-exit guard first, then the nonzero-exit guard. */
     readonly result: Readonly<Record<string, string>>;
 };
 export type ScriptOutput = {
@@ -77,68 +77,71 @@ export type ScriptOutput = {
     readonly guard: 'localDefaultNotUpdated';
     readonly exitStatus: number;
 };
+export type PrChildPlaybookId = 'code';
+export type PlaybookInput = {
+    readonly stateId: 'fixChecks';
+    readonly sourceItem?: 'PR-3';
+    readonly playbookId: PrChildPlaybookId;
+    readonly text: string;
+};
+/** The playbook actor resolves with the child's own machine output. */
+export type PlaybookOutput = JsonValue | undefined;
 export type CompactError = {
     readonly name: string;
     readonly message: string;
 };
-/** Sanitized canonical child result relayed as PR's own failure outcome. */
-export type CompletedChildResult = {
-    readonly playbookId: PrChildPlaybookId;
+export type ErrorRecord = {
+    readonly name: string;
+    readonly message: string;
+    readonly stack?: string;
+};
+/** Sanitized canonical `code` result relayed by the `fix-failed` outcome. */
+export type CompletedCodeResult = {
+    readonly playbookId: 'code';
     readonly status: 'ok';
     readonly output?: JsonValue;
 } | {
-    readonly playbookId: PrChildPlaybookId;
+    readonly playbookId: 'code';
     readonly status: 'aborted' | 'error';
     readonly error: CompactError;
 };
+/** Public `pr` output interface (workflow-contracts catalog). */
 export type PrPlaybookOutput = {
     readonly status: 'merged';
-    /** The pull request number, exactly as Coder reported it. */
     readonly pullRequest: string;
-    /** The pull request URL, exactly as Coder reported it. */
     readonly pullRequestUrl: string;
-    /** Whether the local default branch was fast-forwarded to the merged head. */
     readonly localDefaultUpdated: boolean;
 } | {
     readonly status: 'not-merged';
     readonly reason: 'not-published';
-    /** Coder's complete result carrying the reason. */
     readonly coderOutput: string;
 } | {
     readonly status: 'not-merged';
     readonly reason: 'fix-failed';
     readonly pullRequest: string;
     readonly pullRequestUrl: string;
-    /** The relayed canonical `code` result that ended the one fix attempt. */
-    readonly childResult: CompletedChildResult;
+    readonly childResult: CompletedCodeResult;
 } | {
     readonly status: 'not-merged';
     readonly reason: 'fix-not-published' | 'checks-failed';
     readonly pullRequest: string;
     readonly pullRequestUrl: string;
-}
-/**
- * The merge command exited nonzero. It ran, so whether GitHub merged the
- * pull request is unknown — script output never enters context — and the
- * result claims neither a merge nor its absence.
- */
- | {
+} | {
     readonly status: 'merge-unconfirmed';
     readonly pullRequest: string;
     readonly pullRequestUrl: string;
 };
+export type PrInput = Readonly<Record<string, never>>;
 export type PrCompletion = 'merged' | 'not-published' | 'fix-failed' | 'fix-not-published' | 'checks-failed' | 'merge-unconfirmed';
-/** The machine reads no input: the caller input arrives on `START_PR`. */
-export type PrInput = Readonly<Record<never, never>>;
 export type PrContext = {
     readonly callerInput?: string;
     readonly pullRequest?: string;
     readonly pullRequestUrl?: string;
-    readonly completion?: PrCompletion;
-    readonly localDefaultUpdated?: boolean;
     readonly coderOutput?: string;
-    readonly childFailure?: CompletedChildResult;
-    readonly lastError?: unknown;
+    readonly childResult?: CompletedCodeResult;
+    readonly localDefaultUpdated?: boolean;
+    readonly completion?: PrCompletion;
+    readonly lastError?: ErrorRecord;
     readonly pendingBossQuestion?: PendingBossQuestion;
     readonly bossReply?: string;
 };
@@ -150,8 +153,7 @@ export type PrEvent = {
     readonly answer: string;
     readonly questionId?: 'openPullRequest';
 };
-/** PR-3's composed child input: the caller input, the pull request, and the static coding request. */
-export declare function fixChecksCallText(context: PrContext): string;
+export declare function authoredChildResult(error: unknown, expectedPlaybookId: string): PlaybookCallResult | undefined;
 export declare const prMachine: import("xstate").StateMachine<PrContext, {
     readonly type: "START_PR";
     readonly callerInput: string;
@@ -160,18 +162,18 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
     readonly answer: string;
     readonly questionId?: "openPullRequest";
 }, {
-    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<JsonValue | undefined, PlaybookInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<ScriptOutput, ScriptInput, import("xstate").EventObject>> | undefined;
+    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<ScriptOutput, ScriptInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>> | undefined;
 }, {
-    src: "playbook";
-    logic: import("xstate").PromiseActorLogic<JsonValue | undefined, PlaybookInput, import("xstate").EventObject>;
-    id: string | undefined;
-} | {
     src: "player";
     logic: import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>;
     id: string | undefined;
 } | {
     src: "script";
     logic: import("xstate").PromiseActorLogic<ScriptOutput, ScriptInput, import("xstate").EventObject>;
+    id: string | undefined;
+} | {
+    src: "playbook";
+    logic: import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>;
     id: string | undefined;
 }, {
     type: "playbook.acceptedOutcome";
@@ -184,66 +186,61 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
     type: "rememberActorError";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberPendingQuestion";
-    params: import("xstate").NonReducibleUnknown;
-} | {
     type: "rememberBossReply";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberEmptyBossReplyError";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "rememberMalformedPlayerOutput";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "completeWithInsufficientCodeResult";
+    type: "clearBossReplyContext";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "completeWithCodeFailure";
+    type: "setPendingBossQuestion";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "startPr";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberPullRequest";
+    type: "rememberOpened";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "completeNotPublished";
     params: import("xstate").NonReducibleUnknown;
 } | {
+    type: "rememberEmptyBossReplyError";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "completeWithCodeFailure";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "completeWithInsufficientCodeResult";
+    params: import("xstate").NonReducibleUnknown;
+} | {
     type: "completeFixNotPublished";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "completeChecksStillFailing";
+    type: "completeChecksFailed";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "completeMergeRefused";
+    type: "completeMergeUnconfirmed";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "completeMerged";
+    type: "completeMergedLocalUpdated";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "completeMergedLocalBehind";
+    type: "completeMergedLocalNotUpdated";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "rememberMalformedScriptOutput";
-    params: {
-        readonly sourceItem: PrScriptSourceItem;
-    };
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "rememberMalformedChildOutput";
+    params: import("xstate").NonReducibleUnknown;
 }, {
     type: "needsBossReply";
     params: unknown;
 } | {
     type: "emptyBossReply";
-    params: unknown;
-} | {
-    type: "authoredCodeFailure";
-    params: unknown;
-} | {
-    type: "checksPassed";
-    params: unknown;
-} | {
-    type: "checksFailed";
     params: unknown;
 } | {
     type: "fixPublished";
@@ -276,28 +273,38 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
     type: "isCodeSuccess";
     params: unknown;
 } | {
-    type: "resumesOpenPullRequest";
+    type: "isInsufficientCodeResult";
     params: unknown;
-}, never, "failed" | "ready" | "awaitBossReply" | "openPullRequest" | "waitForChecks" | "fixChecks" | "publishFix" | "waitForChecksAfterFix" | "mergePullRequest" | "updateLocalDefault" | "notPublished" | "fixNotPublished" | "checksStillFailing" | "merged" | "mergeRefused" | "mergedLocalBehind" | "fixFailed", string, Readonly<Record<never, never>>, {
+} | {
+    type: "isAuthoredCodeFailure";
+    params: unknown;
+} | {
+    type: "validStartPr";
+    params: unknown;
+} | {
+    type: "waitForChecksPassed";
+    params: unknown;
+} | {
+    type: "waitForChecksFailed";
+    params: unknown;
+} | {
+    type: "waitForFixChecksPassed";
+    params: unknown;
+}, never, "failed" | "ready" | "awaitBossReply" | "openPullRequest" | "waitForChecks" | "fixChecks" | "publishFix" | "waitForFixChecks" | "mergePullRequest" | "updateLocalDefault" | "notPublished" | "checksFailed" | "fixNotPublished" | "mergedLocalUpdated" | "mergedLocalNotUpdated" | "fixFailed" | "mergeUnconfirmed", string, Readonly<Record<string, never>>, {
     readonly status: "merged";
-    /** The pull request number, exactly as Coder reported it. */
     readonly pullRequest: string;
-    /** The pull request URL, exactly as Coder reported it. */
     readonly pullRequestUrl: string;
-    /** Whether the local default branch was fast-forwarded to the merged head. */
     readonly localDefaultUpdated: boolean;
 } | {
     readonly status: "not-merged";
     readonly reason: "not-published";
-    /** Coder's complete result carrying the reason. */
     readonly coderOutput: string;
 } | {
     readonly status: "not-merged";
     readonly reason: "fix-failed";
     readonly pullRequest: string;
     readonly pullRequestUrl: string;
-    /** The relayed canonical `code` result that ended the one fix attempt. */
-    readonly childResult: CompletedChildResult;
+    readonly childResult: CompletedCodeResult;
 } | {
     readonly status: "not-merged";
     readonly reason: "fix-not-published" | "checks-failed";
@@ -316,6 +323,9 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
         readonly openPullRequest: {
             id: "openPullRequest";
         };
+        readonly awaitBossReply: {
+            id: "awaitBossReply";
+        };
         readonly waitForChecks: {
             id: "waitForChecks";
         };
@@ -325,8 +335,8 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
         readonly publishFix: {
             id: "publishFix";
         };
-        readonly waitForChecksAfterFix: {
-            id: "waitForChecksAfterFix";
+        readonly waitForFixChecks: {
+            id: "waitForFixChecks";
         };
         readonly mergePullRequest: {
             id: "mergePullRequest";
@@ -334,17 +344,14 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
         readonly updateLocalDefault: {
             id: "updateLocalDefault";
         };
-        readonly awaitBossReply: {
-            id: "awaitBossReply";
-        };
         readonly failed: {
             id: "failed";
         };
-        readonly merged: {
-            id: "merged";
+        readonly mergedLocalUpdated: {
+            id: "mergedLocalUpdated";
         };
-        readonly mergedLocalBehind: {
-            id: "mergedLocalBehind";
+        readonly mergedLocalNotUpdated: {
+            id: "mergedLocalNotUpdated";
         };
         readonly notPublished: {
             id: "notPublished";
@@ -355,11 +362,11 @@ export declare const prMachine: import("xstate").StateMachine<PrContext, {
         readonly fixNotPublished: {
             id: "fixNotPublished";
         };
-        readonly checksStillFailing: {
-            id: "checksStillFailing";
+        readonly checksFailed: {
+            id: "checksFailed";
         };
-        readonly mergeRefused: {
-            id: "mergeRefused";
+        readonly mergeUnconfirmed: {
+            id: "mergeUnconfirmed";
         };
     };
 }>;

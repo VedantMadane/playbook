@@ -5,7 +5,7 @@
 
 ## Intent
 
-Save work before execution, restore interrupted runs without repeating work, and let Boss choose a bounded preparation or continuation ([DR-066](../decisions/066-captain-prepares-step-recovery.md)).
+Save work before execution, restore interrupted runs without repeating work, and let Boss choose a bounded preparation or continuation ([DR-069](../decisions/069-captain-prepares-step-recovery.md)).
 
 ## External Behavior
 
@@ -16,7 +16,8 @@ The runtime's `PlaybookStepRecord` shall contain `id`, `kind:'player'|'captain'|
 The optional `recordStep(step, position?)` port shall receive a fresh UUID start and a runtime-owned restorable failed position before execution, then the same start with its JSON actor result before the next transition.
 A failed start save shall start no work; a failed result save shall stop further work while retaining the known output for drained settlement.
 While failed or waiting for Boss, the runtime shall export its checkpoint as optional `recoveryCheckpoint` and restore without execution [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)].
-A non-JSON context shall remain executable with an explicit unavailable position; no checkpoint shall be invented.
+A non-JSON context or invocation inside a parallel region shall remain executable with an explicit unavailable position; no single-invocation checkpoint shall be invented for a group.
+After a parallel group joins, ordinary sequential invocations shall capture checkpoints under the same rule.
 The checkpoint shall be replaced by the next invocation and omitted in other states.
 When the invocation's output returns to the machine — a fresh actor result, with or without a step record, or a consumed saved result — the runtime shall retain the start checkpoint without its result and with `delivered: true`, preserved through export and restore, so a later authored failure or question keeps its ordinary controls while that output is never offered for assessment again [[recovery-10](#recovery-10)].
 Only the internal step-start capture shall synthesize an interrupted position; public `exportSnapshot({child?})` shall export the actual position.
@@ -107,12 +108,12 @@ When an unexpected child-runtime exception or cancellation after the runtime acc
 
 When a runtime calls `handleBossInput.onAccepted` [[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)], the shell shall record the frame's start, its delivery facts and the root's delivered `inputs` [[recovery-14](#recovery-14)] at that callback and shall pause parent cancellation only for a child that accepted:
 
-- the shared runtime and DECIDE call it for ordinary and deferred answers, a bound deferred continuation included;
+- the shared runtime calls it for ordinary and deferred answers, a bound deferred continuation included;
 - for a runtime that does not call it, an outcome other than `no-action` or `aborted` counts as acceptance.
 
 ### recovery-18
 
-Before external work, a durable host shall atomically save the uncertain attempt's progress as `{snapshot,steps,positionStepId}` ([DR-070](../decisions/070-durable-step-progress.md)):
+Before external work, a durable host shall atomically save the uncertain attempt's progress as `{snapshot,steps,positionStepId}` ([DR-073](../decisions/073-durable-step-progress.md)):
 
 - `snapshot` is the runtime-owned full working stack, or `null` when a frame cannot represent its position; the shell joins parent/child identities without interpreting machine context;
 - the snapshot retains the preceding settled Captain, journal and sequences, the current ledger, player ledger, issued identities, and accepted runtime input;
@@ -147,7 +148,7 @@ A live controller newly left uncertain shall require disposal and explicit reope
 
 ### recovery-27
 
-When explicit uncertain retry opens an interrupted attempt, the shared host shall restore and report only, never automatically repeat work or run preparation, even when receipts show no repository change ([DR-070](../decisions/070-durable-step-progress.md)):
+When explicit uncertain retry opens an interrupted attempt, the shared host shall restore and report only, never automatically repeat work or run preparation, even when receipts show no repository change ([DR-073](../decisions/073-durable-step-progress.md)):
 
 - reconstruct incomplete receipts and require monotonic ledger evidence before restoration; a failed check retains uncertainty [[playbook-cli-23](playbook-cli.md#playbook-cli-23)];
 - when no step is recorded and the ledger is unchanged, restore the exact pre-turn stack and pending questions, explaining that the last message was not processed;
@@ -180,7 +181,8 @@ When system tests kill real hosts during ordinary and nested player or script wo
 
 ### recovery-28
 
-When system tests kill a root or nested bespoke runtime with parallel work and no supported position, they shall verify preserved commits and evidence, no stale runtime or player execution, and an explained safe exit to Captain [[recovery-27](#recovery-27)].
+When system tests kill root and nested DECIDE runs during parallel proposals without a supported position, they shall verify preserved commits and evidence, no stale runtime or player execution, and an explained safe exit to Captain [[recovery-27](#recovery-27)].
+When loss instead occurs in the sequential step after the join, they shall verify restoration of that step without repeating its proposals [[recovery-1](#recovery-1)] [[recovery-27](#recovery-27)].
 
 ### recovery-25
 

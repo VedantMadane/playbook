@@ -93,22 +93,25 @@ const pendingContext: PrContext = {
 
 // One fixture per ordered script arm: the zero guard, the nonzero guard, and
 // the fallback that a guard name inconsistent with its exit status reaches.
+// Each arm's machine guard is named apart from the script outcome it accepts.
 const scriptFixtures = (
   location: string,
+  zeroArm: string,
   zeroGuard: ScriptOutput['guard'],
   zeroTarget: string,
+  nonzeroArm: string,
   nonzeroGuard: ScriptOutput['guard'],
   nonzeroTarget: string,
 ): Record<string, readonly TransitionFixture[]> => ({
   [location]: [
     {
-      guard: zeroGuard,
+      guard: zeroArm,
       target: zeroTarget,
       context: CONTEXT,
       event: done(script(zeroGuard, 0)),
     },
     {
-      guard: nonzeroGuard,
+      guard: nonzeroArm,
       target: nonzeroTarget,
       context: CONTEXT,
       event: done(script(nonzeroGuard, 1)),
@@ -157,10 +160,31 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       event: done({ guard: 'opened', pullRequest: '12' }),
     },
   ],
+  'awaitBossReply.on.BOSS_REPLY': [
+    {
+      guard: 'emptyBossReply',
+      target: '#failed',
+      context: pendingContext,
+      event: { type: 'BOSS_REPLY', questionId: 'openPullRequest', answer: '  ' },
+    },
+    {
+      // The resume arm's guard is an inline function of the machine config.
+      guard: '<inline>',
+      target: '#openPullRequest',
+      context: pendingContext,
+      event: {
+        type: 'BOSS_REPLY',
+        questionId: 'openPullRequest',
+        answer: 'Use origin.',
+      },
+    },
+  ],
   ...scriptFixtures(
     'waitForChecks.invoke.onDone',
+    'waitForChecksPassed',
     'checksPassed',
     'mergePullRequest',
+    'waitForChecksFailed',
     'checksFailed',
     'fixChecks',
   ),
@@ -172,15 +196,23 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
       event: done(CODE_COMPLETE),
     },
     {
-      guard: '<fallback>',
+      guard: 'isInsufficientCodeResult',
       target: 'fixFailed',
       context: CONTEXT,
       event: done(INSUFFICIENT_CODE),
     },
+    {
+      // A delivered output that is not JSON cannot be relayed as CODE's
+      // canonical result, so it parks instead of reaching fixFailed.
+      guard: '<fallback>',
+      target: 'failed',
+      context: CONTEXT,
+      event: done({ status: 'review-failed', score: Number.NaN }),
+    },
   ],
   'fixChecks.invoke.onError': [
     {
-      guard: 'authoredCodeFailure',
+      guard: 'isAuthoredCodeFailure',
       target: 'fixFailed',
       context: CONTEXT,
       event: { type: 'xstate.error.actor.code', error: authoredFailure() },
@@ -198,49 +230,39 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   ...scriptFixtures(
     'publishFix.invoke.onDone',
     'fixPublished',
-    'waitForChecksAfterFix',
+    'fixPublished',
+    'waitForFixChecks',
+    'fixNotPublished',
     'fixNotPublished',
     'fixNotPublished',
   ),
   ...scriptFixtures(
-    'waitForChecksAfterFix.invoke.onDone',
+    'waitForFixChecks.invoke.onDone',
+    'waitForFixChecksPassed',
     'checksPassed',
     'mergePullRequest',
     'checksStillFailing',
     'checksStillFailing',
+    'checksFailed',
   ),
   ...scriptFixtures(
     'mergePullRequest.invoke.onDone',
     'merged',
+    'merged',
     'updateLocalDefault',
     'mergeRefused',
     'mergeRefused',
+    'mergeUnconfirmed',
   ),
   ...scriptFixtures(
     'updateLocalDefault.invoke.onDone',
     'localDefaultUpdated',
-    'merged',
+    'localDefaultUpdated',
+    'mergedLocalUpdated',
     'localDefaultNotUpdated',
-    'mergedLocalBehind',
+    'localDefaultNotUpdated',
+    'mergedLocalNotUpdated',
   ),
-  'awaitBossReply.on.BOSS_REPLY': [
-    {
-      guard: 'emptyBossReply',
-      target: '#failed',
-      context: pendingContext,
-      event: { type: 'BOSS_REPLY', questionId: 'openPullRequest', answer: '  ' },
-    },
-    {
-      guard: 'resumesOpenPullRequest',
-      target: '#openPullRequest',
-      context: pendingContext,
-      event: {
-        type: 'BOSS_REPLY',
-        questionId: 'openPullRequest',
-        answer: 'Use origin.',
-      },
-    },
-  ],
 };
 
 function orderedTransitions(
@@ -273,6 +295,7 @@ function orderedTransitions(
 
 function guardName(guard: unknown): string | undefined {
   if (typeof guard === 'string') return guard;
+  if (typeof guard === 'function') return '<inline>';
   if (!isRecord(guard)) return undefined;
   return typeof guard.type === 'string' ? guard.type : undefined;
 }
@@ -388,12 +411,12 @@ describe('PR FSM transition coverage', () => {
       fixtures.forEach((fixture, index) => {
         const evaluations = arms.slice(0, index + 1).map((arm) => {
           const name = guardName(arm.guard);
-          return name === undefined
-            ? true
-            : guards[name](
-                { context: fixture.context, event: fixture.event },
-                undefined,
-              );
+          const args = { context: fixture.context, event: fixture.event };
+          if (name === undefined) return true;
+          if (name === '<inline>') {
+            return (arm.guard as (value: typeof args) => boolean)(args);
+          }
+          return guards[name](args, undefined);
         });
         expect(evaluations, `${location}[${index}]`).toEqual([
           ...Array.from({ length: index }, () => false),
@@ -437,7 +460,7 @@ describe('PR FSM transition coverage', () => {
       'waitForChecks',
       'fixChecks',
       'publishFix',
-      'waitForChecksAfterFix',
+      'waitForFixChecks',
       'mergePullRequest',
       'updateLocalDefault',
     ]) {
@@ -468,7 +491,7 @@ describe('PR FSM transition coverage', () => {
       workflow.actor,
       (value) => value.status === 'done',
     );
-    expect(snapshot.value).toBe('merged');
+    expect(snapshot.value).toBe('mergedLocalUpdated');
     expect(snapshot.output).toEqual(MERGED_OUTPUT);
     expect(workflow.playerInputs).toHaveLength(1);
     expect(workflow.playerInputs[0]).toMatchObject({
@@ -513,7 +536,7 @@ describe('PR FSM transition coverage', () => {
       workflow.actor,
       (value) => value.status === 'done',
     );
-    expect(snapshot.value).toBe('mergedLocalBehind');
+    expect(snapshot.value).toBe('mergedLocalNotUpdated');
     expect(snapshot.output).toEqual({
       ...MERGED_OUTPUT,
       localDefaultUpdated: false,
@@ -566,7 +589,7 @@ describe('PR FSM transition coverage', () => {
       workflow.actor,
       (value) => value.status === 'done',
     );
-    expect(snapshot.value).toBe('merged');
+    expect(snapshot.value).toBe('mergedLocalUpdated');
     expect(snapshot.output).toEqual(MERGED_OUTPUT);
     expect(workflow.childInputs).toEqual([
       {
@@ -584,7 +607,7 @@ describe('PR FSM transition coverage', () => {
     expect(scriptSequence(workflow.scriptInputs)).toEqual([
       { stateId: 'waitForChecks', sourceItem: 'PR-2' },
       { stateId: 'publishFix', sourceItem: 'PR-4' },
-      { stateId: 'waitForChecksAfterFix', sourceItem: 'PR-5' },
+      { stateId: 'waitForFixChecks', sourceItem: 'PR-5' },
       { stateId: 'mergePullRequest', sourceItem: 'PR-6' },
       { stateId: 'updateLocalDefault', sourceItem: 'PR-7' },
     ]);
@@ -634,7 +657,7 @@ describe('PR FSM transition coverage', () => {
     ]);
   });
 
-  // DR-048: CODE's `reportedReviewFailure` is a declared failure terminal, so
+  // DR-048: CODE's `reviewFailed` is a declared failure terminal, so
   // the bridge rejects this caller's actor with the child's own public
   // result. PR recognizes the failure from that record — never from CODE's
   // output fields — and still relays the child's output.
@@ -644,7 +667,7 @@ describe('PR FSM transition coverage', () => {
       [
         Object.assign(
           new Error(
-            'Child playbook code reached failure terminal reportedReviewFailure',
+            'Child playbook code reached failure terminal reviewFailed',
           ),
           {
             result: {
@@ -653,7 +676,7 @@ describe('PR FSM transition coverage', () => {
               childSessionId: 'child-code-1',
               output: INSUFFICIENT_CODE,
               terminal: {
-                stateId: 'reportedReviewFailure',
+                stateId: 'reviewFailed',
                 kind: 'failure',
                 description: 'CODE reports the review failure.',
               },
@@ -738,7 +761,7 @@ describe('PR FSM transition coverage', () => {
       workflow.actor,
       (value) => value.status === 'done',
     );
-    expect(snapshot.value).toBe('checksStillFailing');
+    expect(snapshot.value).toBe('checksFailed');
     expect(snapshot.output).toEqual({
       status: 'not-merged',
       reason: 'checks-failed',
@@ -749,7 +772,7 @@ describe('PR FSM transition coverage', () => {
     expect(scriptSequence(workflow.scriptInputs)).toEqual([
       { stateId: 'waitForChecks', sourceItem: 'PR-2' },
       { stateId: 'publishFix', sourceItem: 'PR-4' },
-      { stateId: 'waitForChecksAfterFix', sourceItem: 'PR-5' },
+      { stateId: 'waitForFixChecks', sourceItem: 'PR-5' },
     ]);
   });
 
@@ -764,7 +787,7 @@ describe('PR FSM transition coverage', () => {
       workflow.actor,
       (value) => value.status === 'done',
     );
-    expect(snapshot.value).toBe('mergeRefused');
+    expect(snapshot.value).toBe('mergeUnconfirmed');
     // The command ran, so the machine claims neither a merge nor its absence.
     expect(snapshot.output).toEqual({
       status: 'merge-unconfirmed',
@@ -810,7 +833,7 @@ describe('PR FSM transition coverage', () => {
       workflow.actor,
       (value) => value.status === 'done',
     );
-    expect(snapshot.value).toBe('merged');
+    expect(snapshot.value).toBe('mergedLocalUpdated');
     expect(snapshot.output).toEqual(MERGED_OUTPUT);
     expect(workflow.playerInputs).toHaveLength(2);
     expect(workflow.playerInputs[1]?.pendingBossQuestion?.question).toBe(
@@ -833,7 +856,10 @@ describe('PR FSM transition coverage', () => {
       value.matches('failed'),
     );
     expect(snapshot.status).toBe('active');
-    expect(snapshot.context.lastError).toBeInstanceOf(Error);
+    expect(snapshot.context.lastError).toMatchObject({
+      name: 'Error',
+      message: 'bridge failure',
+    });
     expect(snapshot.context.completion).toBeUndefined();
   });
 
@@ -848,8 +874,8 @@ describe('PR FSM transition coverage', () => {
       value.matches('failed'),
     );
     expect(snapshot.status).toBe('active');
-    expect(String(snapshot.context.lastError)).toContain(
-      'Script result for PR-2 did not match a declared outcome.',
+    expect(snapshot.context.lastError?.message).toBe(
+      'Script result did not match its declared outcomes.',
     );
     expect(snapshot.context.completion).toBeUndefined();
   });
@@ -865,7 +891,7 @@ describe('PR FSM transition coverage', () => {
       value.matches('failed'),
     );
     expect(snapshot.status).toBe('active');
-    expect(String(snapshot.context.lastError)).toContain(
+    expect(snapshot.context.lastError?.message).toContain(
       'did not match an available outcome',
     );
     expect(workflow.scriptInputs).toEqual([]);

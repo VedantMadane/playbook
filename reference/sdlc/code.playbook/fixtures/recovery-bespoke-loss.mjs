@@ -16,6 +16,8 @@ import { loadLaunchPlan } from '../bin/launch-config.js';
 
 const [dir, nested, phase] = process.argv.slice(2);
 const acceptanceCancel = nested === 'acceptance-cancel';
+const parallelLoss = nested.startsWith('parallel-');
+const hasParent = nested === 'nested' || nested === 'parallel-nested';
 const sessionId = '96000000-0000-4000-8000-000000000001';
 const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
 let continuing = phase !== 'start';
@@ -33,7 +35,8 @@ class Adapter {
   async *run(prompt, options) {
     let result;
     if (prompt.includes('Boss-input classifier')) result = JSON.stringify(continuing ? { type: 'BOSS_REPLY' } : { type: 'START', text: 'Design task' });
-    else if (acceptanceCancel && prompt.includes('Classify the following Boss message')) result = '{"type":"START"}';
+    else if (prompt.includes('Classify the following Boss message')) result = JSON.stringify(acceptanceCancel ? { type: 'START' } : { type: 'BOSS_REPLY' });
+    else if (prompt.includes('Check whether existing instructions')) result = '{"instructionIndex":null}';
     else if (prompt.includes('Select exactly one action')) result = '{"action":"deliver"}';
     else if (prompt.includes('An action just settled')) result = 'The work is saved. Check the next step.';
     else if (prompt.includes('hidden-control judge')) result = JSON.stringify({ guard: prompt.includes('NEED_CHOICE') ? 'needsBossReply' : prompt.includes('DECIDE-3') ? 'committed' : 'proposed' });
@@ -43,6 +46,10 @@ class Adapter {
         host.host.abortActiveTurn('Cancel the first DECIDE proposal after input acceptance');
         assert(options.signal.aborted, 'the active proposal must observe cancellation');
         throw new Error('proposal cancelled after DECIDE accepted its input');
+      }
+      if (parallelLoss && options.model === 'coder-model') {
+        await writeFile(join(dir, 'design.md'), 'Work made before the host stopped.'); git('add', 'design.md'); git('commit', '-qm', 'interrupted proposal');
+        process.kill(process.pid, 'SIGKILL');
       }
       if (prompt.includes('Synthesize your independent proposal')) {
         await writeFile(join(dir, 'design.md'), 'A small design.'); git('add', 'design.md'); git('commit', '-qm', 'design'); result = 'Committed ' + git('rev-parse', 'HEAD');
@@ -82,8 +89,8 @@ if (phase === 'start') {
     console.log(JSON.stringify({ settled: true }));
     process.exit(0);
   }
-  const saved = await host.handleBossTurn(nested === 'nested' ? '/outer Design task' : '/decide Design task');
-  assert.equal(saved.snapshot.frames.length, nested === 'nested' ? 2 : 1);
+  const saved = await host.handleBossTurn(hasParent ? '/outer Design task' : '/decide Design task');
+  assert.equal(saved.snapshot.frames.length, hasParent ? 2 : 1);
   assert(saved.snapshot.frames.at(-1).runtime.pendingBossQuestions.length > 0, JSON.stringify(saved.snapshot));
   continuing = true;
   await host.handleBossTurn('Use the small design.');
@@ -91,8 +98,19 @@ if (phase === 'start') {
 }
 const calls = await readFile(join(dir, 'calls'), 'utf8');
 const recovered = await host.recover();
-assert.equal(recovered.snapshot.mode, 'chat');
-assert.equal(recovered.unresolvedEffects[0].commitOid, git('rev-parse', 'HEAD'));
+if (parallelLoss) {
+  assert.equal(recovered.snapshot.mode, 'chat');
+  assert.equal(recovered.unresolvedEffects[0].afterHead, git('rev-parse', 'HEAD'));
+  assert.equal(recovered.unresolvedEffects[0].classification, 'observation-ambiguous');
+} else {
+  assert.equal(recovered.snapshot.mode, 'engaged.parked');
+  assert.deepEqual(recovered.snapshot.frames.map((frame) => frame.playbookId), hasParent ? ['outer', 'decide'] : ['decide']);
+  const leaf = recovered.snapshot.frames.at(-1).runtime;
+  assert.equal(leaf.recoveryCheckpoint.stateId, 'synthesizeCommit');
+  assert.equal(leaf.recoveryCheckpoint.machine.context.coderProposal, 'A small complete proposal.');
+  assert.equal(leaf.recoveryCheckpoint.machine.context.reviewerProposal, 'A small complete proposal.');
+  assert.equal(recovered.effectLedger.boundaries.at(-1).physicalReceipt.after.head, git('rev-parse', 'HEAD'));
+}
 assert.equal(await readFile(join(dir, 'calls'), 'utf8'), calls);
 assert.equal(git('rev-list', '--count', 'HEAD'), '2');
 await host.dispose();

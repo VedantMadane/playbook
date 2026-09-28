@@ -57,7 +57,7 @@ Captain shall append the round’s context in quotes (`>`):
 > Original request: <caller-input>
 > Coder output: <coder-output>
 
-At the start of *every* review round, Captain shall relay to Reviewer the original intent, the review scope and context, the exact repository revision being evaluated, any Coder feedback from the preceding round, and any relevant run results, in quotes (`>`) after the instruction.
+At the start of *every* review round, Captain shall relay to Reviewer the original intent, the review scope and context, any Coder feedback from the preceding round, and any relevant run results, in quotes (`>`) after the instruction.
 
 At the start of *every* review round, Captain shall append the following instruction to the end of the prompt:
 
@@ -83,7 +83,7 @@ Consult @specs/meta.md for spec requirements if needed; verify affected specs fo
 Finding numbers are references within this review only.
 No review transition shall depend on numbering or any fixed presentation format of either player's reply.
 
-When Reviewer raises or keeps any finding, Captain shall relay the original intent, the review scope and context, the exact repository revision being evaluated, the Reviewer's findings, and any relevant run results to Coder, in quotes (`>`), along with the following prompt:
+When Reviewer raises or keeps any finding, Captain shall relay the original intent, the review scope and context, the Reviewer's findings, and any relevant run results to Coder, in quotes (`>`), along with the following prompt:
 
 > Original request: <caller-input>
 > Reviewer findings: <reviewer-output>
@@ -109,7 +109,7 @@ Report every disposition, all relevant run results, and every rebuttal.
 
 Captain shall use the repository-effect receipt as the authoritative identity of any review-fix commit.
 
-When Coder makes a new commit or decides to reject all findings, Captain shall relay the above required context to Reviewer and begin the next review round.
+When Coder makes a new commit or decides to reject all findings, Captain shall relay the round's context above to Reviewer and begin the next review round.
 Reviewer shall read the context information and follow the corresponding instructions.
 Rounds continue until Reviewer affirmatively reports that the requested review is complete and no unsettled findings remain.
 A progress report, status update, or promise of a later result supports no review outcome.

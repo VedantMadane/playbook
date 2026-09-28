@@ -34,6 +34,45 @@ export const fixtureMachine = setup({ actors: { script: fromPromise(async () => 
 });\n`;
 }
 
+// The compiled parallel shape of slc/gears2fsm.md: one root parallel state
+// whose regions each hold a player-invoking working leaf, a Boss-reply wait
+// leaf, and a final leaf, each leaf keyed locally under a stable state id.
+function parallelFixture(): string {
+  return `import { assign, fromPromise, setup } from 'xstate';
+export const concurrentRoleSets = [['coder', 'reviewer']];
+const meta = (stateId, extra = {}) => ({ playbook: { stateId, description: 'Exact ' + stateId + ' description.', ...extra } });
+const region = (role, working, waiting, complete) => ({ initial: 'working', states: {
+  working: { id: working, tags: ['playbook.busy'], meta: meta(working, { role }), invoke: {
+    src: 'player', input: ({ context }) => ({ stateId: working, sourceItem: 'FIXTURE-1', role, prompt: 'Propose <boss-intent>.', bossIntent: context.bossIntent, result: { proposed: 'Proposed.', needsBossReply: 'Output shall include question.' } }),
+    onDone: 'complete', onError: '#failed'
+  } },
+  waiting: { id: waiting, tags: ['playbook.parked'], meta: meta(waiting), on: { BOSS_REPLY: { target: 'working' } } },
+  complete: { type: 'final', meta: meta(complete) },
+} });
+export const fixtureMachine = setup({ actors: { player: fromPromise(async () => ({})) } }).createMachine({
+  id: 'fixture', initial: 'ready', context: () => ({ bossIntent: '' }),
+  states: {
+    ready: { id: 'ready', tags: ['playbook.parked'], meta: meta('ready'), on: { BOSS_TASK: { target: 'proposals', actions: assign({ bossIntent: ({ event }) => event.bossIntent }) } } },
+    proposals: { id: 'proposals', type: 'parallel', meta: meta('proposals'), states: {
+      coder: region('coder', 'askCoder', 'waitCoder', 'coderComplete'),
+      reviewer: region('reviewer', 'askReviewer', 'waitReviewer', 'reviewerComplete'),
+    }, onDone: 'done' },
+    failed: { id: 'failed', tags: ['playbook.parked'], meta: meta('failed') },
+    done: { id: 'done', type: 'final', meta: meta('done', { terminal: 'success' }) }
+  }
+});\n`;
+}
+
+function parallelDescriptor(profile: string): Record<string, any> {
+  const outcomes = { proposed: { fields: {}, repositoryDisposition: 'unchanged' }, needsBossReply: { fields: { question: 'presentation' }, repositoryDisposition: 'unchanged' } };
+  return {
+    ...descriptor(), profile, options: {}, inputMapping: {},
+    outcomeAuthority: { governedPlayerStates: { askCoder: outcomes, askReviewer: outcomes } },
+    resumableStateIds: ['askCoder', 'askReviewer'],
+    ...(profile === 'flat-labelled-relays' ? { playerInputExport: 'PlayerInput', omitEmptyRelayLines: [], identityPlaceholders: {} } : {}),
+  };
+}
+
 function descriptor(player = true): Record<string, any> {
   return {
     schema: 'sublang.playbook.link.v1', profile: 'flat-defaults', machineExport: 'fixtureMachine', label: 'FIXTURE',
@@ -93,6 +132,7 @@ describe('optional link materialization integration', () => {
       import { resumableStateIdsFromMachine } from '@sublang/playbook/xstate-runtime';
       assert.deepEqual([...resumableStateIdsFromMachine(fixtureMachine)], ['work']);
       assert.deepEqual([..._internal.RESUMABLE_STATE_IDS], ['work']);
+      assert.deepEqual([..._internal.VERBATIM_PAYLOAD_FIELDS], [])
     `);
     const accepted = readFileSync(out, 'utf8');
     const incomplete = descriptor();
@@ -231,7 +271,12 @@ void missing;
       assert.equal(readFileSync(${JSON.stringify(out)}, 'utf8'), expected
         .replace('function snapshotOptions(value: unknown)', 'export function validateOptions(value: unknown)')
         .replace('snapshotJsonValue(value,', 'snapshotJsonValue(value === undefined ? {} : value,')
-        .replace('  snapshotOptions,', '  snapshotOptions: validateOptions,'));
+        .replace('  snapshotOptions,', '  snapshotOptions: validateOptions,')
+        // The verbatim field set is declared once and exposed for the
+        // linked-ownership check, as the maintained modules do.
+        .replace('const UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string> = new Set([]);\\n', 'const UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string> = new Set([]);\\nconst VERBATIM_PAYLOAD_FIELDS: ReadonlySet<string> = new Set([]);\\n')
+        .replace('  verbatimPayloadFields: new Set<string>([]),', '  verbatimPayloadFields: VERBATIM_PAYLOAD_FIELDS,')
+        .replace('  UNFINISHED_FINAL_STATE_IDS,\\n};', '  UNFINISHED_FINAL_STATE_IDS,\\n  VERBATIM_PAYLOAD_FIELDS,\\n};'));
     `);
   });
 
@@ -331,10 +376,78 @@ void missing;
     expect(readFileSync(out, 'utf8')).toBe('existing target\n');
   });
 
-  it.each(['profile', 'parallel', 'compound', 'captain', 'playbook', 'option'])('refuses unsupported %s and preserves the target', (mode) => {
+  it('emits a declared .js FSM specifier from a TypeScript FSM and rejects one naming another sibling', () => {
+    if (!(process.features as { typescript?: unknown }).typescript) return;
+    fsm = join(root, 'native.fsm.ts');
+    writeFileSync(fsm, fixture());
+    // Inside a package that ships JavaScript siblings, the module must import
+    // the build's `.js` file, which does not exist at link time.
+    const accepted = emit({ ...descriptor(), fsmSpecifier: './native.fsm.js' });
+    expect(accepted.status, accepted.stderr).toBe(0);
+    const emitted = readFileSync(out, 'utf8');
+    expect(emitted).toContain('import { fixtureMachine as machine } from "./native.fsm.js";');
+    expect(emitted).not.toContain('native.fsm.ts');
+    for (const wrong of ['./other.fsm.js', './nested/native.fsm.js', './native.fsm.ts', 'native.fsm.js']) {
+      writeFileSync(out, 'existing target\n');
+      const result = emit({ ...descriptor(), fsmSpecifier: wrong });
+      expect(result.status, `${wrong}: ${result.stderr}`).toBe(1);
+      expect(JSON.parse(result.stderr).status).toBe('error');
+      expect(readFileSync(out, 'utf8')).toBe('existing target\n');
+    }
+  });
+
+  it.each(['flat-defaults', 'flat-quoted-relays', 'flat-labelled-relays'])('emits a compiled root parallel state under %s and constructs it with the shared engine', (profile) => {
+    const source = parallelFixture();
+    writeFileSync(fsm, source);
+    const result = emit(parallelDescriptor(profile));
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(fsm, 'utf8')).toBe(source);
+    const generated = readFileSync(out, 'utf8');
+    // Region working leaves are role states under their stable ids, not their
+    // shared local key; the FSM's cohort declaration is left to the engine.
+    for (const [stateId, role] of [['askCoder', 'coder'], ['askReviewer', 'reviewer']]) {
+      expect(generated).toContain(`"${stateId}": {\n      "role": "${role}",\n      "label": "Exact ${stateId} description."\n    }`);
+    }
+    expect(generated).not.toContain('"working"');
+    expect(generated).not.toContain('concurrentRoleSets');
+    execute(`
+      import assert from 'node:assert/strict';
+      import createRuntime, { _internal } from ${JSON.stringify(pathToFileURL(out).href)};
+      import { emptyPlaybookEffectLedger } from '@sublang/playbook/xstate-runtime';
+      assert.deepEqual([..._internal.RESUMABLE_STATE_IDS], ['askCoder', 'askReviewer']);
+      const forbid = () => { throw new Error('unexpected host effect'); };
+      const runtime = createRuntime({ configuredOptions: {}, hostCapabilities: { authority: { concurrentRoleSets: [['coder', 'reviewer']] }, repository: { runExclusive: forbid, runDeferred: forbid, runCohort: forbid }, effectLedger: { snapshot: emptyPlaybookEffectLedger, writeAhead: forbid } } });
+      await runtime.init({ sessionId: 'fixture-session', playbookId: 'fixture', rootSessionId: 'fixture-session', depth: 0,
+        roleBindings: { coder: { playerId: 'fixture.coder', promptIdentity: 'Fixture Coder' }, reviewer: { playerId: 'fixture.reviewer', promptIdentity: 'Fixture Reviewer' } },
+        ports: { callPlayer: forbid, callCaptain: forbid, callJudge: forbid, callPlaybook: forbid, emitStatus: async () => {}, emitTelemetry: async () => {} } });
+      assert.equal(runtime.exportSnapshot().machine.value, 'ready');
+      await runtime.dispose();
+    `);
+  });
+
+  it.each(['wait', 'region'])('refuses a malformed parallel state (missing %s) through factory preflight', (mode) => {
+    const source = mode === 'wait'
+      ? parallelFixture().replace("  waiting: { id: waiting, tags: ['playbook.parked'], meta: meta(waiting), on: { BOSS_REPLY: { target: 'working' } } },\n", '')
+      : parallelFixture().replace("      reviewer: region('reviewer', 'askReviewer', 'waitReviewer', 'reviewerComplete'),\n", '');
+    expect(source).not.toBe(parallelFixture());
+    writeFileSync(fsm, source);
+    writeFileSync(out, 'existing target\n');
+    const value = parallelDescriptor('flat-defaults');
+    if (mode === 'region') {
+      delete value.outcomeAuthority.governedPlayerStates.askReviewer;
+      value.resumableStateIds = ['askCoder'];
+    }
+    const result = emit(value);
+    expect(result.status, result.stderr).toBe(1);
+    expect(JSON.parse(result.stderr)).toMatchObject({ status: 'error', message: expect.stringContaining('is not the compiled parallel shape') });
+    expect(readFileSync(out, 'utf8')).toBe('existing target\n');
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it.each(['profile', 'parallel machine root', 'compound', 'captain', 'playbook', 'option'])('refuses unsupported %s and preserves the target', (mode) => {
     const value = descriptor();
     if (mode === 'profile') value.profile = 'custom-strategies';
-    if (mode === 'parallel') writeFileSync(fsm, fixture().replace("id: 'fixture', initial:", "id: 'fixture', type: 'parallel', initial:"));
+    if (mode === 'parallel machine root') writeFileSync(fsm, fixture().replace("id: 'fixture', initial:", "id: 'fixture', type: 'parallel', initial:"));
     if (mode === 'compound') writeFileSync(fsm, fixture().replace("failed: { id: 'failed',", "failed: { id: 'failed', initial: 'child', states: { child: {} },"));
     if (mode === 'captain' || mode === 'playbook') writeFileSync(fsm, fixture(true, mode));
     if (mode === 'option') value.options.enabled.type = 'object';

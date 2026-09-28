@@ -113,11 +113,14 @@ function enumerateInvokingStates<Input extends ActorInput>(
     if (invoke?.src !== src || invoke.input === undefined) return [];
     const getInput = (context: PrContext): Input =>
       invoke.input?.({ context }) as Input;
-    const input = getInput(EMPTY_CONTEXT);
+    const { sourceItem } = getInput(EMPTY_CONTEXT);
+    if (sourceItem === undefined) {
+      throw new Error(`PR state ${stateId} invokes ${src} without a sourceItem`);
+    }
     return [
       {
         stateId,
-        sourceItem: input.sourceItem,
+        sourceItem,
         getInput,
         transitions: transitions(invoke.onDone),
       },

@@ -1,14 +1,14 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai> -->
 
-# DR-069: Settle lost progress in the shared host
+# DR-072: Settle lost progress in the shared host
 
 ## Status
 
-Amended by [DR-070](070-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice.
+Amended by [DR-073](073-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice.
 
-Superseded by DR-070 except for the unsupported-position exit, cancellation cleanup, and child-retention rules below.
-Amends [DR-068](068-interrupted-continuation-settlement.md), [DR-066](066-captain-prepares-step-recovery.md), and [DR-040](040-outcome-authority-effect-reconciliation.md).
+Superseded by DR-073 except for the unsupported-position exit, cancellation cleanup, and child-retention rules below.
+Amends [DR-071](071-interrupted-continuation-settlement.md), [DR-069](069-captain-prepares-step-recovery.md), and [DR-040](040-outcome-authority-effect-reconciliation.md).
 
 ## Context
 
@@ -18,7 +18,7 @@ A saved result also needs its pending retention changes and reports, not only it
 
 ## Decision
 
-The saved-selection and whole-turn replay bullets below describe the former protocol; DR-070 replaces them.
+The saved-selection and whole-turn replay bullets below describe the former protocol; DR-073 replaces them.
 
 - The shared host owns the lost-progress decision defined by [[recovery-27](../packages/recovery.md#recovery-27)]; a lost position is never replaced with an invented runtime position or source identity.
 - An explicit uncertain retry with unrepresentable later work settles a failed attempt in chat, preserving all files, receipts, and ordered unresolved-effect evidence; it runs no player and makes no claim that a workflow completed.
@@ -39,4 +39,4 @@ The saved-selection and whole-turn replay bullets below describe the former prot
 SDK and CLI recovery use the same host decision and need no per-playbook recovery hook.
 A lost machine position cannot resume automatically, but it no longer traps the session or repeats committed work.
 Existing runtime adoption fences retain their original purpose and closed format.
-The unpublished interrupted-turn runtime marker from DR-068 is removed; the runtime ABI is unchanged.
+The unpublished interrupted-turn runtime marker from DR-071 is removed; the runtime ABI is unchanged.

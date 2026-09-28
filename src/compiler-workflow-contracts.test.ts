@@ -15,7 +15,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const types = {
   review: "ReviewOutput",
   decide: "DecideOutput",
-  code: "CodePlaybookOutput",
+  code: "CodeOutput",
   branch: "BranchPlaybookOutput",
   pr: "PrPlaybookOutput",
 };
@@ -198,6 +198,69 @@ it("keeps dependency-interface failures distinct from authored behavioral ambigu
   expect(definition).toContain(
     "still requires the host's source-clarification protocol",
   );
+});
+
+it("holds a builtin compiled under its own id to the catalog's interface", () => {
+  const flat = (file: string) =>
+    readFileSync(join(root, file), "utf8").replace(/\s+/g, " ");
+  const text2gears = flat("slc/text2gears.md");
+  expect(text2gears).toContain("[workflow contracts](workflow-contracts.json)");
+  expect(text2gears).toContain(
+    "the compiled workflow is held to that builtin's declared output interface",
+  );
+  expect(text2gears).toContain(
+    "shall take the interface's property name",
+  );
+  expect(text2gears).toContain(
+    "whether the value is semantic, presentation, or effect-owned, while the commit a call itself creates keeps the canonical `latestCommit`",
+  );
+  expect(text2gears).toContain(
+    "report it as an incompatible compiler input rather than rename or invent",
+  );
+  const gears2fsm = flat("slc/gears2fsm.md");
+  expect(gears2fsm).toContain(
+    "the declared terminal output shall be exactly that builtin's public interface",
+  );
+  expect(gears2fsm).toContain(
+    "reported as an incompatible compiler input under [Nested playbook calls](#nested-playbook-calls) rather than expressed by an invented or renamed outcome",
+  );
+  const sidecar = JSON.parse(
+    readFileSync(join(root, "slc/slc.pin-inputs.json"), "utf8"),
+  );
+  expect(sidecar.closures.text2gears).toContain("workflow-contracts.json");
+
+  // The maintained GEARS already name the returned semantic and presentation
+  // values as the catalog does; a recompile must keep doing so.
+  const declared = (workflow: string): Set<string> => {
+    const gears = readFileSync(
+      join(root, `reference/sdlc/${workflow}.playbook/${workflow}.gears.md`),
+      "utf8",
+    );
+    const names = new Set<string>();
+    for (const line of gears.split("\n")) {
+      const marker = line.indexOf("Output shall include");
+      if (marker === -1) continue;
+      for (const match of line.slice(marker).matchAll(/`([A-Za-z_$][A-Za-z0-9_$]*)(?::|`)/g)) {
+        names.add(match[1]);
+      }
+    }
+    return names;
+  };
+  const returned: Record<string, string[]> = {
+    branch: ["branch", "issueSummary", "coderOutput"],
+    pr: ["pullRequest", "pullRequestUrl", "coderOutput"],
+    review: ["evaluatedRevision"],
+  };
+  for (const [workflow, names] of Object.entries(returned)) {
+    const gears = declared(workflow);
+    for (const name of names) {
+      expect(gears.has(name), `${workflow} declares ${name}`).toBe(true);
+      expect(
+        catalog.workflows[workflow as keyof typeof catalog.workflows].output,
+        `${workflow} interface returns ${name}`,
+      ).toSatisfy((output: unknown) => JSON.stringify(output).includes(`"${name}"`));
+    }
+  }
 });
 
 const compiler = process.env.PLAYBOOK_EXPERIMENT_COMPILER;

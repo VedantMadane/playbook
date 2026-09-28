@@ -31,11 +31,24 @@ class DecideAdapter {
       prompt.includes('An action just settled for the current Boss turn')
     )
       text = 'The player is waiting for your answer.';
-    else if (prompt.includes('Boss-input classifier'))
-      text = '{"type":"BOSS_REPLY","questionId":"commitCoderProposal"}';
+    else if (
+      prompt.includes(
+        'Check whether existing instructions already answer every pending player question.',
+      )
+    )
+      text = 'null';
+    else if (
+      prompt.startsWith('You are Captain preparing an interrupted playbook')
+    )
+      text = JSON.stringify({
+        status: 'blocked',
+        summary: 'Boss must approve the checkpoint.',
+      });
+    else if (prompt.includes('Classify the following Boss message'))
+      text = '{"type":"BOSS_REPLY"}';
     else if (prompt.includes('This is hidden control work.'))
       text = JSON.stringify({
-        guard: prompt.includes('source item DECIDE-3')
+        guard: prompt.includes('Approve checkpoint ')
           ? 'needsBossReply'
           : 'proposed',
       });

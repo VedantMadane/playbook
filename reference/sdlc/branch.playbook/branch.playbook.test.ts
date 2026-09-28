@@ -35,9 +35,9 @@ const BRANCHED_REPLY = {
   issueSummary: ISSUE_SUMMARY,
 } as const;
 const BRANCHED_DESCRIPTION =
-  "A new branch for the request is checked out at the caller's current commit; no file changed and no commit was made.";
+  'A new branch for the request was created at the current commit and checked out; the workflow returns its exact name, the exact base revision taken from repository authority, and the issue summary.';
 const REFUSED_DESCRIPTION =
-  'No branch was created: Coder reported the obstacle with its reason — a dirty working tree, an unauthenticated `gh`, an unreadable issue, or a branch-name collision.';
+  "No branch was created: Coder reported the failure with its reason, and the workflow fails and reports Coder's complete result to its caller.";
 
 type RepositoryEffect = 'unchanged' | 'branch' | 'commit' | 'worktree';
 
@@ -408,7 +408,7 @@ describe('linked BRANCH runtime', () => {
       // the effect-owned base revision is named as runtime-supplied.
       expect(host.judgePrompts).toHaveLength(1);
       expect(host.judgePrompts[0]).toContain(
-        '{ "guard": "branched", "branch": <exact branch name>, "issueSummary": <concise summary> }',
+        '{ "guard": "branched", "branch": <exact branch name>, "issueSummary": <concise summary of the issue and its comments, or of the request when no issue is named> }',
       );
       expect(host.judgePrompts[0]).toContain('`baseRevision` (effect-owned)');
       expect(host.judgePrompts[0]).toContain('`coderOutput` (presentation-owned)');
@@ -688,4 +688,74 @@ describe('linked BRANCH runtime', () => {
     expect(runtime.describe!().lastError).toBeUndefined();
     await runtime.dispose();
   });
+
+  // DR-063: the compiled machine keeps a JSON-safe `{ name, message }`
+  // record as its `lastError`, not the value the Coder's call threw, and the
+  // runtime still publishes the cause it decided for that failure.
+  it.each([
+    ['a rejected Coder port', 'reject'],
+    ['a non-`ok` Coder result', 'error'],
+  ] as const)(
+    'publishes %s as `player-failed` naming the Coder role and its player',
+    async (_label, failure) => {
+      const host = await harness();
+      const failedStatusData: unknown[] = [];
+      const ports: PlaybookPorts = {
+        ...host.ports,
+        async callPlayer() {
+          if (failure === 'reject') throw new Error('coder is down');
+          return { status: 'error', error: 'coder is down' };
+        },
+        async emitStatus(message, data) {
+          host.statuses.push(message);
+          if (message.startsWith('◆ workflow failed')) failedStatusData.push(data);
+        },
+      };
+      const runtime = linkedRuntime(host);
+      await runtime.init(rootSession(ports));
+
+      const settled = await runtime
+        .handleBossInput({
+          text: 'Fix #12.',
+          signal: new AbortController().signal,
+        })
+        .then(
+          (result) => ({ result }),
+          (rejection: unknown) => ({ rejection }),
+        );
+
+      const cause = {
+        code: 'player-failed',
+        evidence: {
+          roleId: 'coder',
+          playerId: 'dev.coder',
+          error: { name: 'Error', message: 'coder is down' },
+        },
+      };
+      // A thrown port is a control-plane error, so that boundary rejects; a
+      // non-`ok` result settles `failed` and carries the cause itself.
+      if (failure === 'reject') {
+        expect(settled).toMatchObject({
+          rejection: { message: 'coder is down' },
+        });
+      } else {
+        expect(settled).toMatchObject({
+          result: { outcome: 'failed', error: { cause } },
+        });
+      }
+      const view = runtime.describe!();
+      expect(view.state.stateId).toBe('failed');
+      expect(view.lastError).toMatchObject({
+        name: 'Error',
+        message: 'coder is down',
+        cause,
+      });
+      expect(failedStatusData).toMatchObject([{ lastError: { cause } }]);
+      const snapshot = runtime.exportSnapshot!()!;
+      expect(snapshot.machine).toMatchObject({
+        context: { lastError: { name: 'Error', message: 'coder is down', cause } },
+      });
+      await runtime.dispose();
+    },
+  );
 });

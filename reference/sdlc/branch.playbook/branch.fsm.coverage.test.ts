@@ -106,13 +106,7 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
   ],
   'awaitBossReply.on.BOSS_REPLY': [
     {
-      guard: 'emptyBossReply',
-      target: '#failed',
-      context: pendingContext,
-      event: { type: 'BOSS_REPLY', questionId: 'createBranch', answer: '  ' },
-    },
-    {
-      guard: 'resumesCreateBranch',
+      guard: 'canResume',
       target: '#createBranch',
       context: pendingContext,
       event: {
@@ -120,6 +114,14 @@ const transitionFixtures: Record<string, readonly TransitionFixture[]> = {
         questionId: 'createBranch',
         answer: 'Issue #12.',
       },
+    },
+    {
+      // An empty answer resumes nothing and falls through to the malformed
+      // Boss-reply park.
+      guard: '<fallback>',
+      target: 'failed',
+      context: pendingContext,
+      event: { type: 'BOSS_REPLY', questionId: 'createBranch', answer: '  ' },
     },
   ],
 };
@@ -156,6 +158,10 @@ function guardName(guard: unknown): string | undefined {
   if (typeof guard === 'string') return guard;
   if (!isRecord(guard)) return undefined;
   return typeof guard.type === 'string' ? guard.type : undefined;
+}
+
+function guardParams(guard: unknown): unknown {
+  return isRecord(guard) ? guard.params : undefined;
 }
 
 function transitionActions(transition: RawTransition): readonly unknown[] {
@@ -233,7 +239,7 @@ describe('BRANCH FSM transition coverage', () => {
             ? true
             : guards[name](
                 { context: fixture.context, event: fixture.event },
-                undefined,
+                guardParams(arm.guard),
               );
         });
         expect(evaluations, `${location}[${index}]`).toEqual([
@@ -381,7 +387,7 @@ describe('BRANCH FSM transition coverage', () => {
       value.matches('failed'),
     );
     expect(snapshot.status).toBe('active');
-    expect(String(snapshot.context.lastError)).toContain('empty answer');
+    expect(snapshot.context.lastError?.message).toContain('empty answer');
     expect(snapshot.context.pendingBossQuestion).toBeUndefined();
     expect(workflow.playerInputs).toHaveLength(1);
   });
@@ -395,8 +401,8 @@ describe('BRANCH FSM transition coverage', () => {
       value.matches('failed'),
     );
     expect(snapshot.status).toBe('active');
-    expect(String(snapshot.context.lastError)).toContain(
-      'did not match an available outcome',
+    expect(snapshot.context.lastError?.message).toContain(
+      'did not satisfy a declared outcome',
     );
     expect(snapshot.context.completion).toBeUndefined();
   });
@@ -408,7 +414,10 @@ describe('BRANCH FSM transition coverage', () => {
       value.matches('failed'),
     );
     expect(failed.status).toBe('active');
-    expect(failed.context.lastError).toBeInstanceOf(Error);
+    expect(failed.context.lastError).toMatchObject({
+      name: 'Error',
+      message: 'coder transport failed',
+    });
     workflow.actor.send({ type: 'START_BRANCH', callerInput: 'Fix #12 again.' });
     const snapshot = await waitFor(
       workflow.actor,

@@ -10,7 +10,11 @@ import {
   parseGearsContract,
   verbatimFieldsFromGears,
 } from '../../../scripts/check-slc-source-gears.mjs';
-import { branchMachine, type BranchContext } from './branch.fsm.js';
+import {
+  branchMachine,
+  concurrentRoleSets,
+  type BranchContext,
+} from './branch.fsm.js';
 import {
   enumeratePlayerStates,
   enumerateRootEvents,
@@ -84,6 +88,7 @@ describe('BRANCH Source, GEARS, and FSM agreement', () => {
     expect(gearsText).toContain('Roles:\n\n- Coder\n');
     expect(branchRegistry.requiredRoleIds).toEqual(['coder']);
     expect(branchRegistry.concurrentRoleSets).toEqual([]);
+    expect(concurrentRoleSets).toEqual(branchRegistry.concurrentRoleSets);
     expect(branchRegistry.artifactSchema).toBe(3);
     expect(branchRegistry.runtimeProfile).toEqual({
       kind: 'shared-factory',
@@ -123,19 +128,46 @@ describe('BRANCH Source, GEARS, and FSM agreement', () => {
     ]) {
       expect(source).toContain(clause);
     }
+    // Each authored outcome is carried by BRANCH-1: the shared conditions in
+    // its Where clause and each semantic outcome's return in its result.
+    for (const carried of [
+      "Where every outcome keeps the repository exact, so that a new branch at the current commit changes neither HEAD's commit nor the working tree",
+      "where Captain takes the base revision from repository authority rather than from Coder's prose",
+      "where each outcome requires affirmative support in Coder's result and depends on no fixed presentation format of Coder's reply",
+      "where Boss's answer to Coder's question about which issue or work the request means resumes this same behavior with that answer as continuation context",
+      'the absence of a reported obstacle is not support.',
+      'The branch workflow is then complete and returns the exact branch name, the exact base revision taken from repository authority, and the issue summary to its caller.',
+      "The branch workflow then fails and reports Coder's complete result with its reason to its caller; no branch was created.",
+    ]) {
+      expect(gearsText).toContain(carried);
+    }
     const item = byId.get('BRANCH-1');
     expect(item?.results.map(({ guard }) => guard)).toEqual([
       'branched',
       'refused',
     ]);
-    expect(item?.prompt[0]).toBe('> Original request: <caller-input>');
+    // DR-065: the prefix pass moved the relayed request after the last
+    // instruction line; the layout itself records that rewrite.
+    expect(item?.prompt[0]).toBe(
+      'Prepare a new branch for this work without changing any file or making any commit.',
+    );
+    const prompt = item?.prompt ?? [];
+    const firstRelay = prompt.findIndex((line) => line.startsWith('> '));
+    expect(prompt[firstRelay - 1]).toBe('');
+    expect(prompt.slice(firstRelay)).toEqual(['> Original request: <caller-input>']);
+    expect(prompt.slice(0, firstRelay).some((line) => line.startsWith('> '))).toBe(false);
+    expect(gearsText).not.toMatch(/^## Prefixed prompts$/m);
     // The base revision is annotated as a repository revision, not verbatim
     // player text: it is receipt-owned effect evidence (DR-045).
-    expect(gearsText).toContain('`baseRevision: <repository revision>`');
+    expect(gearsText).toContain(
+      "`baseRevision: <exact base revision from repository authority, not from Coder's prose>`",
+    );
     expect(gearsText).not.toContain('`baseRevision: <verbatim final text>`');
     expect(gearsText).toContain('`coderOutput: <verbatim final text>`');
     expect(gearsText).toContain('`branch: <exact branch name>`');
-    expect(gearsText).toContain('`issueSummary: <concise summary>`');
+    expect(gearsText).toContain(
+      '`issueSummary: <concise summary of the issue and its comments, or of the request when no issue is named>`',
+    );
     expect(gearsText).not.toContain('Captain shall run:');
     expect(gearsText).not.toContain('## Optimizations');
   });
@@ -206,7 +238,7 @@ describe('BRANCH Source, GEARS, and FSM agreement', () => {
           completion: 'branched',
         },
       }),
-    ).toThrow(/receipt-observed base revision/);
+    ).toThrow(/without the exact branch name, base revision, and issue summary/);
     expect(() => output({ context: { callerInput: 'Fix #12.' } })).toThrow(
       /without a recorded completion/,
     );
@@ -249,7 +281,7 @@ describe('BRANCH Source, GEARS, and FSM agreement', () => {
       entering.get('refused')?.map((actions) => actions.includes('rememberRefused')),
     ).toEqual([true]);
     expect(states.branched?.description).toContain('checked out');
-    expect(states.branched?.description).toContain('no commit was made');
+    expect(states.branched?.description).toContain('at the current commit');
     expect(states.refused?.description).toContain('No branch was created');
     expect(states.refused?.description).not.toContain('checked out');
   });

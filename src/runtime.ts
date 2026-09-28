@@ -780,7 +780,7 @@ export interface PlaybookRuntimeSnapshot {
     readonly boundaryPrefix: number;
     readonly attemptId: string | null;
   };
-  /** Interrupted invocation, captured before its external call (DR-066). */
+  /** Interrupted invocation, captured before its external call (DR-069). */
   recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
   suspendedCall?: PlaybookSuspendedCall;
 }

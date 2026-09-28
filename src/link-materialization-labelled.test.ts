@@ -35,12 +35,16 @@ function literal(node: ts.Node): any {
   if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
   throw new Error('fixture metadata is not JSON literal');
 }
-function fixture(name: 'code' | 'dev') {
+function fixture(name: 'code' | 'dev' | 'decide', specific: Record<string, unknown>) {
   const originalDir = join(packageRoot, `reference/sdlc/${name}.playbook`);
   const module = ts.createSourceFile('fixture.ts', readFileSync(join(originalDir, `${name}.playbook.ts`), 'utf8'), ts.ScriptTarget.Latest, true);
   const declaration = module.statements.flatMap((s) => ts.isVariableStatement(s) ? [...s.declarationList.declarations] : []).find((d) => d.name.getText(module) === 'runtimeSpec')!;
   const spec = (declaration.initializer as ts.SatisfiesExpression).expression as ts.ObjectLiteralExpression;
-  const member = (key: string) => literal((spec.properties.find((p) => p.name?.getText(module) === key) as ts.PropertyAssignment).initializer);
+  // A materializer-emitted module carries its literal metadata in one spread
+  // object literal with quoted keys; a hand-linked one names each member.
+  const properties = spec.properties.flatMap((p) => ts.isSpreadAssignment(p) && ts.isObjectLiteralExpression(p.expression) ? [...p.expression.properties] : [p]);
+  const nameOf = (p: ts.ObjectLiteralElementLike) => p.name !== undefined && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : undefined;
+  const member = (key: string) => literal((properties.find((p) => nameOf(p) === key) as ts.PropertyAssignment).initializer);
   // Execute the compiled input on every supported Node version; its unchanged
   // TypeScript sibling supplies the erased player-input type to strict checks.
   const typedSource = readFileSync(join(originalDir, `${name}.fsm.ts`), 'utf8');
@@ -52,25 +56,41 @@ function fixture(name: 'code' | 'dev') {
   writeFileSync(fsm, source);
   const output = join(root, `${name}.playbook.ts`);
   const descriptor: Record<string, any> = {
-    schema: 'sublang.playbook.link.v1', profile: 'flat-labelled-relays',
-    machineExport: name === 'code' ? 'codingMachine' : 'devMachine', label: name.toUpperCase(),
-    options: { runResults: { type: 'string', required: false } }, inputMapping: { runResults: 'runResults' },
+    schema: 'sublang.playbook.link.v1', profile: 'flat-labelled-relays', label: name.toUpperCase(),
     entryEvent: member('entryEvent'), bossEvents: [], outcomeAuthority: member('outcomeAuthority'),
     placeholderFields: {}, transitionEventFields: member('transitionEventFields'),
-    verbatimPayloadFields: [name === 'code' ? 'coderOutput' : 'planningResult'],
-    resumableStateIds: name === 'code' ? ['runFirstPhase', 'runIrTask'] : ['planAnalysis'],
-    unfinishedFinalStateIds: [name === 'code' ? 'reportedReviewFailure' : 'reportedChildFailure'],
     controlContextFields: member('controlContextFields'), playerInputExport: 'PlayerInput',
-    omitEmptyRelayLines: ['> Run results: <run-results>', ...(name === 'dev' ? ['> Prior discussion: <discussion-context>'] : [])],
-    identityPlaceholders: name === 'code' ? { 'coder-llm': 'coder' } : {},
+    ...specific,
   };
   const emit = (value = descriptor) => spawnSync(process.execPath, [join(packageRoot, 'slc/materialize-link.mjs'), '--fsm', fsm, '--out', output], { cwd: root, input: JSON.stringify(value), encoding: 'utf8' });
   return { originalDir, fsm, source, output, descriptor, emit };
 }
-const code = fixture('code');
-const dev = fixture('dev');
+const runResults = { options: { runResults: { type: 'string', required: false } }, inputMapping: { runResults: 'runResults' } };
+const code = fixture('code', {
+  machineExport: 'codeMachine', ...runResults, verbatimPayloadFields: ['coderOutput'],
+  resumableStateIds: ['firstPhase', 'irTaskPhase'], unfinishedFinalStateIds: ['reviewFailed'],
+  omitEmptyRelayLines: ['> Run results: <run-results>'], identityPlaceholders: { 'coder-llm': 'coder' },
+});
+const dev = fixture('dev', {
+  machineExport: 'devMachine', ...runResults, verbatimPayloadFields: ['planningResult'],
+  resumableStateIds: ['planAnalysis'], unfinishedFinalStateIds: ['reportedChildFailure'],
+  omitEmptyRelayLines: ['> Run results: <run-results>', '> Prior discussion: <discussion-context>'], identityPlaceholders: {},
+});
+// DECIDE's FSM carries a root parallel group of the compiled shape; its region
+// working leaves are role states and resume through their own wait leaves.
+const decide = fixture('decide', {
+  machineExport: 'decideMachine', options: {}, inputMapping: {},
+  bossEvents: [{ type: 'BOSS_INTERRUPT', fields: {
+    targetId: { source: 'judge', required: true, values: ['independentProposals', 'synthesizeCommit'] },
+    callerTopic: { source: 'text' },
+  } }],
+  verbatimPayloadFields: ['coderProposal', 'reviewerProposal', 'coderOutput'],
+  resumableStateIds: ['askCoderProposal', 'askReviewerProposal', 'synthesizeCommit'],
+  unfinishedFinalStateIds: ['reportedReviewFailure'], omitEmptyRelayLines: [],
+  identityPlaceholders: { 'coder-llm': 'coder', 'reviewer-llm': 'reviewer' }, fsmSpecifier: './decide.fsm.js',
+});
 
-it.each([['code', code], ['dev', dev]] as const)('emits and strictly checks the unchanged maintained %s machine', (_name, value) => {
+it.each([['code', code], ['dev', dev], ['decide', decide]] as const)('emits and strictly checks the unchanged maintained %s machine', (_name, value) => {
   const emitted = value.emit();
   expect(emitted.status, emitted.stderr).toBe(0);
   expect(readFileSync(value.fsm, 'utf8')).toBe(value.source);
@@ -88,10 +108,10 @@ it('renders labelled strings and identities literally through the actual emitted
   const probe = spawnSync(process.execPath, ['--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import { _internal } from ${JSON.stringify(pathToFileURL(compiled).href)};
-    const value = { stateId: 'runFirstPhase', sourceItem: 'CODE-1', role: 'coder', result: {},
+    const value = { stateId: 'firstPhase', sourceItem: 'CODE-1', role: 'coder', result: {},
       prompt: '> Original request: <caller-input>\\r\\n> Run results: <run-results>\\r\\n> Other: <empty>\\r\\nCoder is <coder-llm>; missing <missing>.',
       callerInput: 'one\\r\\n\\r\\ntwo <coder-llm> $&', runResults: '', empty: '',
-      pendingBossQuestion: { questionId: 'q', resumeStateId: 'runFirstPhase', sourceItem: 'CODE-1', asker: { kind: 'role', roleId: 'coder' }, question: 'Original question?' }, bossReply: 'Exact reply $&',
+      pendingBossQuestion: { questionId: 'q', resumeStateId: 'firstPhase', sourceItem: 'CODE-1', asker: { kind: 'role', roleId: 'coder' }, question: 'Original question?' }, bossReply: 'Exact reply $&',
     };
     const original = structuredClone(value), identities = [];
     const identity = role => { identities.push(role); return 'Actual bound model'; };
@@ -104,7 +124,7 @@ it('renders labelled strings and identities literally through the actual emitted
       assert.deepEqual(value, original);
     }
     assert.deepEqual(identities, ['coder', 'coder', 'coder']);
-    assert.equal(_internal.composePlayerPrompt({ stateId: 'runFirstPhase', sourceItem: 'CODE-1', role: 'coder', result: {}, prompt: 'Value: <toString>', toString: 'literal value' }, identity), 'Value: literal value');
+    assert.equal(_internal.composePlayerPrompt({ stateId: 'firstPhase', sourceItem: 'CODE-1', role: 'coder', result: {}, prompt: 'Value: <toString>', toString: 'literal value' }, identity), 'Value: literal value');
     const missing = { ...value, runResults: undefined };
     assert(_internal.composePlayerPrompt(missing, identity).includes('> Run results: <run-results>'));
   `], { cwd: root, encoding: 'utf8' });
@@ -150,6 +170,8 @@ it('passes maintained CODE/DEV real-Git and nested-boundary suites with only the
       .replace(`'./${name}.playbook.js'`, JSON.stringify(value.output))
       .replace(`type ${name === 'code' ? 'Code' : 'Dev'}PlaybookHostCapabilities`, `type PlaybookHostCapabilities as ${name === 'code' ? 'Code' : 'Dev'}PlaybookHostCapabilities`);
     writeFileSync(join(root, `${name}.registry.ts`), registry);
+    // A suite that reads its bundle's GEARS beside itself finds the same text.
+    writeFileSync(join(root, `${name}.gears.md`), readFileSync(join(value.originalDir, `${name}.gears.md`)));
     for (const suite of ['playbook', 'prompt-contract']) {
       const testPath = join(value.originalDir, `${name}.${suite}.test.ts`);
       const text = readFileSync(testPath, 'utf8').replace(/from (['"])(\.[^'"]+)\1/g, (_match, _quote, specifier: string) => {
@@ -166,4 +188,41 @@ it('passes maintained CODE/DEV real-Git and nested-boundary suites with only the
   const checked = spawnSync(process.execPath, [join(packageRoot, 'node_modules/vitest/vitest.mjs'), 'run', '--root', root, '--config', join(root, 'vitest.config.mjs')], { cwd: root, env, encoding: 'utf8', timeout: 90_000 });
   expect(checked.status, checked.stdout + checked.stderr).toBe(0);
   for (const value of [code, dev]) expect(readFileSync(value.fsm, 'utf8')).toBe(value.source);
+}, 100_000);
+
+it('passes the maintained DECIDE parallel-proposal suite with only its factory wiring replaced', () => {
+  const emitted = decide.emit();
+  expect(emitted.status, emitted.stderr).toBe(0);
+  const generated = readFileSync(decide.output, 'utf8');
+  expect(generated).toContain('import { decideMachine as machine } from "./decide.fsm.js";');
+  expect(generated).not.toContain('concurrentRoleSets'); // The engine derives the cohort.
+  const compiled = join(root, 'decide.playbook.js');
+  writeFileSync(compiled, ts.transpileModule(generated, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  }).outputText);
+  const probe = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { _internal } from ${JSON.stringify(pathToFileURL(compiled).href)};
+    assert.deepEqual(Object.keys(_internal), ['composePlayerPrompt', 'RESUMABLE_STATE_IDS', 'UNFINISHED_FINAL_STATE_IDS', 'VERBATIM_PAYLOAD_FIELDS']);
+    assert.deepEqual([..._internal.RESUMABLE_STATE_IDS], ['askCoderProposal', 'askReviewerProposal', 'synthesizeCommit']);
+    assert.deepEqual([..._internal.UNFINISHED_FINAL_STATE_IDS], ['reportedReviewFailure']);
+    assert.deepEqual([..._internal.VERBATIM_PAYLOAD_FIELDS], ['coderProposal', 'reviewerProposal', 'coderOutput']);
+  `], { cwd: root, encoding: 'utf8' });
+  expect(probe.status, probe.stderr + probe.stdout).toBe(0);
+  // Every maintained assertion runs unchanged against the emitted module.
+  const testPath = join(decide.originalDir, 'decide.playbook.test.ts');
+  const text = readFileSync(testPath, 'utf8').replace(/from (['"])(\.[^'"]+)\1/g, (_match, _quote, specifier: string) => {
+    let target = specifier === './decide.playbook.ts' ? decide.output : resolve(decide.originalDir, specifier);
+    if (target.endsWith('.js') && existsSync(target.slice(0, -3) + '.ts')) target = target.slice(0, -3) + '.ts';
+    return `from ${JSON.stringify(target)}`;
+  });
+  expect(text).toContain(`from ${JSON.stringify(decide.output)}`);
+  writeFileSync(join(root, 'decide.playbook.acceptance.test.ts'), text);
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST')));
+  const checked = spawnSync(process.execPath, [join(packageRoot, 'node_modules/vitest/vitest.mjs'), 'run', 'decide.playbook.acceptance.test.ts', '--root', root, '--config', join(root, 'vitest.config.mjs')], { cwd: root, env, encoding: 'utf8', timeout: 90_000 });
+  expect(checked.status, checked.stdout + checked.stderr).toBe(0);
+  const summary = checked.stdout.replace(/\x1b\[[0-9;]*m/g, '');
+  expect(summary).toMatch(/Tests\s+\d+ passed/);
+  expect(summary).not.toMatch(/failed|skipped/);
+  expect(readFileSync(decide.fsm, 'utf8')).toBe(decide.source);
 }, 100_000);

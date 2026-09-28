@@ -144,7 +144,7 @@ class RecoveryAdapter implements AgentAdapter {
     } else if (kind === 'closing')
       result = 'The playbook is paused at its next question.';
     else if (kind === 'classify')
-      result = '{"type":"BOSS_REPLY","questionId":"runFirstPhase"}';
+      result = '{"type":"BOSS_REPLY"}';
     else if (kind === 'judge') result = '{"guard":"needsBossReply"}';
     else {
       const first =

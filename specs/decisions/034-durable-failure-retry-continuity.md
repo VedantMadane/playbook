@@ -5,9 +5,9 @@
 
 ## Status
 
-Amended by [DR-070](070-durable-step-progress.md): invocation checkpoints replace whole-playbook failure retry; new input retains the full-attempt safety check.
+Amended by [DR-073](073-durable-step-progress.md): invocation checkpoints replace whole-playbook failure retry; new input retains the full-attempt safety check.
 
-Amended by [DR-066](066-captain-prepares-step-recovery.md): a captured invocation takes precedence over entry replay, preserving completed predecessor work.
+Amended by [DR-069](069-captain-prepares-step-recovery.md): a captured invocation takes precedence over entry replay, preserving completed predecessor work.
 
 Accepted.
 Extends [DR-029](029-session-scoped-conversational-captain.md)'s runtime-owned recovery actions to the recovery a parked failure state still offers after the process that reached it ends.

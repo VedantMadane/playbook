@@ -1,4 +1,5 @@
-import { type BranchPlaybookHostCapabilities, type PlaybookRuntime } from './branch.playbook.js';
+import { type PlaybookHostCapabilities, type PlaybookRuntime } from './branch.playbook.js';
+import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
 export interface PlaybookSummaryPolicy {
     stateCountLabels: Readonly<Record<string, string>>;
     copyPasteGuardNames: readonly string[];
@@ -24,7 +25,7 @@ export interface BranchPlaybookRegistryEntry {
     concurrentRoleSets: readonly [];
     summaryPolicy: PlaybookSummaryPolicy;
     validateOptions(optionSlice: unknown): BranchOptions;
-    createRuntime(options: BranchOptions, hostCapabilities: BranchPlaybookHostCapabilities): PlaybookRuntime;
+    createRuntime(options: BranchOptions, hostCapabilities: PlaybookHostConstructionCapabilities & PlaybookHostCapabilities): PlaybookRuntime;
 }
 export declare const branchStateCountLabels: {
     readonly createBranch: "branching round";

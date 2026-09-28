@@ -265,6 +265,42 @@ export interface PlaybookCaptainShell extends Captain {
     /** Report an interrupted attempt without dispatching work. */
     selectInterruptedReport?(input: string, report: InterruptedReport): void;
 }
+/**
+ * Whether words may stand outside a code span in a statement the shell says
+ * (CAPTAIN-9); the pure renderer accepts everything, and the shell passes its
+ * guard.
+ */
+type Speakable = (text: string) => boolean;
+/**
+ * What the shell recorded of a failure: an error, which may carry the cause
+ * the runtime decided (DR-063 §2), or that cause alone.
+ */
+interface RecordedFailure {
+    readonly message?: string;
+    readonly cause?: unknown;
+}
+type DescribePlaybook = (playbookId: string) => string;
+/**
+ * CAPTAIN-71: the one way a failure is put into words — `<Subject> failed:
+ * <reason>.` — `subject` naming what failed in the Boss's words and `failure`
+ * the error or cause the shell recorded.
+ */
+declare function failureStatement(subject: string, failure: RecordedFailure | undefined, describePlaybook?: DescribePlaybook, speakable?: Speakable): string;
+/**
+ * The three kinds of statement a report the shell says holds (CAPTAIN-69):
+ * a listed fact, a numbered unresolved-effect entry, and the `Failure:` line.
+ */
+type StatementKind = 'fact' | 'entry' | 'failure';
+/** A statement the report assembly weighs. */
+interface BossStatement {
+    readonly text: string;
+    /** Its kind, which decides what may drop it; a fact where absent. */
+    readonly kind?: StatementKind;
+    /** The reason a `Failure:` line states (CAPTAIN-67). */
+    readonly reason?: string;
+}
+/** The statements of `statements` that stay, as CAPTAIN-69 assembles them. */
+declare function bossReport(statements: readonly (string | BossStatement)[], reasons?: Iterable<string>): string[];
 export declare function assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[];
 /** Validate, detach, and freeze one untrusted shell snapshot. */
 export declare function assertPlaybookCaptainShellSnapshot(value: unknown): PlaybookCaptainShellSnapshot;
@@ -277,4 +313,10 @@ export type PlaybookCaptainUnresolvedEffectReference = {
 };
 export declare const projectUnresolvedEffects: (ledger: PlaybookEffectLedger, references: readonly PlaybookCaptainUnresolvedEffectReference[]) => readonly PlaybookCaptainUnresolvedEffect[];
 export declare function createPlaybookCaptainShell(options: unknown, deps?: PlaybookCaptainDeps): PlaybookCaptainShell;
+export declare const _internal: {
+    failureStatement: typeof failureStatement;
+    bossReport: typeof bossReport;
+    RUNTIME_REASON_PHRASES: Readonly<Record<string, string>>;
+    LABELLED_RUNTIME_REASONS: readonly (readonly [RegExp, string])[];
+};
 export default createPlaybookCaptainShell;

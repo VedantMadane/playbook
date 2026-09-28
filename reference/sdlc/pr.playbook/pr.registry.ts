@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
+import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
 import createPlaybookRuntime, {
-  type PrPlaybookHostCapabilities,
+  type PlaybookHostCapabilities,
   type PlaybookRuntime,
 } from './pr.playbook.js';
 
@@ -35,7 +36,8 @@ export interface PrPlaybookRegistryEntry {
   validateOptions(optionSlice: unknown): PrOptions;
   createRuntime(
     options: PrOptions,
-    hostCapabilities: PrPlaybookHostCapabilities,
+    hostCapabilities: PlaybookHostConstructionCapabilities &
+      PlaybookHostCapabilities,
   ): PlaybookRuntime;
 }
 

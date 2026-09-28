@@ -1,13 +1,13 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai> -->
 
-# DR-070: Save progress before work
+# DR-073: Save progress before work
 
 ## Status
 
 Accepted after bounded model exploration, real process-loss tests and a smaller production implementation.
-Replaces the saved-continuation mechanism of [DR-068](068-interrupted-continuation-settlement.md) and narrows [DR-069](069-host-owned-interrupted-work-settlement.md) to unsupported positions.
-Amends [DR-066](066-captain-prepares-step-recovery.md), [DR-029](029-session-scoped-conversational-captain.md), [DR-031](031-shared-captain-session-front-ends.md), [DR-040](040-outcome-authority-effect-reconciliation.md), [DR-049](049-portable-session-contract.md), [DR-051](051-host-selected-runtime-recovery.md), and [DR-062](062-pre-existing-changes-are-context.md) §5.
+Replaces the saved-continuation mechanism of [DR-071](071-interrupted-continuation-settlement.md) and narrows [DR-072](072-host-owned-interrupted-work-settlement.md) to unsupported positions.
+Amends [DR-069](069-captain-prepares-step-recovery.md), [DR-029](029-session-scoped-conversational-captain.md), [DR-031](031-shared-captain-session-front-ends.md), [DR-040](040-outcome-authority-effect-reconciliation.md), [DR-049](049-portable-session-contract.md), [DR-051](051-host-selected-runtime-recovery.md), and [DR-062](062-pre-existing-changes-are-context.md) §5.
 Supersedes the whole-playbook retry fallback of [DR-034](034-durable-failure-retry-continuity.md).
 
 ## Context
@@ -24,6 +24,8 @@ Scripts and preparation also need start and result records.
   Preparation results record what was done; recovery restores the paused step and requires a Boss choice rather than dispatching preparation again.
 - The runtime owns a restorable interrupted position, including its accepted input; the shell assembles the parent/child stack without interpreting opaque machine state.
   An unsupported frame explicitly selects the preserved-work exit rather than a guessed position.
+  A parallel region has no single-invocation checkpoint; its starts and results remain journalled, and a crash uses that exit.
+  Sequential steps after the join, including DECIDE’s merge step under [DR-067](067-parallel-proposals-through-the-shared-factory.md), use ordinary checkpoints.
 - Reopening an uncertain run restores and reports only; Boss chooses a currently available continuation before any new work starts.
   A missing result means unfinished work, not permission to repeat it, and no automatic recovery loop runs during this reporting turn.
 - No recorded work and an unchanged ledger restore the pre-turn position; the interrupted message was not processed and may be discarded. Reporting writes no new progress.

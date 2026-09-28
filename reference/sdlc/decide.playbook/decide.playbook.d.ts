@@ -1,64 +1,16 @@
-import { normalizeErrorCompact, normalizeErrorFull } from '../../../src/xstate-runtime.js';
-import { type PlayerInput, type DecideEvent, type DecideInput, type PendingBossQuestion } from './decide.fsm.js';
-import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
-import type { CaptainCallOptions, CaptainResult, JsonValue, NormalizedError, PlayerCallOptions, PlayerResult, PlayerSessionStore, PlaybookCallRequest, PlaybookCallResult, PlaybookCallStart, PlaybookControlAction, PlaybookControlReceipt, PlaybookControlView, PlaybookPendingCall, PlaybookPorts, PlaybookRunResult, PlaybookRuntime, PlaybookRuntimeFactory, PlaybookRuntimeSnapshot, PlaybookSession, PlaybookState, PlaybookStateValue, PlaybookTraceEvent, PlaybookTraceType } from '@sublang/playbook/runtime';
-export type { CaptainCallOptions, CaptainResult, JsonValue, NormalizedError, PlayerCallOptions, PlayerResult, PlayerSessionStore, PlaybookCallRequest, PlaybookCallResult, PlaybookCallStart, PlaybookControlAction, PlaybookControlReceipt, PlaybookControlView, PlaybookPendingCall, PlaybookPorts, PlaybookRunResult, PlaybookRuntime, PlaybookRuntimeFactory, PlaybookRuntimeSnapshot, PlaybookSession, PlaybookState, PlaybookStateValue, PlaybookTraceEvent, PlaybookTraceType, };
-type RoleId = 'coder' | 'reviewer';
-export type PlaybookRuntimeOptions = DecideInput;
-export type DecidePlaybookHostCapabilities = PlaybookHostConstructionCapabilities;
-export interface DecidePlaybookRuntimeConstruction {
-    readonly configuredOptions: PlaybookRuntimeOptions;
-    readonly hostCapabilities: DecidePlaybookHostCapabilities;
+import { type XStatePromptIdentity, type PlaybookPlayerInput, type XStatePlaybookRuntimeConstruction, type XStatePlaybookRuntimeFactory } from '@sublang/playbook/xstate-runtime';
+export type { PlayerResult, PlayerCallOptions, PlayerSessionStore, CaptainResult, CaptainCallOptions, JsonValue, NormalizedError, PlaybookCallRequest, PlaybookCallResult, PlaybookCallStart, PlaybookStateValue, PlaybookState, PlaybookPendingCall, PlaybookRunResult, PlaybookRuntime, PlaybookRuntimeFactory, PlaybookRuntimeSnapshot, PlaybookSession, PlaybookPorts, PlaybookTraceEvent, PlaybookTraceType, PlaybookControlReceipt, PlaybookControlView, } from '@sublang/playbook/runtime';
+export interface PlaybookRuntimeOptions {
 }
-type PromptIdentity = (roleId: RoleId) => string;
-declare function composePlayerPrompt(input: PlayerInput, promptIdentity: PromptIdentity, resuming?: boolean): string;
-declare function requiredFieldsFor(description: string): string[];
-declare function extractJson(raw: string): Record<string, unknown> | null;
-declare function buildClassifierPrompt(text: string, ctx: {
-    state: PlaybookState;
-    pendingQuestions: readonly PendingBossQuestion[];
-}): string;
-declare function parseClassification(raw: string, text: string, pendingQuestionIds?: readonly string[]): DecideEvent | {
-    type: 'NO_ACTION';
-} | null;
-declare function buildAdjudicatorPrompt(input: PlayerInput, playerOutput: string, correction?: {
-    readonly reply: string;
-    readonly error: string;
-}): string;
-declare function combineSignals(a: AbortSignal | undefined, b: AbortSignal | undefined): AbortSignal;
-declare function pendingQuestionsFromContext(context: Record<string, unknown>): PendingBossQuestion[];
-declare function pendingQuestionsForState(state: PlaybookState, context: Record<string, unknown>): PendingBossQuestion[];
-export declare const createPlaybookRuntime: PlaybookRuntimeFactory<DecidePlaybookRuntimeConstruction>;
+export type PlaybookHostCapabilities = XStatePlaybookRuntimeConstruction<PlaybookRuntimeOptions, {
+    readonly authority: object;
+}>['hostCapabilities'];
+export declare function validateOptions(value: unknown): PlaybookRuntimeOptions;
 export declare const _internal: {
-    composePlayerPrompt: typeof composePlayerPrompt;
-    requiredFieldsFor: typeof requiredFieldsFor;
-    extractJson: typeof extractJson;
-    buildClassifierPrompt: typeof buildClassifierPrompt;
-    parseClassification: typeof parseClassification;
-    buildAdjudicatorPrompt: typeof buildAdjudicatorPrompt;
-    combineSignals: typeof combineSignals;
-    pendingQuestionsFromContext: typeof pendingQuestionsFromContext;
-    pendingQuestionsForState: typeof pendingQuestionsForState;
-    normalizeErrorCompact: typeof normalizeErrorCompact;
-    normalizeErrorFull: typeof normalizeErrorFull;
-    STATE_DESCRIPTIONS: Readonly<Record<string, string>>;
-    ROLE_STATES: readonly [{
-        readonly stateId: "askCoderProposal";
-        readonly role: "coder";
-        readonly sourceItem: "DECIDE-1";
-    }, {
-        readonly stateId: "askReviewerProposal";
-        readonly role: "reviewer";
-        readonly sourceItem: "DECIDE-2";
-    }, {
-        readonly stateId: "commitCoderProposal";
-        readonly role: "coder";
-        readonly sourceItem: "DECIDE-3";
-    }];
-    ROLE_STATE_IDS: ReadonlySet<string>;
-    VERBATIM_PAYLOAD_FIELDS: ReadonlySet<string>;
-    BOSS_INTERRUPT_TARGETS: readonly ["independentProposals"];
+    composePlayerPrompt: (input: PlaybookPlayerInput, promptIdentity: XStatePromptIdentity, resuming?: boolean) => string;
+    RESUMABLE_STATE_IDS: ReadonlySet<string>;
     UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string>;
-    TELEMETRY_TOPIC: string;
+    VERBATIM_PAYLOAD_FIELDS: ReadonlySet<string>;
 };
+declare const createPlaybookRuntime: XStatePlaybookRuntimeFactory<XStatePlaybookRuntimeConstruction<PlaybookRuntimeOptions, PlaybookHostCapabilities>, 3>;
 export default createPlaybookRuntime;

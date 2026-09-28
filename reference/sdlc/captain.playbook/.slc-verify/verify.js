@@ -1696,16 +1696,28 @@ initial = {}) {
 function sentinelContext(reads) {
     return Object.fromEntries(reads.map((field) => [field, sentinelFor(field)]));
 }
-// The gears2fsm-normative Boss-reply context fields: present only on a
-// continuation turn, so an ordinary-turn probe must leave them unset.
+// The gears2fsm-normative Boss-reply context fields: filled only on a
+// continuation turn. An ordinary turn holds each at its initial shape — the
+// scalar form absent, the keyed form of a parallel machine an empty record —
+// so a state's input can index its own entry without meeting a shape the
+// machine's context type never admits (verification-5).
 const BOSS_CONTEXT_FIELDS = [
     'pendingBossQuestion',
     'bossReply',
     'pendingBossQuestions',
     'bossReplies',
 ];
+const KEYED_BOSS_CONTEXT_FIELDS = ['pendingBossQuestions', 'bossReplies'];
+function isKeyedBossRecord(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 function ordinaryContext(reads) {
-    return sentinelContext(reads.filter((field) => !BOSS_CONTEXT_FIELDS.includes(field)));
+    return {
+        ...sentinelContext(reads.filter((field) => !BOSS_CONTEXT_FIELDS.includes(field))),
+        ...Object.fromEntries(reads
+            .filter((field) => KEYED_BOSS_CONTEXT_FIELDS.includes(field))
+            .map((field) => [field, {}])),
+    };
 }
 /**
  * The machine's resolved initial context (verification-5): a literal record, or
@@ -1741,8 +1753,9 @@ function initialMachineContext(config) {
 /**
  * The context an ordinary-turn probe drives an `invoke.input` thunk with: the
  * machine's initial context, overlaid with one string sentinel per traced read
- * whose initial value is absent or itself a string, and never a Boss-reply
- * field (verification-5).
+ * whose initial value is absent or itself a string, with every Boss-reply
+ * field at its initial shape — absent, or an empty keyed record
+ * (verification-5).
  */
 function ordinaryTurnContext(reads, initial, 
 /** Traces the Boss-reply fields too, for wiring capture rather than a turn. */
@@ -1752,8 +1765,12 @@ includeBossFields = false) {
     }
     const context = { ...initial };
     if (!includeBossFields) {
-        for (const field of BOSS_CONTEXT_FIELDS)
-            delete context[field];
+        for (const field of BOSS_CONTEXT_FIELDS) {
+            if (isKeyedBossRecord(context[field]))
+                context[field] = {};
+            else
+                delete context[field];
+        }
     }
     for (const field of reads) {
         if (!includeBossFields && BOSS_CONTEXT_FIELDS.includes(field))

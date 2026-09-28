@@ -1,18 +1,18 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai> -->
 
-# DR-066: Captain prepares recovery at the interrupted step
+# DR-069: Captain prepares recovery at the interrupted step
 
 ## Status
 
-Amended by [DR-070](070-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice; automatic preparation follows only a stop produced by an operation of the same turn, and resuming or adopting stopped work authorizes none.
+Amended by [DR-073](073-durable-step-progress.md): normal step progress replaces saved continuation selections and whole-playbook retry; crash recovery restores and reports before further Boss choice; automatic preparation follows only a stop produced by an operation of the same turn, and resuming or adopting stopped work authorizes none.
 
 Accepted.
 Amends [DR-029](029-session-scoped-conversational-captain.md)'s tool-free Captain in one scope: a model- or host-selected recovery action, including bounded automatic recovery, may run a separate preparation call.
 Refines [DR-034](034-durable-failure-retry-continuity.md)'s entry retry with a runtime-owned checkpoint of the actual interrupted invocation.
 Amends [DR-040](040-outcome-authority-effect-reconciliation.md) with saved-result assessment and verified read-only restoration, and [DR-051](051-host-selected-runtime-recovery.md) with saved continuation points and automatic recovery after host-selected actions.
 
-Amended by [DR-068](068-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-069](069-host-owned-interrupted-work-settlement.md).
+Amended by [DR-071](071-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-072](072-host-owned-interrupted-work-settlement.md).
 
 ## Context
 
@@ -22,7 +22,7 @@ The procedure author should not need to describe exception handling, and neither
 
 ## Decision
 
-The saved-selection and whole-turn replay rules below are historical and replaced by DR-070; bounded live preparation remains.
+The saved-selection and whole-turn replay rules below are historical and replaced by DR-073; bounded live preparation remains.
 
 - Ordinary Captain decisions, replies, and adjudication remain tool-free.
 - Starting or continuing a task authorizes bounded preparation of its next step; the host may select the same `recover` operation after a recoverable stop without asking Boss to repeat that authorization.
@@ -50,11 +50,11 @@ The saved-selection and whole-turn replay rules below are historical and replace
   The host appends that restoration separately from the original receipt; it authorizes another read-only invocation, not acceptance of the failed result.
 - An unexpected child-runtime exception preserves a valid parked child and its parents instead of converting it to a completed workflow failure.
 - Preparation saves the current parked stack before tool use, so interruption resumes that step rather than the original turn selection.
-  Before continuation, the point is replaced by the saved continuation and its current effect baseline; later unrepresented progress settles at host level under [DR-069](069-host-owned-interrupted-work-settlement.md).
+  Before continuation, the point is replaced by the saved continuation and its current effect baseline; later unrepresented progress settles at host level under [DR-072](072-host-owned-interrupted-work-settlement.md).
   Every stopped continuation attempts to advance the point to the actual stack or completed root with reporting-only retry; any thrown turn with a point settles through the shared host after calls drain and before disposal when possible.
   The last settled controller and journal remain the conversational baseline; the attempted turn remains in replay.
 - Uncertain-turn recovery never chooses discard automatically.
-  Without a saved recovery point, a continuation may retry only after the existing effect checks prove whole-turn replay safe; otherwise it settles lost progress without replay under [DR-069](069-host-owned-interrupted-work-settlement.md).
+  Without a saved recovery point, a continuation may retry only after the existing effect checks prove whole-turn replay safe; otherwise it settles lost progress without replay under [DR-072](072-host-owned-interrupted-work-settlement.md).
 - Recovery is host/runtime behavior, independent of individual workflow repair recipes; the default Captain source and compiled controller add `recover`, requiring SLC’s recovery-controller discriminator [[1]].
   Existing checkpoints without the new optional invocation checkpoint keep their existing advertised controls.
 
