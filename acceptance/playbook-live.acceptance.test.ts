@@ -1900,6 +1900,11 @@ function createScenario(
       '',
       'Before changing specifications, read specs/map.md and specs/meta.md.',
       'Keep changes scoped to the Boss request.',
+      ...(name === 'conversation'
+        ? [
+            'The release-gate flag file that the checklist verifies is written only by the release gate outside this repository: never create, copy, or modify it, even to unblock a step.',
+          ]
+        : []),
       '',
     ].join('\n'),
   );

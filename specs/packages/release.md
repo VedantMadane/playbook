@@ -425,12 +425,14 @@ Claude Captain through an attached tmux-play session
 ([DR-029](../decisions/029-session-scoped-conversational-captain.md)).
 Every machine outcome in that session shall come from a deterministic
 [DR-016](../decisions/016-script-actors-and-optimize-pass.md) script-actor
-fixture playbook whose failure is engineered by an absent flag file, never
-from a rigged agent, so the only live variable is the Captain's own
+fixture playbook whose failure is engineered by the absent flag file of a
+release gate outside the repository, which no preparation may create,
+never from a rigged agent, so the only live variable is the Captain's own
 judgment. The session shall carry, in one shell session on one durable
 conversation: a natural chat turn that engages nothing; an engagement
-driven to a deterministic failure whose reply names the failed step and
-claims no completion; the verbatim `Retry and continue the iteration`
+driven to a deterministic failure whose same-turn automatic preparation [[recovery-14](recovery.md#recovery-14)]
+reports blocked rather than writing the gate's flag and whose reply names
+the failed step and claims no completion; the verbatim `Retry and continue the iteration`
 recovery, which shall reach the finished marker after the flag file is
 placed; a natural status question that moves no state; a second
 deterministic failure, and then a switch requested in ordinary prose —
@@ -788,15 +790,18 @@ The fifth, conversational case
 drive one attached tmux-play session with a real Claude Captain and a
 bundled deterministic fixture playbook whose middle step is a
 [DR-016](../decisions/016-script-actors-and-optimize-pass.md) script actor
-succeeding only when a flag file exists — the engineered failure, so no
-agent is rigged and the Captain's judgment is the only live variable.
+succeeding only when the flag file of a release gate outside the
+repository exists — the engineered failure, which no preparation may repair
+because only that gate writes the flag, so no agent is rigged and the
+Captain's judgment is the only live variable.
 It shall fail unless, in one shell session and in this order:
 
 - a natural-language chat turn is answered as Captain prose while no
   engagement starts;
 - engaging the fixture with the flag file absent reaches the fixture's
-  failure, and that turn's reply names the failed step while claiming no
-  completion;
+  failure, the automatic preparation that stop allows reports blocked
+  instead of writing the gate's flag, and that turn's reply names the
+  failed step while claiming no completion;
 - after the flag file is created, the verbatim Boss turn
   `Retry and continue the iteration` drives that same engagement to its
   finished marker, with no second engagement started in its place;

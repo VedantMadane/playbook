@@ -193,7 +193,13 @@ export default {
 // a flag file. With the flag absent the exit-status guard routes to
 // `failed`; with it present the same replayed entry event runs the machine
 // to terminal. No agent decides any of that — which is the point: the only
-// live judgment in the scenario is the Captain's.
+// live judgment in the scenario is the Captain's. The flag is the signal
+// of a release gate that runs outside the repository, so the automatic
+// preparation a same-turn stop allows (recovery-14) has nothing it may
+// repair and must report blocked; a Captain that writes the signal itself
+// finishes the checklist before the scenario places it and fails the case.
+// Nothing about the flag is a Boss decision, so Boss's plain retry request
+// after placing it needs no confirmation.
 export function checklistFixtureSource(flagPath: string): string {
   return `// Conversational acceptance fixture: a deterministic script checklist.
 import { assign, setup } from 'xstate';
@@ -278,13 +284,13 @@ const machine = setup({}).createMachine({
     verify: scriptStep(
       'verify',
       'CHECK-2',
-      'Verify step: confirm the checklist flag file is present.',
+      'Verify step: confirm the external release gate has signalled success through its flag file.',
       \`test -f '\${flagPath}'\`,
       {
         ok: 'verified',
         failed: 'verifyFailed',
         message:
-          'The verify step failed: the checklist flag file is missing, so the checklist cannot continue.',
+          'The verify step failed: the external release gate has not signalled success yet; its flag file is missing. The gate runs outside this repository and nothing here may create the flag, so the checklist waits for the gate.',
       },
       'publish',
     ),
