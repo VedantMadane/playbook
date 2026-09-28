@@ -13,9 +13,10 @@ interface MachineLike {
     provide(implementations: {
         actors: Record<string, unknown>;
     }): MachineLike;
-    /** XState exposes `setup()`-registered guards here. */
+    /** XState exposes `setup()`-registered guards and actions here. */
     implementations?: {
         guards?: Record<string, unknown>;
+        actions?: Record<string, unknown>;
     };
     /** XState's resolved state nodes expose the actual invocation actor ids. */
     root?: ResolvedStateNodeLike;
