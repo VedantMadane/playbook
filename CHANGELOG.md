@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [17.0.0] - 2026-09-27
+
 ### Added
 
 - **A stopped playbook resumes from the interrupted step.** The shared runtime saves every player, direct-Captain, and script start before the work and its result before the next transition, so a process loss or a failed step restores that exact position: a completed result is consumed without repeating the operation, and no earlier step or completed commit is repeated. Reopening an uncertain run only restores and reports what was recorded; Boss then chooses a currently available continuation ([DR-073](specs/decisions/073-durable-step-progress.md)).
@@ -31,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 
-- `entryEvent.contextField` in a linked module is accepted and ignored: step checkpoints carry the accepted input, and new link output omits the field.
+- `entryEvent.contextField` in a linked module is accepted and ignored: step checkpoints carry the accepted input, and the `slc/link.md` contract no longer declares the field.
 
 ### Removed
 
@@ -758,7 +760,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Conformance test suite (386 tests across six files) pinning the gears ↔ FSM 1:1 mapping (PLAYBOOK-1..6), runtime contract (PBRT-5..16), prompt composition, introspect helpers, and onDone arm coverage.
 - Package exports `./code/playbook` (the host-agnostic `createPlaybookRuntime` factory) and `./code/tmux-play` (the cligent-bound Captain factory).
 
-[Unreleased]: https://github.com/sublang-ai/playbook/compare/v16.0.0...HEAD
+[Unreleased]: https://github.com/sublang-ai/playbook/compare/v17.0.0...HEAD
+[17.0.0]: https://github.com/sublang-ai/playbook/compare/v16.0.0...v17.0.0
 [16.0.0]: https://github.com/sublang-ai/playbook/compare/v15.1.0...v16.0.0
 [15.1.0]: https://github.com/sublang-ai/playbook/compare/v15.0.0...v15.1.0
 [15.0.0]: https://github.com/sublang-ai/playbook/compare/v14.1.0...v15.0.0
