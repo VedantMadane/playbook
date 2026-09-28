@@ -163,7 +163,7 @@ mode:
 roles:
   coder:
     player: dev.coder
-    model: gpt-6-sol
+    model: claude-sonnet-5
     effort: false # explicitly reset to this provider's default
     fastMode: false # literal disabled request, not a default sentinel
 ```
@@ -175,7 +175,8 @@ resumed conversation cannot accidentally retain an earlier selection. For
 top-level setting selects the provider default. A present fast-mode boolean is
 accepted only for adapters Cligent reports as supporting it. A role binding
 cannot override adapter, instruction, permissions, workspace, or tool posture;
-those define the stable player envelope.
+those define the stable player envelope, so an overriding model must be one
+that player's adapter serves.
 
 ## Sharing, isolation, and concurrency
 
@@ -200,6 +201,9 @@ players:
     adapter: codex
     model: gpt-6-sol
     effort: ultra
+    permissions:
+      mode: auto
+      writablePaths: ['.git'] # lets the Codex Coder commit its review fixes
 
 playbooks:
   review:
@@ -247,7 +251,7 @@ playbook run --with fast-lineup.yaml "/code implement the approved change"
 # fast-lineup.yaml — retune the shared Coder; nothing is written back.
 players:
   dev.coder:
-    model: gpt-6-sol
+    model: claude-sonnet-5
     effort: medium
     fastMode: false
 ```

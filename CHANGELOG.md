@@ -12,7 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The starter seeds the latest models.** A fresh config names `claude-opus-5-5` (Claude Opus 5.5) when it seeds Claude and `gpt-6-sol` (GPT-6 Sol) when it seeds Codex, in place of `claude-opus-5` and `gpt-5.6-sol`; adapter selection, its order, and every effort are unchanged, and an existing config is never rewritten ([[playbook-cli-11](specs/packages/playbook-cli.md#playbook-cli-11)], [DR-074](specs/decisions/074-seeds-name-the-latest-models.md)). The documentation's examples, the live acceptance gate's default models, and the CI acceptance config name the same models.
+- **The starter seeds the latest models.** A fresh config names `claude-opus-5-5` (Claude Opus 5.5) when it seeds Claude and `gpt-6-sol` (GPT-6 Sol) when it seeds Codex, in place of `claude-opus-5` and `gpt-5.6-sol`; adapter selection, its order, and every effort are unchanged, and an existing config is never rewritten ([[playbook-cli-11](specs/packages/playbook-cli.md#playbook-cli-11)], [DR-074](specs/decisions/074-seeds-name-the-latest-models.md)). The documentation's examples, the live acceptance gate's default models, and the CI acceptance config move to current models as well.
+
+### Fixed
+
+- **Configuration examples run against the default seed.** The role-override and `--with` overlay examples retuned the Claude-seeded `dev.coder` to a Codex model, which a Claude agent cannot run; they now name `claude-sonnet-5`, and the example that adds a Codex `review.coder` gives it `permissions.mode: auto` and the `.git` writable path it needs to commit review fixes ([DR-074](specs/decisions/074-seeds-name-the-latest-models.md)).
 
 ## [17.0.0] - 2026-09-27
 

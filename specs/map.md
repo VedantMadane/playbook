@@ -99,7 +99,7 @@ meta.md       The spec of specs
 | [DR-071](decisions/071-interrupted-continuation-settlement.md) | 071-interrupted-continuation-settlement.md | Distinct saved dispatch and reporting states, hard-loss reconciliation, nested cancellation and current-task question context; marker replaced by DR-072; saved selections replaced by DR-073 |
 | [DR-072](decisions/072-host-owned-interrupted-work-settlement.md) | 072-host-owned-interrupted-work-settlement.md | Shared-host settlement when later work has no saved machine position; complete reporting-only points, replaced by DR-073 |
 | [DR-073](decisions/073-durable-step-progress.md) | 073-durable-step-progress.md | Save normal step positions and results; restore and report before Boss chooses further work |
-| [DR-074](decisions/074-seeds-name-the-latest-models.md) | 074-seeds-name-the-latest-models.md | Seeds, defaults, and examples name the latest model of each adapter's line, and the Cligent floor rises to the oldest release whose runtime floors serve them; amends DR-053 and DR-044 |
+| [DR-074](decisions/074-seeds-name-the-latest-models.md) | 074-seeds-name-the-latest-models.md | Seeds, defaults, and examples name the latest model of their line, each example runs against the default seed, and the Cligent floor rises to the oldest release whose runtime floors serve the seeded models; amends DR-053 and DR-044 |
 
 ## Packages
 
