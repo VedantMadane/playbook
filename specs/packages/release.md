@@ -418,6 +418,7 @@ Across the successful REVIEW, CODE, DEV, DECIDE, and hermetic cases, the install
 The same-id REVIEW and DECIDE status continuations shall preserve the complete effect ledger byte-for-byte while starting no governed repository boundary ([[playbook-cli-23](playbook-cli.md#playbook-cli-23)], [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)]).
 Documentation shall drop the project-local install and `npx`
 consumption story only after this case passes.
+It shall additionally run, from the repository sources rather than the packed candidate, the real-provider recovery cases — a worker, judge, stray-file, preparation, and unroutable-decision interruption each met by Captain's bounded preparation and the runtime's validated continuation without a repeated commit [[recovery-14](recovery.md#recovery-14)] [[recovery-8](recovery.md#recovery-8)] — and the SDK and CLI question-relay cases, in which Boss clarifies, reopens, and answers a long player question through Captain replies alone [[captain-playbook-5](captain-playbook.md#captain-playbook-5)].
 
 It shall additionally drive one conversational session against a real
 Claude Captain through an attached tmux-play session
@@ -460,7 +461,7 @@ Before tagging a release, the developer/agent shall verify, in this order:
 - [ ] All tests pass (`pnpm test` from the repo root).
 - [ ] The local model-free release smoke passes (`pnpm smoke:release`;
       [[release-28](#release-28)]).
-- [ ] The local real-agent acceptance suite passes, covering REVIEW headless-to-interactive continuation, headless CODE with nested REVIEW, headless DEV through its planned CODE path, DECIDE interactive-to-headless continuation, and the remaining hermetic and conversational cases (`pnpm test:acceptance`; [[release-24](#release-24)]).
+- [ ] The local real-agent acceptance suite passes, covering REVIEW headless-to-interactive continuation, headless CODE with nested REVIEW, headless DEV through its planned CODE path, DECIDE interactive-to-headless continuation, the remaining hermetic and conversational cases, and the source-hosted recovery and question-relay cases (`pnpm test:acceptance`; [[release-24](#release-24)]).
 - [ ] If the release changes the interactive CLI presentation or layout, or
       changes the declared or locked `@sublang/cligent` version, the
       conditional manual tmux UX smoke passes
@@ -771,7 +772,7 @@ selected by the normal `pnpm test` configuration or by GitHub CI.
 #### release-25
 
 
-The opt-in local `pnpm test:acceptance` suite shall pack and install the candidate package once, then exercise five independent fresh git repositories through the installed npm `playbook` command shim.
+The opt-in local `pnpm test:acceptance` suite shall pack and install the candidate package once, then exercise five independent fresh git repositories through the installed npm `playbook` command shim, followed by the source-hosted recovery and question-relay cases below.
 The first case shall pipe `/review <request>` to installed `playbook run --json` over a prepared commit using the shared config and real Captain, Coder, and Reviewer agents.
 After that headless process retires its lease, it shall launch a managed interactive process selected by the returned public session id, verify its one matching operational id line, ask one natural status question through the attached Boss pane, and fail unless the reply preserves the private Captain marker, REVIEW's approval and repository effects occur exactly once, the public id and stored working directory remain unchanged, the selected child retires its lease on shutdown, and the worktree stays clean (verifying [[release-24](#release-24)]).
 The second case shall invoke installed `playbook run --json "/code <task>"` with real Claude and Codex agents and shall fail unless the start, nested REVIEW call, nested REVIEW return, and finish lifecycle markers appear once in order on stderr, only the requested implementation changes, the approved result is present in `HEAD`, the worktree is clean, and no tmux process is created.
@@ -814,6 +815,9 @@ repository is left clean with no ignored or untracked artifacts. The
 deterministic `/decide <task>` command mapping is not this case's subject
 and stays in the hermetic tier; what this case exercises is the
 model-decided switch against a still-active engagement.
+
+The recovery cases shall drive the repository's session host with a real Claude Captain and a real Codex worker over a two-step fixture in a fresh git repository, injecting one interruption per case — a worker transport failure before the second step, a judge transport failure after the first commit, a stray generated file left by a read-only check, a transport failure after preparation tools ran with the session reopened in `recover` mode, and a check that reports a decision the fixture cannot route — and shall fail unless a `recover` selection prepares the missing local marker and the interrupted step completes with the first commit made once, the worker called once for the first step and at most twice for the second, a clean worktree, and, for the stray file, `restored` evidence on its boundary, while the unroutable decision parks the leaf as `failed` with a `blocked` candidate and an unspent correction budget (verifying [[release-24](#release-24)]).
+The question-relay cases shall run the same repository host through the SDK and through `playbook run`, and shall fail unless Captain's first reply explains a long player question — its two options, the seven-day deletion, and the approval requirement — in at most 65 words without the question's jargon, a clarification addressed to Captain settles as `respond` and leaves the frames unchanged, a reopened session delivers a player-directed follow-up verbatim, the explicit choice settles as `deliver` and completes the flow, and no raw `boss-question` status reaches the record stream (verifying [[release-24](#release-24)]).
 
 The acceptance suite shall require local adapter authentication, tmux 3.3 or newer, glow,
 Expect, git, and npm. It shall not be selected by the normal `pnpm test`

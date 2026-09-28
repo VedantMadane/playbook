@@ -12,20 +12,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Bounded Captain preparation and relayed player questions, with automatic recovery only after a stop produced in the same turn. Resuming or adopting an old stop waits for Boss to choose further work.
-- Invocation `recoveryCheckpoint`, `PlaybookRecoveryOffer`, `PlaybookControlView.recovery`, and verified `restored` repository receipts.
+- **A stopped playbook resumes from the interrupted step.** The shared runtime saves every player, direct-Captain, and script start before the work and its result before the next transition, so a process loss or a failed step restores that exact position: a completed result is consumed without repeating the operation, and no earlier step or completed commit is repeated. Reopening an uncertain run only restores and reports what was recorded; Boss then chooses a currently available continuation ([DR-073](specs/decisions/073-durable-step-progress.md)).
+- **Captain prepares a stopped step within Boss's instructions.** The session Captain's closed action set gains a payload-free `recover`, which `DecisionAction`, `CaptainControllerSelection`, and the `gears2fsm.md` controller contract now include, so a custom controller port must handle it. Selecting it runs one separate hidden preparation call with Captain's configured tools and permissions, limited to 150 seconds and to prerequisites of the paused step, then continues that step through the runtime's validated continuation; ordinary decisions, replies, and adjudication stay tool-free. Automatic preparation follows only a stop produced by an operation of the same turn, at most twice per turn; resuming or adopting an old stop waits for Boss to choose further work ([DR-069](specs/decisions/069-captain-prepares-step-recovery.md)).
+- **Captain relays every player question in its own words.** Boss no longer reads a player pane: the complete pending question reaches Captain, which explains it briefly with every choice and constraint, keeps it waiting through a clarification, and delivers Boss's answer unchanged. Runtimes mark player-question statuses `{ kind: "boss-question" }` and the shell replaces them with Captain's reply. Captain replies now default to at most 60 words of plain language ([DR-070](specs/decisions/070-captain-relays-player-questions.md)).
+- Invocation `recoveryCheckpoint`, `PlaybookRecoveryOffer`, `PlaybookControlView.recovery`, and an effect boundary's optional `restored` observation, which records the verified restoration of a read-only step.
 - `exportSnapshot({child})`, input `onAccepted`, a failed action receipt's optional `run`, the checkpoint's `delivered` fact, and shell `presentedEffectPrefix` for carrying mandatory reports across cancellation.
-- Runtime `recordStep` and `PlaybookStepRecord`; session `recordProgress`, `SessionStep`, `SessionProgressChange`, `ProgressChange`, `InterruptedReport`, and `selectInterruptedReport` for saved starts, results, completions and answers.
+- Runtime `recordStep` and `PlaybookStepRecord`; session `recordProgress`, `SessionStep`, `SessionProgressChange`, `ProgressChange`, `InterruptedReport`, and the shell's `selectInterruptedReport` for saved starts, results, completions and answers.
 - SDK `mode:'recover'` and `recover()`, shared `isUncertainTurnDiscardable`, and `projectUnresolvedEffects` with public `PlaybookCaptainUnresolvedEffectReference`.
+- `createWorktreeHostCapabilities()` returns `repository.acquire({ signal })`, which holds the worktree claim for preparation checks through `assertOwner()` and `release()`; a consumer that checks the facade's exact key set must accept the new member.
+- Captain deps `abortPreparation`, required before preparation is offered; frame `request` and `inputs`; `lastAction: 'recover'`; optional `XStateRepositoryCapability.observe` and `acquire`; and `NestedPlaybookBridge.checkpointCall`.
 
 ### Changed
 
-- **Breaking; requires a major release and coordinated host upgrades.** SDK and CLI save normal step starts and results. Retry restores and reports without repeating work. Discard requires no recorded work or changed repository evidence. Hosts through 16.0.x cannot read the extended records. A record whose stored shell snapshot omits `presentedEffectPrefix` still reopens, retries and recovers, with the omitted prefix read as the ledger boundary count.
+- **Breaking; requires a major release and coordinated host upgrades.** SDK and CLI save normal step starts and results. Retry restores and reports without repeating work. Discard requires no recorded work or changed repository evidence. Hosts through 16.0.x cannot open any session this release saves: every saved shell snapshot now carries `presentedEffectPrefix`, and an interrupted record may carry `uncertain.progress`, both of which those hosts reject as unknown fields, so every application sharing a session store upgrades together. A record whose stored shell snapshot omits `presentedEffectPrefix` still reopens, retries and recovers, with the omitted prefix read as the ledger boundary count.
+- **Retry actions follow the saved checkpoint.** A failed invocation advertises `retry:<EVENT_TYPE>` when its checkpoint sits at the entry target and `retry:step` otherwise, `retry:adjudication` to reassess a saved result without calling the player, and `retry:restored-step` to replay a read-only step after its repository is restored exactly. A failure inside a parallel region, such as DECIDE's proposal pair, records its work but offers no retry, where 16.0.0 advertised `retry:START_DECIDE`; the steps after the join, DECIDE's merge included, retry from their saved position. A jump out of a governed failure must pass the failed-attempt effect check.
+- **A governed judge may report that no declared outcome matches.** It answers exactly `{ blocked: <explanation> }`; the shared reconciler then returns the new closed reason `no-matching-outcome` as a `runtime-defect` cause, with no corrective judge call and no FSM outcome, and `PlaybookRetainedSemanticEvidence.semanticCandidate` no longer requires `guard`. Shared and bespoke judge prompts state this alternative (`slc/link.md`); an exhaustive consumer of `PlaybookSemanticReconciliationReason` must handle the new member.
 - Retained generations change only at settlement; recovery derives their changes from recorded work, and a progress write offers no mid-turn capture of the live root for resumption.
+
+### Deprecated
+
+- `entryEvent.contextField` in a linked module is accepted and ignored: step checkpoints carry the accepted input, and new link output omits the field.
 
 ### Removed
 
-- Whole-playbook retry and `entryEvent.contextField` replay. Failed invocations retry from their saved position; old failures without a checkpoint have no automatic replacement.
+- Whole-playbook retry and the `entryEvent.contextField` failure-retry replay. Failed invocations retry from their saved position; an old failure without a checkpoint has no automatic replacement.
 
 ## [16.0.0] - 2026-09-26
 

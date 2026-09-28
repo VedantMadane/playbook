@@ -418,7 +418,7 @@ Captain may answer a player from the original task when it already answers the q
 
 If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
 
-All applications sharing a session store, including Spex and the CLI, must upgrade together before running this version. Hosts through 16.0.x cannot read the extended records.
+All applications sharing a session store, including Spex and the CLI, must upgrade together before running this version. Every saved shell snapshot carries `presentedEffectPrefix`, which hosts through 16.0.x reject as unknown, so they cannot open any session this version saves.
 
 A single recovery entry point handles either a paused step or an uncertain attempt:
 
@@ -426,7 +426,7 @@ A single recovery entry point handles either a paused step or an uncertain attem
 const controller = await openSessionHost({ store: shared, sessionId, mode: 'recover' });
 try {
   const record = await controller.read();
-  await controller.recover(record.state === 'uncertain' ? undefined : bossInstruction);
+  await controller.recover(record?.state === 'uncertain' ? undefined : bossInstruction);
 } finally { await controller.dispose(); }
 ```
 
@@ -435,7 +435,8 @@ For uncertainty it restores the saved position and reports the recorded work usi
 If a turn fails and leaves this open controller uncertain, dispose it and reopen with `mode:'recover'` before calling `recover()` without new input.
 
 Explicit `mode:'retry'` and `retry()` remain supported. Module-free
-`discardSessionUncertain(shared, sessionId)` restores the prior recovery
+`discardSessionUncertain(shared, sessionId)` restores the prior recovery, or
+deletes a never-settled fresh session and resolves `undefined`,
 only when `isUncertainTurnDiscardable(record)` returns true: no abandonment, no recorded steps, and a ledger equal to the pre-turn snapshot. Use the same exported predicate to enable a Discard control.
 
 `readHistory()` returns readable history and a damaged boundary, including a

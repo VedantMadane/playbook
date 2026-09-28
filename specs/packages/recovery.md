@@ -203,7 +203,7 @@ When the bounded policy model explores starts, results, positions, reporting and
 | Reopening restores the saved position or exits safely | `lose-base`, `wrong-position`, `stale-unsupported` | `durable-progress.integration.test.ts`: player-before-change, later-step; `captain-process-loss.integration.test.ts`: root and nested DECIDE |
 | Boss chooses before a saved result is accepted or unfinished work repeats | `auto-accept`, `auto-retry` | `durable-progress.integration.test.ts`: player-result, preparation, second-crash |
 
-The same-turn stop rule, input acceptance and consumed results lie outside the model and rest on the named integration tests: `durable-progress.integration.test.ts` cancelled-stop, old-stop, resume-stop and consumed-result; `captain-recovery-progress.integration.test.ts` answer-failure and child-cancel; `playbook-captain.test.ts` input-abort and unavailable description; and `role-runtime-transition.test.ts` bound deferred continuation.
+The same-turn stop rule, input acceptance and consumed results lie outside the model and rest on the named integration tests: `durable-progress.integration.test.ts` cancelled-stop, old-stop, resume-stop and consumed-result; `captain-recovery-progress.integration.test.ts` answer-failure and child-cancel; `playbook-captain.test.ts` input-abort and input-abort-describe; and `role-runtime-transition.test.ts` 'traces a continued transition before the player and nested calls it causes'.
 
 ### recovery-31
 
