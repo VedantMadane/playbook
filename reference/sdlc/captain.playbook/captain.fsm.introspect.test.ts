@@ -20,7 +20,9 @@ const PINNED = {
       "resultKeys": [
         "deliver",
         "dismiss",
+        "recover",
         "respond",
+        "resume",
         "runtime",
         "start",
         "switch"
@@ -58,6 +60,16 @@ const PINNED = {
         },
         {
           "index": 6,
+          "target": "reporting",
+          "guarded": true
+        },
+        {
+          "index": 7,
+          "target": "reporting",
+          "guarded": true
+        },
+        {
+          "index": 8,
           "target": "failed",
           "guarded": false
         }

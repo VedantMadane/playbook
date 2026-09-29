@@ -15,12 +15,14 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   AGENT_RUNTIME_TARGETS,
   classifyRuntime,
+  createEvent,
   type RuntimeReadiness,
   type RuntimeTarget,
 } from '@sublang/cligent';
@@ -45,6 +47,7 @@ const { executionConfigFromPlan } = await import(
   new URL('./bin/run.js', import.meta.url).href
 );
 const {
+  createCaptainSessionStore,
   projectCaptainSessionStructure,
   validateCaptainSessionRecord,
 } = await import(new URL('./bin/session-store.js', import.meta.url).href);
@@ -75,7 +78,8 @@ const fakeEntry = {
   id: 'code',
   command: 'code',
   intent: 'software development / SDLC coding workflow',
-  artifactSchema: 2 as const,
+  artifactSchema: 3 as const,
+  runtimeProfile: { kind: 'bespoke', artifactSchema: 3 } as const,
   requiredRoleIds: ['coder', 'reviewer'],
   concurrentRoleSets: [] as const,
   validateOptions: () => ({}),
@@ -280,6 +284,43 @@ describe('playbook launcher — config migration (PBCLI-33)', () => {
     expect(await readFile(`${configPath}.bak`, 'utf8')).toBe(legacyConfig);
   });
 
+  it('relocates before migrating profiles through the interactive front end', async () => {
+    const home = await makeTempHome();
+    const legacyPath = join(
+      home,
+      '.config',
+      'playbook',
+      'playbook.config.yaml',
+    );
+    const configPath = resolveUserConfigPath({}, home);
+    await mkdir(dirname(legacyPath), { recursive: true });
+    await writeFile(legacyPath, legacyConfig, 'utf8');
+    const stderr = writer();
+
+    const result = await runPlaybookCli({
+      argv: ['--list'],
+      env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stdout: writer() as never,
+      stderr: stderr as never,
+      spawn: fakeSpawn().fn,
+      tmuxPlayBin: '/tmp/tmux-play.js',
+    });
+
+    expect(result).toEqual({ code: 0 });
+    expect(existsSync(legacyPath)).toBe(false);
+    expect(parseYaml(await readFile(configPath, 'utf8')).profiles).toBeUndefined();
+    expect(await readFile(`${configPath}.bak`, 'utf8')).toBe(legacyConfig);
+    const output = stderr.text();
+    const moveNotice =
+      `playbook: moved config from ${legacyPath} to ${configPath}\n`;
+    expect(output).toContain(moveNotice);
+    expect(output.indexOf(moveNotice)).toBeLessThan(
+      output.indexOf(`playbook: migrated ${configPath}`),
+    );
+    expect(output).not.toContain('created config');
+  });
+
   it('keeps comments attached to a scalar agent', async () => {
     const { configPath } = await launchWith(
       [
@@ -398,7 +439,8 @@ describe('live acceptance gate config (PBCLI-32)', () => {
     const { liveConfig } = await import(
       new URL('../../../acceptance/live-config.ts', import.meta.url).href
     );
-    const top = parseYaml(liveConfig());
+    const reviewerInstruction = 'Keep the acceptance marker continuous.';
+    const top = parseYaml(liveConfig({ reviewerInstruction }));
     const { config, playbooks } = await composeGenericConfig(
       top,
       (specifier: string) => import(specifier),
@@ -407,15 +449,26 @@ describe('live acceptance gate config (PBCLI-32)', () => {
     expect(playbooks.map((p: any) => p.id).sort()).toEqual([
       'code',
       'decide',
+      'dev',
       'review',
     ]);
     expect(config.captain.from).toBe(PLAYBOOK_CAPTAIN_MODULE);
     expect(config.captain.adapter).toBe('claude');
-    // The release gate intentionally shares these stable session players.
+    // The release gate intentionally shares these stable session players;
+    // DR-044 keeps the DEV Analyst a distinct player.
     expect(config.players.map((p: any) => `${p.id} ${p.adapter}`)).toEqual([
       'acceptance.dev.coder claude',
       'acceptance.dev.reviewer codex',
+      'acceptance.dev.analyst claude',
     ]);
+    expect(config.captain.options.playbooks.dev.roles).toEqual({
+      analyst: expect.objectContaining({ playerId: 'acceptance.dev.analyst' }),
+    });
+    expect(
+      config.players.find((player: any) =>
+        player.id === 'acceptance.dev.reviewer',
+      )?.instruction,
+    ).toBe(reviewerInstruction);
   });
 
   it('composes the selected DECIDE current-tuning overlay', async () => {
@@ -431,14 +484,21 @@ describe('live acceptance gate config (PBCLI-32)', () => {
       (specifier: string) => import(specifier),
     );
 
-    expect(config.captain.effort).toBe('low');
+    expect(config.captain).toMatchObject({ effort: 'low', fastMode: false });
     expect(config.players).toEqual([
       expect.objectContaining({
         id: 'acceptance.dev.coder',
         effort: 'high',
+        fastMode: true,
       }),
       expect.objectContaining({
         id: 'acceptance.dev.reviewer',
+        effort: 'high',
+        fastMode: false,
+      }),
+      // The overlay leaves the DEV Analyst on its primary-config tuning.
+      expect.objectContaining({
+        id: 'acceptance.dev.analyst',
         effort: 'high',
       }),
     ]);
@@ -448,6 +508,7 @@ describe('live acceptance gate config (PBCLI-32)', () => {
       playerId: 'acceptance.dev.reviewer',
       model: { kind: 'provider-default' },
       effort: { kind: 'provider-default' },
+      fastMode: true,
     });
   });
 
@@ -714,6 +775,74 @@ describe('playbook launcher — validation (PBCLI-15)', () => {
 });
 
 describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
+  // PBCLI-11 / DR-053: the seeded lineup follows the credentials the seed can
+  // see. Every row states its own environment, so none of these depends on the
+  // machine running the suite — the whole point of keeping the SDK probe out
+  // of seeding.
+  async function seedUnder(env: Record<string, string>) {
+    const home = await makeTempHome();
+    const spawn = fakeSpawn();
+    const stderr = writer();
+    const configPath = resolveUserConfigPath({}, home);
+    const result = await runPlaybookCli({
+      argv: [],
+      env,
+      homeDir: home,
+      stderr,
+      stdout: writer(),
+      spawn: spawn.fn,
+      launchManagedTmuxPlay: fakeManagedLaunch(spawn),
+      tmuxPlayBin: '/tmp/tmux-play.js',
+      probeAdapterSdk: async () => true,
+    });
+    return {
+      result,
+      stderrText: stderr.text(),
+      seeded: parseYaml(await readFile(configPath, 'utf8')),
+    };
+  }
+
+  it('seeds the adapter whose credentials it can see', async () => {
+    const onlyClaude = await seedUnder({ ANTHROPIC_API_KEY: 'a' });
+    expect(onlyClaude.seeded.captain.adapter).toBe('claude');
+    expect(onlyClaude.seeded.players['dev.coder']).toEqual({
+      adapter: 'claude',
+      model: 'claude-opus-5-5',
+      effort: 'high',
+      permissions: { mode: 'auto' },
+    });
+    expect(onlyClaude.stderrText).not.toContain('no adapter probed ready');
+
+    // A codex lineup carries the .git grant its sandbox needs; claude's does
+    // not. This row targets codex deliberately and spends no provider call.
+    const onlyCodex = await seedUnder({ OPENAI_API_KEY: 'o' });
+    expect(onlyCodex.seeded.captain.adapter).toBe('codex');
+    expect(onlyCodex.seeded.players['dev.coder']).toEqual({
+      adapter: 'codex',
+      model: 'gpt-6-sol',
+      effort: 'high',
+      permissions: { mode: 'auto', writablePaths: ['.git'] },
+    });
+    expect(onlyCodex.seeded.players['dev.reviewer'].adapter).toBe('codex');
+    expect(onlyCodex.seeded.players['dev.reviewer'].effort).toBe('xhigh');
+    expect(onlyCodex.stderrText).not.toContain('no adapter probed ready');
+  });
+
+  it('prefers the first ready adapter by fixed order, not by probe order', async () => {
+    const both = await seedUnder({ ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' });
+    expect(both.seeded.captain.adapter).toBe('claude');
+    expect(both.stderrText).not.toContain('no adapter probed ready');
+  });
+
+  it('seeds the documented default and says so when nothing is ready', async () => {
+    const none = await seedUnder({});
+    // A first run still ends with a config to edit; the readiness gate states
+    // the same diagnosis with its remedies a moment later.
+    expect(none.seeded.captain.adapter).toBe('claude');
+    expect(none.seeded.players['dev.coder'].adapter).toBe('claude');
+    expect(none.stderrText).toContain('no adapter probed ready; seeded claude');
+  });
+
   it('seeds the starter config, composes, and launches the composed config', async () => {
     const home = await makeTempHome();
     const spawn = fakeSpawn();
@@ -740,10 +869,11 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     expect(seeded).toContain('@sublang/playbook/code/registry');
     expect(seeded).toContain('@sublang/playbook/review/registry');
     expect(seeded).toContain('@sublang/playbook/decide/registry');
-    expect(seeded).toContain('claude-opus-4-8[1m]');
-    expect(seeded).toContain('gpt-5.5');
+    expect(seeded).toContain('@sublang/playbook/dev/registry');
+    expect(seeded).toContain('@sublang/playbook/branch/registry');
+    expect(seeded).toContain('@sublang/playbook/pr/registry');
+    expect(seeded).toContain('claude-opus-5-5');
     expect(seeded).not.toContain('committer:');
-    expect(seeded).toContain('.git');
     expect(stderr.text()).toContain(`created config at ${configPath}`);
 
     // PBCLI-11/13: the seed writes stable top-level players and explicit roles.
@@ -751,24 +881,32 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     expect(seededParsed.profiles).toBeUndefined();
     expect(seededParsed.captain).toMatchObject({
       adapter: 'claude',
-      model: 'claude-opus-4-8',
+      model: 'claude-opus-5-5',
       effort: 'high',
       permissions: { mode: 'auto' },
     });
     expect(seededParsed.players).toEqual({
       'dev.coder': {
         adapter: 'claude',
-        model: 'claude-opus-4-8[1m]',
-        effort: 'xhigh',
+        model: 'claude-opus-5-5',
+        effort: 'high',
         permissions: { mode: 'auto' },
       },
       'dev.reviewer': {
-        adapter: 'codex',
-        model: 'gpt-5.5',
+        adapter: 'claude',
+        model: 'claude-opus-5-5',
         effort: 'xhigh',
-        permissions: { mode: 'auto', writablePaths: ['.git'] },
+        permissions: { mode: 'auto' },
+      },
+      'dev.analyst': {
+        adapter: 'claude',
+        model: 'claude-opus-5-5',
+        effort: 'xhigh',
+        permissions: { mode: 'auto' },
       },
     });
+    // The comments still document codex as an option; no seeded value names it.
+    expect(JSON.stringify(seededParsed)).not.toContain('codex');
     expect(seededParsed.playbooks.code.roles).toEqual({ coder: 'dev.coder' });
     expect(seededParsed.playbooks.review.roles).toEqual({
       coder: 'dev.coder',
@@ -777,13 +915,19 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     expect(seededParsed.playbooks.decide.roles).toEqual(
       seededParsed.playbooks.review.roles,
     );
+    expect(seededParsed.playbooks.dev.roles).toEqual({
+      analyst: 'dev.analyst',
+    });
+    // DR-050: BRANCH and PR reuse dev.coder; the seed adds no player.
+    expect(seededParsed.playbooks.branch.roles).toEqual({ coder: 'dev.coder' });
+    expect(seededParsed.playbooks.pr.roles).toEqual({ coder: 'dev.coder' });
 
     expect(spawn.calls).toHaveLength(1);
     const composed = parseYaml(spawn.configs[0].content);
     expect(composed.captain.from).toBe(PLAYBOOK_CAPTAIN_MODULE);
     expect(composed.captain).toMatchObject({
       adapter: 'claude',
-      model: 'claude-opus-4-8',
+      model: 'claude-opus-5-5',
       effort: 'high',
       // PBCLI-11: every seeded agent, including the claude Captain, runs in
       // cligent's protected auto mode.
@@ -793,17 +937,24 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
       {
         id: 'dev.coder',
         adapter: 'claude',
-        model: 'claude-opus-4-8[1m]',
+        model: 'claude-opus-5-5',
+        effort: 'high',
+        permissions: { mode: 'auto' },
+      },
+      {
+        id: 'dev.reviewer',
+        adapter: 'claude',
+        model: 'claude-opus-5-5',
         effort: 'xhigh',
         // PBCLI-11: seeded claude roles get auto mode, no writablePaths.
         permissions: { mode: 'auto' },
       },
       {
-        id: 'dev.reviewer',
-        adapter: 'codex',
-        model: 'gpt-5.5',
+        id: 'dev.analyst',
+        adapter: 'claude',
+        model: 'claude-opus-5-5',
         effort: 'xhigh',
-        permissions: { mode: 'auto', writablePaths: ['.git'] },
+        permissions: { mode: 'auto' },
       },
     ]);
     expect(composed.layout.initialVisible).toEqual(['dev.coder']);
@@ -813,11 +964,14 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
       roles: {
         coder: {
           playerId: 'dev.coder',
+          // PBCLI-11: the role names no model or effort of its own, so
+          // both inherit the seeded player default rather than falling
+          // back to the provider's.
           model: {
             kind: 'value',
-            value: 'claude-opus-4-8[1m]',
+            value: 'claude-opus-5-5',
           },
-          effort: { kind: 'value', value: 'xhigh' },
+          effort: { kind: 'value', value: 'high' },
         },
       },
       options: {},
@@ -829,6 +983,7 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     expect(loaded.config.players.map((p: { id: string }) => p.id)).toEqual([
       'dev.coder',
       'dev.reviewer',
+      'dev.analyst',
     ]);
   });
 
@@ -857,6 +1012,480 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     const kept = await readFile(resolveUserConfigPath({}, home), 'utf8');
     expect(kept).toBe(minimalConfig());
   });
+
+  // DR-043: the config moved under the shared Spex root, and a user-authored
+  // file cannot be regenerated, so it is relocated rather than reseeded.
+  it.each([
+    { label: '0600', mode: 0o600 },
+    { label: '0644', mode: 0o644 },
+  ])('relocates exact bytes and $label mode once', async ({ mode }) => {
+    const home = await makeTempHome();
+    const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    await mkdir(dirname(legacy), { recursive: true });
+    const source = `# preserve this byte-for-byte\n${minimalConfig()}`;
+    await writeFile(legacy, source, 'utf8');
+    await chmod(legacy, mode);
+    const canonical = resolveUserConfigPath({}, home);
+    const spawn = fakeSpawn();
+    const stderr = writer();
+
+    await runPlaybookCli({
+      argv: [],
+      env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr,
+      stdout: writer(),
+      spawn: spawn.fn,
+      launchManagedTmuxPlay: fakeManagedLaunch(spawn),
+      tmuxPlayBin: '/tmp/tmux-play.js',
+      probeAdapterSdk: async () => true,
+    });
+
+    // The bytes move intact, the old path is gone, and no seed happened.
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect((await lstat(canonical)).mode & 0o777).toBe(mode);
+    expect(existsSync(legacy)).toBe(false);
+    expect(stderr.text()).toContain(
+      `playbook: moved config from ${legacy} to ${canonical}\n`,
+    );
+    expect(stderr.text()).not.toContain('created config');
+
+    // A second launch is a no-op: nothing left to relocate.
+    const again = writer();
+    await runPlaybookCli({
+      argv: [],
+      env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr: again,
+      stdout: writer(),
+      spawn: fakeSpawn().fn,
+      launchManagedTmuxPlay: fakeManagedLaunch(spawn),
+      tmuxPlayBin: '/tmp/tmux-play.js',
+      probeAdapterSdk: async () => true,
+    });
+    expect(again.text()).not.toContain('moved config from');
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect((await lstat(canonical)).mode & 0o777).toBe(mode);
+  });
+
+  it('rejects every target-changing primary locator through both front ends', async () => {
+    const home = await makeTempHome();
+    const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = resolveUserConfigPath({}, home);
+    const overlay = join(home, 'absolute-overlay.yaml');
+    const relativeFrom = [
+      ['dot', './dot.registry.mjs'],
+      ['parent', '../parent.registry.mjs'],
+      ['backslash_dot', '.\\dot.registry.mjs'],
+      ['backslash_parent', '..\\parent.registry.mjs'],
+    ] as const;
+    const source = [
+      'sessions: session-state',
+      'captain: claude',
+      'players: {}',
+      'playbooks:',
+      ...relativeFrom.flatMap(([id, from]) => [
+        `  ${id}:`,
+        `    from: '${from}'`,
+        '    roles: {}',
+      ]),
+      '',
+    ].join('\n');
+    await mkdir(dirname(legacy), { recursive: true });
+    await writeFile(legacy, source, 'utf8');
+    await chmod(legacy, 0o600);
+    await writeFile(
+      overlay,
+      `sessions: ${JSON.stringify(join(home, 'shadow-sessions'))}\n`,
+      'utf8',
+    );
+    const spawn = fakeSpawn();
+    const replacements = [
+      ['sessions', resolve(dirname(legacy), 'session-state')],
+      ...relativeFrom.map(([id, from]) => [
+        `playbooks.${id}.from`,
+        pathToFileURL(resolve(dirname(legacy), from)).href,
+      ]),
+    ];
+    let imports = 0;
+    let hosts = 0;
+
+    for (const argv of [
+      ['--with', overlay],
+      ['run', '--with', overlay, 'hello'],
+    ]) {
+      const stderr = writer();
+      const result = await runPlaybookCli({
+        argv,
+        env: { HOME: home },
+        homeDir: home,
+        stderr,
+        stdout: writer(),
+        spawn: spawn.fn,
+        tmuxPlayBin: '/tmp/tmux-play.js',
+        loadModule: async () => {
+          imports += 1;
+          throw new Error('unsafe locator must reject before import');
+        },
+        createHostRuntime: async () => {
+          hosts += 1;
+          throw new Error('unsafe locator must reject before host work');
+        },
+      });
+
+      expect(result).toEqual({ code: 1 });
+      expect(stderr.text()).toContain(`legacy config at ${legacy}`);
+      expect(stderr.text()).toContain(`change targets under ${canonical}`);
+      for (const [configPath, replacement] of replacements) {
+        expect(stderr.text()).toContain(
+          `${configPath} = ${JSON.stringify(replacement)}`,
+        );
+      }
+      expect(stderr.text()).not.toMatch(/moved config|created config|migrated/);
+      expect(existsSync(canonical)).toBe(false);
+      expect(await readFile(legacy, 'utf8')).toBe(source);
+      expect((await lstat(legacy)).mode & 0o777).toBe(0o600);
+    }
+    expect(spawn.calls).toHaveLength(0);
+    expect({ imports, hosts }).toEqual({ imports: 0, hosts: 0 });
+  });
+
+  it('relocates relative locators whose absolute targets stay unchanged', async () => {
+    const home = await makeTempHome();
+    const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = resolveUserConfigPath({}, home);
+    const overlay = join(home, 'package-overlay.yaml');
+    const source =
+      `sessions: ../../session-state\n` +
+      minimalConfig().replace(
+        '"@sublang/playbook/code/registry"',
+        '"../../registry.mjs"',
+      );
+    await mkdir(dirname(legacy), { recursive: true });
+    await writeFile(legacy, source, 'utf8');
+    await writeFile(
+      overlay,
+      [
+        'playbooks:',
+        '  code:',
+        '    from: "@sublang/playbook/code/registry"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const stderr = writer();
+
+    const result = await runPlaybookCli({
+      argv: ['--list', '--with', overlay],
+      env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr,
+      stdout: writer(),
+      spawn: fakeSpawn().fn,
+      tmuxPlayBin: '/tmp/tmux-play.js',
+    });
+
+    expect(result).toEqual({ code: 0 });
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect(existsSync(legacy)).toBe(false);
+    expect(stderr.text()).toContain(
+      `playbook: moved config from ${legacy} to ${canonical}\n`,
+    );
+  });
+
+  // DR-064: `config/` took over from the root's own `playbook/` namespace,
+  // which is now the nearer of the two former locations. The move is a
+  // sibling one, so every relative locator keeps its absolute target.
+  it('relocates the root former config ahead of an untouched XDG file', async () => {
+    const home = await makeTempHome();
+    const former = join(home, '.spex', 'playbook', 'playbook.config.yaml');
+    const xdg = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = resolveUserConfigPath({}, home);
+    const overlay = join(home, 'package-overlay.yaml');
+    const source =
+      `# the root's own namespace, byte for byte\n` +
+      `sessions: ../../session-state\n` +
+      minimalConfig().replace(
+        '"@sublang/playbook/code/registry"',
+        '"../../registry.mjs"',
+      );
+    const xdgBytes = `# the farther former location stays put\n${minimalConfig()}`;
+    await mkdir(dirname(former), { recursive: true });
+    await writeFile(former, source, 'utf8');
+    await chmod(former, 0o600);
+    await mkdir(dirname(xdg), { recursive: true });
+    await writeFile(xdg, xdgBytes, 'utf8');
+    await chmod(xdg, 0o644);
+    await writeFile(
+      overlay,
+      [
+        'playbooks:',
+        '  code:',
+        '    from: "@sublang/playbook/code/registry"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const stderr = writer();
+
+    const result = await runPlaybookCli({
+      argv: ['--list', '--with', overlay],
+      env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr,
+      stdout: writer(),
+      spawn: fakeSpawn().fn,
+      tmuxPlayBin: '/tmp/tmux-play.js',
+    });
+
+    // The bytes and mode move intact, and the relative `sessions` and
+    // filesystem `from` locators reach the same targets as before.
+    expect(result).toEqual({ code: 0 });
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect((await lstat(canonical)).mode & 0o777).toBe(0o600);
+    expect(resolve(dirname(canonical), '../../session-state')).toBe(
+      resolve(dirname(former), '../../session-state'),
+    );
+    // The emptied former directory goes with the file it held.
+    expect(existsSync(former)).toBe(false);
+    expect(existsSync(dirname(former))).toBe(false);
+    // Exactly one file moves: the farther former location is untouched.
+    expect(await readFile(xdg, 'utf8')).toBe(xdgBytes);
+    expect((await lstat(xdg)).mode & 0o777).toBe(0o644);
+    expect(stderr.text()).toContain(
+      `playbook: moved config from ${former} to ${canonical}\n`,
+    );
+    expect(stderr.text()).not.toContain(xdg);
+    expect(stderr.text()).not.toContain('created config');
+
+    // A second launch finds the canonical file and reports nothing.
+    const again = writer();
+    await runPlaybookCli({
+      argv: ['--list', '--with', overlay],
+      env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr: again,
+      stdout: writer(),
+      spawn: fakeSpawn().fn,
+      tmuxPlayBin: '/tmp/tmux-play.js',
+    });
+    expect(again.text()).not.toContain('moved config from');
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect(await readFile(xdg, 'utf8')).toBe(xdgBytes);
+  });
+
+  it('uses canonical and keeps legacy readable after interrupted publication', async () => {
+    const home = await makeTempHome();
+    const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = resolveUserConfigPath({}, home);
+    const legacyBytes =
+      `# legacy must remain\nnotifications:\n  player_finished: off\n` +
+      minimalConfig();
+    const canonicalBytes =
+      `# canonical wins\nnotifications:\n  player_finished: bell\n` +
+      minimalConfig();
+    await mkdir(dirname(legacy), { recursive: true });
+    await mkdir(dirname(canonical), { recursive: true });
+    await writeFile(legacy, legacyBytes, 'utf8');
+    await chmod(legacy, 0o600);
+    await writeFile(canonical, canonicalBytes, 'utf8');
+    await chmod(canonical, 0o644);
+    const stderr = writer();
+    const spawn = fakeSpawn();
+
+    const result = await runPlaybookCli({
+      argv: [],
+      env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr,
+      stdout: writer(),
+      spawn: spawn.fn,
+      launchManagedTmuxPlay: fakeManagedLaunch(spawn),
+      tmuxPlayBin: '/tmp/tmux-play.js',
+      probeAdapterSdk: async () => true,
+    });
+
+    expect(result).toEqual({ code: 0 });
+    expect(await readFile(canonical, 'utf8')).toBe(canonicalBytes);
+    expect((await lstat(canonical)).mode & 0o777).toBe(0o644);
+    expect(await readFile(legacy, 'utf8')).toBe(legacyBytes);
+    expect((await lstat(legacy)).mode & 0o777).toBe(0o600);
+    expect(stderr.text()).not.toContain('moved config from');
+    expect(
+      parseYaml(spawn.configs[0].content).notifications.player_finished,
+    ).toBe('bell');
+  });
+
+  it.each(['live symlink', 'dangling symlink', 'directory'])(
+    'uses an existing canonical config despite a legacy %s',
+    async (kind) => {
+      const home = await makeTempHome();
+      const legacy = join(
+        home,
+        '.config',
+        'playbook',
+        'playbook.config.yaml',
+      );
+      const canonical = resolveUserConfigPath({}, home);
+      const canonicalBytes = `# canonical remains authoritative\n${minimalConfig()}`;
+      await mkdir(dirname(legacy), { recursive: true });
+      await mkdir(dirname(canonical), { recursive: true });
+      await writeFile(canonical, canonicalBytes, 'utf8');
+      if (kind.endsWith('symlink')) {
+        const target = join(home, 'obsolete-legacy-target.yaml');
+        if (kind === 'live symlink') {
+          await writeFile(target, minimalConfig(), 'utf8');
+        }
+        await symlink(target, legacy);
+      } else {
+        await mkdir(legacy);
+      }
+      const stderr = writer();
+      const spawn = fakeSpawn();
+
+      const result = await runPlaybookCli({
+        argv: [],
+        env: { HOME: home, ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+        homeDir: home,
+        stderr,
+        stdout: writer(),
+        spawn: spawn.fn,
+        launchManagedTmuxPlay: fakeManagedLaunch(spawn),
+        tmuxPlayBin: '/tmp/tmux-play.js',
+        probeAdapterSdk: async () => true,
+      });
+
+      expect(result).toEqual({ code: 0 });
+      expect(await readFile(canonical, 'utf8')).toBe(canonicalBytes);
+      expect(
+        kind.endsWith('symlink')
+          ? (await lstat(legacy)).isSymbolicLink()
+          : (await lstat(legacy)).isDirectory(),
+      ).toBe(true);
+      expect(stderr.text()).not.toContain('moved config from');
+    },
+  );
+
+  it.each(['live symlink', 'dangling symlink', 'directory'])(
+    'rejects a legacy %s without following or replacing it',
+    async (kind) => {
+      const home = await makeTempHome();
+      const legacy = join(
+        home,
+        '.config',
+        'playbook',
+        'playbook.config.yaml',
+      );
+      const canonical = resolveUserConfigPath({}, home);
+      await mkdir(dirname(legacy), { recursive: true });
+      if (kind.endsWith('symlink')) {
+        const target = join(home, 'legacy-target.yaml');
+        if (kind === 'live symlink') {
+          await writeFile(target, minimalConfig(), 'utf8');
+        }
+        await symlink(target, legacy);
+      } else {
+        await mkdir(legacy);
+      }
+      const spawn = fakeSpawn();
+
+      for (const argv of [[], ['run', 'hello']]) {
+        const stderr = writer();
+        const result = await runPlaybookCli({
+          argv,
+          env: { HOME: home },
+          homeDir: home,
+          stderr,
+          stdout: writer(),
+          spawn: spawn.fn,
+          tmuxPlayBin: '/tmp/tmux-play.js',
+        });
+        expect(result).toEqual({ code: 1 });
+        expect(stderr.text()).toMatch(/legacy config.*not a regular file/);
+      }
+      expect(existsSync(canonical)).toBe(false);
+      expect(kind.endsWith('symlink')
+        ? (await lstat(legacy)).isSymbolicLink()
+        : (await lstat(legacy)).isDirectory()).toBe(true);
+      expect(spawn.calls).toHaveLength(0);
+    },
+  );
+
+  it('keeps top-level help, run help, and raw config relocation-free', async () => {
+    const home = await makeTempHome();
+    const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = resolveUserConfigPath({}, home);
+    const source = `# help and raw launch must not move this\n${minimalConfig()}`;
+    await mkdir(dirname(legacy), { recursive: true });
+    await writeFile(legacy, source, 'utf8');
+    const spawn = fakeSpawn();
+
+    for (const argv of [['--help'], ['run', '--help']]) {
+      const result = await runPlaybookCli({
+        argv,
+        env: { HOME: home },
+        homeDir: home,
+        stderr: writer(),
+        stdout: writer(),
+        spawn: spawn.fn,
+        tmuxPlayBin: '/tmp/tmux-play.js',
+      });
+      expect(result).toEqual({ code: 0 });
+      expect(await readFile(legacy, 'utf8')).toBe(source);
+      expect(existsSync(canonical)).toBe(false);
+    }
+
+    const raw = await runPlaybookCli({
+      argv: ['--config', '/tmp/raw.yaml'],
+      env: { HOME: home },
+      homeDir: home,
+      stderr: writer(),
+      stdout: writer(),
+      spawn: spawn.fn,
+      tmuxPlayBin: '/tmp/tmux-play.js',
+    });
+    expect(raw).toEqual({ code: 0 });
+    expect(await readFile(legacy, 'utf8')).toBe(source);
+    expect(existsSync(canonical)).toBe(false);
+    expect(spawn.calls).toHaveLength(1);
+
+    const invalid = await runPlaybookCli({
+      argv: ['--session'],
+      env: { HOME: home },
+      homeDir: home,
+      stderr: writer(),
+      stdout: writer(),
+      spawn: spawn.fn,
+      tmuxPlayBin: '/tmp/tmux-play.js',
+    });
+    expect(invalid).toEqual({ code: 1 });
+    expect(await readFile(legacy, 'utf8')).toBe(source);
+    expect(existsSync(canonical)).toBe(false);
+    expect(spawn.calls).toHaveLength(1);
+  });
+
+  it.each([
+    { label: 'top-level help', argv: ['--help'] },
+    { label: 'run help', argv: ['run', '--help'] },
+  ])(
+    'uses the process home fallback when HOME is blank for $label',
+    async ({ argv }) => {
+      const stdout = writer();
+      const result = await runPlaybookCli({
+        argv,
+        env: { HOME: '' },
+        stderr: writer(),
+        stdout,
+        spawn: fakeSpawn().fn,
+        tmuxPlayBin: '/tmp/tmux-play.js',
+      });
+
+      expect(result).toEqual({ code: 0 });
+      expect(stdout.text()).toContain(
+        join(homedir(), '.spex', 'config', 'playbook.config.yaml'),
+      );
+    },
+  );
 });
 
 describe('playbook launcher — readiness (PBCLI-16)', () => {
@@ -1078,7 +1707,7 @@ describe('playbook launcher — adapter SDK preflight (PBCLI-41)', () => {
     expect(result.code).not.toBe(0);
     expect(result.code).not.toBe(127);
     expect(stderr.text()).toContain(
-      `Adapter runtimes not usable: claude (${CLAUDE_TARGET.bundles} not installed)`,
+      `Adapter runtimes not usable: claude (${CLAUDE_TARGET.bundles ?? CLAUDE_TARGET.package} not installed)`,
     );
     expect(stderr.text()).toContain(
       `npm install -g ${CLAUDE_TARGET.repairSpec}`,
@@ -1332,15 +1961,21 @@ function pkgSelfSpec(): string {
 describe('playbook launcher — CLI surface (PBCLI-17)', () => {
   it('lists configured playbooks without launching', async () => {
     const home = await makeTempHome();
-    await writeUserConfig(home, minimalConfig());
+    const unusedSessionsPath = join(home, 'not-a-directory');
+    await writeFile(unusedSessionsPath, 'occupied\n', 'utf8');
+    await writeUserConfig(
+      home,
+      `sessions: ${JSON.stringify(unusedSessionsPath)}\n${minimalConfig()}`,
+    );
     const spawn = fakeSpawn();
     const stdout = writer();
+    const stderr = writer();
 
     const result = await runPlaybookCli({
       argv: ['--list'],
       env: {},
       homeDir: home,
-      stderr: writer(),
+      stderr,
       stdout,
       spawn: spawn.fn,
       tmuxPlayBin: '/tmp/tmux-play.js',
@@ -1354,6 +1989,29 @@ describe('playbook launcher — CLI surface (PBCLI-17)', () => {
     expect(stdout.text()).toContain('/code');
     expect(stdout.text()).toContain('code');
     expect(stdout.text()).toContain('coding intent');
+    expect(stderr.text()).toBe('');
+    expect(spawn.calls).toHaveLength(0);
+
+    await writeUserConfig(
+      home,
+      `sessions: "~another-user/sessions"\n${minimalConfig()}`,
+    );
+    const invalidStdout = writer();
+    const invalidStderr = writer();
+    const invalid = await runPlaybookCli({
+      argv: ['--list'],
+      env: {},
+      homeDir: home,
+      stderr: invalidStderr,
+      stdout: invalidStdout,
+      spawn: spawn.fn,
+      tmuxPlayBin: '/tmp/tmux-play.js',
+      probeAdapterSdk: async () => true,
+    });
+
+    expect(invalid).toEqual({ code: 1 });
+    expect(invalidStdout.text()).toBe('');
+    expect(invalidStderr.text()).toMatch(/named-user tilde expansion/);
     expect(spawn.calls).toHaveLength(0);
   });
 
@@ -1390,7 +2048,8 @@ describe('playbook launcher — CLI surface (PBCLI-17)', () => {
     expect(stdout.text()).toContain('Agent swap recipe:');
     expect(stdout.text()).toContain('stable players.<id>');
     expect(stdout.text()).toContain('playbooks.<id>.roles.<role>');
-    expect(stdout.text()).toContain('boolean false selects the provider default');
+    expect(stdout.text()).toContain('false selects provider-default model/effort');
+    expect(stdout.text()).toContain('fastMode false is a literal disabled request');
     expect(stdout.text()).toContain('distinct ids stay isolated');
     expect(stdout.text()).toContain('Migration warning:');
     expect(stdout.text()).toContain('playbooks.<id>.players is removed');
@@ -1590,6 +2249,7 @@ describe('playbook launcher — CLI surface (PBCLI-17)', () => {
         );
         return {
           sessionId: id,
+          workDir,
           async cancel() {},
           async attach() {},
         };
@@ -1602,6 +2262,232 @@ describe('playbook launcher — CLI surface (PBCLI-17)', () => {
       noProvision: true,
       workDirOwnedByLauncher: true,
     });
+  });
+
+  it('selects from the configured sessions directory before managed launch', async () => {
+    const id = '90000000-0000-4000-8000-000000000079';
+    const root = await mkdtemp(join(tmpdir(), 'playbook-sessions-locator-'));
+    tempDirs.push(root);
+    await mkdir(join(root, 'through'));
+    await mkdir(join(root, 'sessions'), { mode: 0o700 });
+    const sessionsDir = join(root, 'through', '..', 'sessions');
+    const home = await makeTempHome();
+    const config = [
+      `sessions: ${JSON.stringify(sessionsDir)}`,
+      'captain: claude',
+      'players:',
+      '  dev.coder: codex',
+      'playbooks:',
+      '  code:',
+      '    from: "mod://code"',
+      '    roles: { coder: dev.coder }',
+      '',
+    ].join('\n');
+    await writeUserConfig(home, config);
+    const registry = {
+      ...fakeEntry,
+      requiredRoleIds: ['coder'],
+    };
+    const plan = await loadLaunchPlan({
+      userConfigPath: resolveUserConfigPath({}, home),
+      loadModule: loader({ 'mod://code': { default: registry } }),
+    });
+    const execution = executionConfigFromPlan(plan);
+    const record = validateCaptainSessionRecord({
+      schemaVersion: 6,
+      kind: 'captain-session',
+      state: 'settled',
+      sessionId: id,
+      createdAt: '2026-08-31T18:00:00.000Z',
+      updatedAt: '2026-08-31T18:00:00.001Z',
+      cwd: process.cwd(),
+      structuralProjection: projectCaptainSessionStructure(execution),
+      lastAppliedExecutionProjection: execution,
+      snapshot: selectedTurnZeroSnapshot(execution),
+      effectLedger: emptyEffectLedger(),
+      unresolvedEffects: [],
+      retainedGenerations: {},
+    });
+    const recordPath = join(root, 'sessions', `${id}.json`);
+    await writeFile(recordPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    await chmod(recordPath, 0o600);
+    await createCaptainSessionStore({ sessionsDir }).migrate(id);
+    let descriptor: any;
+    let hostProjection: any;
+    let imports = 0;
+
+    const out = await managedCliHarness({
+      argv: ['--session', id],
+      config,
+      homeDir: home,
+      sessionId: id,
+      loadModule: async () => {
+        imports += 1;
+        throw new Error('selected outer process must not import a registry');
+      },
+      launchManagedTmuxPlay: async (options: any) => {
+        hostProjection = parseYaml(await readFile(options.configPath, 'utf8'));
+        const workDir = await requestManagedSessionCommand(options);
+        descriptor = JSON.parse(
+          await readFile(
+            join(workDir, MANAGED_INTERACTIVE_PAYLOAD_FILE),
+            'utf8',
+          ),
+        );
+        return {
+          sessionId: id,
+          workDir,
+          async cancel() {},
+          async attach() {},
+        };
+      },
+    });
+
+    expect(out.result).toEqual({ code: 0 });
+    expect(imports).toBe(0);
+    expect(descriptor.sessionsDir).toBe(sessionsDir);
+    expect(hostProjection).not.toHaveProperty('sessions');
+    expect(descriptor.executionProjection).not.toHaveProperty('sessions');
+    expect(
+      projectCaptainSessionStructure(descriptor.executionProjection),
+    ).not.toHaveProperty('sessions');
+  });
+
+  it('gives an injected store precedence over an invalid config locator', async () => {
+    const id = '90000000-0000-4000-8000-000000000080';
+    const root = await mkdtemp(join(tmpdir(), 'playbook-injected-sessions-'));
+    tempDirs.push(root);
+    const injectedSessionsDir = join(root, 'injected');
+    await mkdir(injectedSessionsDir, { mode: 0o700 });
+    let descriptor: any;
+
+    const out = await managedCliHarness({
+      config: `sessions: "~another-user/sessions"\n${minimalConfig()}`,
+      sessionId: id,
+      sessionStore: { sessionsDir: injectedSessionsDir },
+      launchManagedTmuxPlay: async (options: any) => {
+        const workDir = await requestManagedSessionCommand(options);
+        descriptor = JSON.parse(
+          await readFile(
+            join(workDir, MANAGED_INTERACTIVE_PAYLOAD_FILE),
+            'utf8',
+          ),
+        );
+        return {
+          sessionId: id,
+          workDir,
+          async cancel() {},
+          async attach() {},
+        };
+      },
+    });
+
+    expect(out.result).toEqual({ code: 0 });
+    expect(descriptor.sessionsDir).toBe(injectedSessionsDir);
+  });
+
+  it('fails an unusable sessions directory before import or managed launch', async () => {
+    const id = '90000000-0000-4000-8000-000000000081';
+    const root = await mkdtemp(join(tmpdir(), 'playbook-unusable-sessions-'));
+    tempDirs.push(root);
+    const sessionsDir = join(root, 'sessions');
+    await mkdir(sessionsDir, { mode: 0o700 });
+    await chmod(sessionsDir, 0o500);
+    let imports = 0;
+    let launches = 0;
+
+    const out = await managedCliHarness({
+      config: `sessions: ${JSON.stringify(sessionsDir)}\n${minimalConfig()}`,
+      sessionId: id,
+      loadModule: async () => {
+        imports += 1;
+        throw new Error('registry import must not begin');
+      },
+      launchManagedTmuxPlay: async () => {
+        launches += 1;
+        throw new Error('managed launch must not begin');
+      },
+    });
+
+    expect(out.result).toEqual({ code: 1 });
+    expect(out.stderr.text()).toMatch(/unsafe ownership, links, type, or owner access/);
+    expect(imports).toBe(0);
+    expect(launches).toBe(0);
+  });
+
+  it('claims accepted child readiness before reporting and cancels a collision', async () => {
+    const id = '90000000-0000-4000-8000-000000000062';
+    let workDir: string;
+    const events: string[] = [];
+    const stderr = {
+      write(value: string) {
+        events.push(`stderr:${String(value).trim()}`);
+        return true;
+      },
+      text() {
+        return events
+          .filter((event) => event.startsWith('stderr:'))
+          .join('\n');
+      },
+    };
+    const accepted = await managedCliHarness({
+      sessionId: id,
+      stderr,
+      async publishManagedReadinessWitness(path: string, sessionId: string) {
+        expect(path).toBe(workDir);
+        expect(sessionId).toBe(id);
+        events.push('readiness-claimed');
+      },
+      launchManagedTmuxPlay: async (options: any) => {
+        workDir = await requestManagedSessionCommand(options);
+        return {
+          sessionId: id,
+          workDir,
+          async cancel() {
+            events.push('cancel');
+          },
+          async attach() {
+            events.push('attach');
+          },
+        };
+      },
+    });
+    expect(accepted.result).toEqual({ code: 0 });
+    expect(events).toEqual([
+      'readiness-claimed',
+      `stderr:playbook: session ${id}`,
+      'attach',
+    ]);
+
+    events.length = 0;
+    const collided = await managedCliHarness({
+      sessionId: id,
+      stderr,
+      async publishManagedReadinessWitness() {
+        events.push('readiness-collision');
+        throw new Error('synthetic readiness claim collision');
+      },
+      launchManagedTmuxPlay: async (options: any) => {
+        workDir = await requestManagedSessionCommand(options);
+        return {
+          sessionId: id,
+          workDir,
+          async cancel() {
+            events.push('cancel');
+          },
+          async attach() {
+            events.push('attach');
+          },
+        };
+      },
+    });
+    expect(collided.result).toEqual({ code: 1 });
+    expect(events).toEqual([
+      'readiness-collision',
+      'cancel',
+      'stderr:playbook: failed to launch managed session: synthetic readiness claim collision',
+    ]);
+    expect(stderr.text()).not.toContain(`playbook: session ${id}`);
   });
 
   it('cancels a managed session on pre-launch, report-backpressure, and final pre-attach aborts', async () => {
@@ -1772,6 +2658,84 @@ describe('playbook launcher — CLI surface (PBCLI-17)', () => {
     expect(out.stderr.text()).not.toContain(`session ${id}\n`);
   });
 
+  it('cancels a prepared session whose child work directory is mismatched', async () => {
+    const id = '90000000-0000-4000-8000-000000000063';
+    const events: string[] = [];
+    const out = await managedCliHarness({
+      sessionId: id,
+      launchManagedTmuxPlay: async (options: any) => {
+        const childWorkDir = await mkdtemp(
+          join(tmpdir(), 'playbook-managed-child-work-'),
+        );
+        const returnedWorkDir = await mkdtemp(
+          join(tmpdir(), 'playbook-managed-returned-work-'),
+        );
+        const coordinationDir = await mkdtemp(
+          join(tmpdir(), 'playbook-managed-coordination-'),
+        );
+        tempDirs.push(childWorkDir, returnedWorkDir, coordinationDir);
+        await options.createSessionCommand({
+          sessionId: id,
+          cwd: options.cwd,
+          workDir: childWorkDir,
+          workDirOwnedByLauncher: true,
+          readinessPath: join(coordinationDir, 'status.json'),
+          inputGatePath: join(coordinationDir, 'input-ready'),
+          inputActivePath: join(coordinationDir, 'input-active'),
+          shutdownRequestPath: join(coordinationDir, 'shutdown-request'),
+          shutdownCompletePath: join(coordinationDir, 'shutdown-complete'),
+        });
+        return {
+          sessionId: id,
+          workDir: returnedWorkDir,
+          async cancel() {
+            events.push('cancel');
+          },
+          async attach() {
+            events.push('attach');
+          },
+        };
+      },
+    });
+
+    expect(out.result.code).toBe(1);
+    expect(events).toEqual(['cancel']);
+    expect(out.stderr.text()).toContain(
+      'prepared a mismatched work directory',
+    );
+    expect(out.stderr.text()).not.toContain(`session ${id}\n`);
+  });
+
+  it('cancels a prepared session without a child session command', async () => {
+    const id = '90000000-0000-4000-8000-000000000064';
+    const workDir = await mkdtemp(
+      join(tmpdir(), 'playbook-managed-unused-work-'),
+    );
+    tempDirs.push(workDir);
+    const events: string[] = [];
+    const out = await managedCliHarness({
+      sessionId: id,
+      omitManagedSessionCommand: true,
+      launchManagedTmuxPlay: async () => ({
+        sessionId: id,
+        workDir,
+        async cancel() {
+          events.push('cancel');
+        },
+        async attach() {
+          events.push('attach');
+        },
+      }),
+    });
+
+    expect(out.result.code).toBe(1);
+    expect(events).toEqual(['cancel']);
+    expect(out.stderr.text()).toContain(
+      'did not request a session command',
+    );
+    expect(out.stderr.text()).not.toContain(`session ${id}\n`);
+  });
+
   it('aborts managed activation before native signal hand-off', async () => {
     const id = '90000000-0000-4000-8000-000000000061';
     const processLike = new FakeProcessLike();
@@ -1877,8 +2841,9 @@ describe('playbook launcher — CLI surface (PBCLI-17)', () => {
     });
     const execution = executionConfigFromPlan(baseline);
     const structuralProjection = projectCaptainSessionStructure(execution);
+    const effectLedger = emptyEffectLedger();
     const settled = validateCaptainSessionRecord({
-      schemaVersion: 3,
+      schemaVersion: 6,
       kind: 'captain-session',
       state: 'settled',
       sessionId: id,
@@ -1888,6 +2853,9 @@ describe('playbook launcher — CLI surface (PBCLI-17)', () => {
       structuralProjection,
       lastAppliedExecutionProjection: execution,
       snapshot: selectedTurnZeroSnapshot(execution),
+      effectLedger,
+      unresolvedEffects: [],
+      retainedGenerations: {},
     });
     const uncertain = validateCaptainSessionRecord({
       ...settled,
@@ -1916,6 +2884,8 @@ describe('playbook launcher — CLI surface (PBCLI-17)', () => {
 
     let reads = 0;
     const sessionStore = {
+      async prepare() {},
+      async validate() { return { resumable: true, reasons: [] }; },
       async read() {
         reads += 1;
         return reads === 1 ? settled : uncertain;
@@ -1969,13 +2939,307 @@ describe('playbook launcher — CLI surface (PBCLI-17)', () => {
       'pane child rejected the raced uncertain record',
     );
   });
+
+  it('recovers selected abandonment phases before interactive planning and readiness', async () => {
+    const id = '90000000-0000-4000-8000-000000000065';
+    const attemptId = '90000000-0000-4000-8000-000000000066';
+    const frameSessionId = '80000000-0000-4000-8000-000000000065';
+    const home = await makeTempHome();
+    const configPath = resolveUserConfigPath({}, home);
+    const selectedRegistry = {
+      ...fakeEntry,
+      requiredRoleIds: ['coder'],
+      validateOptions: (options: unknown) => options,
+    };
+    await writeUserConfig(
+      home,
+      [
+        'captain: { adapter: claude, model: baseline-captain }',
+        'players:',
+        '  dev.coder: { adapter: codex, model: baseline-player }',
+        'playbooks:',
+        '  code: { from: mod://code, roles: { coder: dev.coder } }',
+        '',
+      ].join('\n'),
+    );
+    const baseline = await loadLaunchPlan({
+      userConfigPath: configPath,
+      loadModule: loader({ 'mod://code': { default: selectedRegistry } }),
+    });
+    const execution = executionConfigFromPlan(baseline);
+    const structuralProjection = projectCaptainSessionStructure(execution);
+    const effectLedger = emptyEffectLedger();
+    const settled = validateCaptainSessionRecord({
+      schemaVersion: 6,
+      kind: 'captain-session',
+      state: 'settled',
+      sessionId: id,
+      createdAt: '2026-08-12T18:00:00.000Z',
+      updatedAt: '2026-08-12T18:00:00.001Z',
+      cwd: process.cwd(),
+      structuralProjection,
+      lastAppliedExecutionProjection: execution,
+      snapshot: selectedTurnZeroSnapshot(execution),
+      effectLedger,
+      unresolvedEffects: [],
+      retainedGenerations: {},
+    });
+    const unresolvedEffects = [
+      {
+        classification: 'worktree-only-change',
+        baselineHead: 'a'.repeat(40),
+        afterHead: 'a'.repeat(40),
+      },
+    ];
+    const frame = {
+      playbookId: 'code',
+      sessionId: frameSessionId,
+      rootSessionId: frameSessionId,
+      depth: 0,
+      options: execution.catalog.code.options,
+      roleBindings: { coder: 'dev.coder' },
+      runtime: {
+        ...settled.snapshot.captain.runtime,
+        playbookId: 'code',
+      },
+    };
+    const uncertain = validateCaptainSessionRecord({
+      ...settled,
+      state: 'uncertain',
+      updatedAt: '2026-08-12T18:00:00.002Z',
+      snapshot: {
+        ...settled.snapshot,
+        mode: 'engaged.parked',
+        issuedSessionIds: [
+          ...settled.snapshot.issuedSessionIds,
+          frameSessionId,
+        ],
+        frames: [frame],
+      },
+      unresolvedEffects,
+      uncertain: {
+        baseUpdatedAt: settled.updatedAt,
+        input: 'abandon unresolved work',
+        attemptId,
+        attemptNumber: 1,
+        markedAt: '2026-08-12T18:00:00.002Z',
+        attemptedExecutionProjection: execution,
+        abandonment: {
+          phase: 'started',
+          rootPlaybookId: 'code',
+          unresolvedEffects,
+        },
+      },
+    });
+    const recovered = validateCaptainSessionRecord({
+      ...settled,
+      updatedAt: '2026-08-12T18:00:00.003Z',
+      snapshot: {
+        ...settled.snapshot,
+        lastAction: 'runtime',
+        lastSettlementStatus: 'ok',
+      },
+      unresolvedEffects,
+      settledAbandonment: {
+        phase: 'recovered',
+        attemptId,
+        rootPlaybookId: 'code',
+        unresolvedEffects,
+      },
+    });
+    const events: string[] = [];
+    let selected = uncertain;
+    const sessionStore = {
+      async prepare() {},
+      async validate() { return { resumable: true, reasons: [] }; },
+      async read() {
+        events.push('read');
+        return selected;
+      },
+      async acquire(acquiredId: string) {
+        expect(acquiredId).toBe(id);
+        events.push('acquire');
+        return {
+          async assertContinuable() {},
+          async recoverUnresolvedEffectAbandonment() {
+            events.push('recover');
+            return recovered;
+          },
+          async release() {
+            events.push('release');
+          },
+        };
+      },
+    };
+
+    const result = await runPlaybookCli({
+      argv: ['--session', id],
+      env: { ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr: writer(),
+      stdout: writer(),
+      tmuxPlayBin: '/tmp/tmux-play.js',
+      sessionStore,
+      probeAdapterSdk: async () => true,
+      launchManagedTmuxPlay: async () => {
+        events.push('launch');
+        throw new Error('stop after recovered planning');
+      },
+    });
+
+    expect(result).toEqual({ code: 1 });
+    expect(events).toEqual(['read', 'acquire', 'recover', 'release', 'launch']);
+
+    events.length = 0;
+    selected = recovered;
+    const settledResult = await runPlaybookCli({
+      argv: ['--session', id],
+      env: { ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
+      homeDir: home,
+      stderr: writer(),
+      stdout: writer(),
+      tmuxPlayBin: '/tmp/tmux-play.js',
+      sessionStore,
+      probeAdapterSdk: async () => true,
+      launchManagedTmuxPlay: async () => {
+        events.push('launch');
+        throw new Error('stop after settled-marker synchronization');
+      },
+    });
+    expect(settledResult).toEqual({ code: 1 });
+    expect(events).toEqual(['read', 'acquire', 'recover', 'release', 'launch']);
+  });
+});
+
+async function formerDefaultInteractiveSession() {
+  const home = await makeTempHome();
+  const env = { HOME: home, ANTHROPIC_API_KEY: 'a', XDG_STATE_HOME: join(home, 'xdg') };
+  const sourceDir = join(env.XDG_STATE_HOME, 'playbook', 'sessions');
+  const configPath = join(home, 'custom-config.yaml');
+  const config = [
+    'captain: claude',
+    'players: { dev.coder: claude }',
+    'playbooks:',
+    '  code: { from: mod://code, roles: { coder: dev.coder } }',
+    '',
+  ].join('\n');
+  await writeFile(configPath, config);
+  class MigrationAdapter {
+    readonly agent = 'claude-code' as const;
+    async *run() {
+      yield createEvent('done', this.agent, {
+        status: 'success', result: JSON.stringify({ action: 'respond', text: 'Remembered the task.' }),
+        resumeToken: 'legacy-provider-token', usage: { toolUses: 0 }, durationMs: 1,
+      }, 'migration-fixture');
+    }
+  }
+  const stderr = writer();
+  const initial = await runPlaybookCli({
+    argv: ['run', 'remember this task'], homeDir: home, env,
+    userConfigPath: configPath, sessionsDir: sourceDir,
+    loadModule: loader({ 'mod://code': { default: { ...fakeEntry, requiredRoleIds: ['coder'] } } }),
+    adapterImports: { claude: async () => MigrationAdapter },
+    probeAdapterSdk: async () => true,
+    createLogicalSessionId: () => '96000000-0000-4000-8000-000000000011',
+    stdout: writer(), stderr,
+  });
+  expect(initial.code, stderr.text()).toBe(0);
+  const id = initial.sessionId;
+  const record = await createCaptainSessionStore({ sessionsDir: sourceDir }).read(id);
+  expect(record.schemaVersion).toBe(6);
+  const sourcePath = join(sourceDir, `${id}.json`);
+  const sourceBytes = `${JSON.stringify(record)}\n`;
+  await writeFile(sourcePath, sourceBytes);
+  const replayBytes = await readFile(join(sourceDir, `${id}.records.jsonl`));
+  return { home, env, sourceDir, configPath, config, id, sourcePath, sourceBytes, replayBytes };
+}
+
+describe('former-default interactive migration', () => {
+  it('selects the migrated checkpoint and complete replay before managed launch', async () => {
+    const f = await formerDefaultInteractiveSession();
+    const stderr = writer();
+    let descriptor: any;
+    const result = await runPlaybookCli({
+      argv: ['--session', f.id], homeDir: f.home, env: f.env,
+      userConfigPath: f.configPath, stderr, stdout: writer(),
+      tmuxPlayBin: '/tmp/tmux-play.js', probeAdapterSdk: async () => true,
+      publishManagedReadinessWitness: async () => {},
+      loadModule: async () => { throw new Error('selected outer launch must remain data-only'); },
+      launchManagedTmuxPlay: async (options: any) => {
+        const workDir = await requestManagedSessionCommand(options);
+        descriptor = JSON.parse(await readFile(join(workDir, MANAGED_INTERACTIVE_PAYLOAD_FILE), 'utf8'));
+        return { sessionId: f.id, workDir, async cancel() {}, async attach() {} };
+      },
+    });
+    expect(result, stderr.text()).toEqual({ code: 0 });
+    expect(stderr.text()).toContain(`migrated 1 sessions from ${f.sourceDir}`);
+    const destination = join(f.home, '.spex', 'sessions');
+    expect(descriptor).toMatchObject({ sessionId: f.id, sessionsDir: destination });
+    const manifest = JSON.parse(await readFile(join(destination, `${f.id}.json`), 'utf8'));
+    expect(manifest).toMatchObject({ schemaVersion: 7, state: 'settled' });
+    expect(manifest.snapshot.sequences.turn).toBe(1);
+    expect(JSON.stringify(manifest)).not.toContain('legacy-provider-token');
+    const replay = await readFile(join(destination, `${f.id}.records.jsonl`));
+    expect(replay.subarray(0, f.replayBytes.length)).toEqual(f.replayBytes);
+    expect(existsSync(f.sourcePath)).toBe(false);
+    expect(existsSync(join(f.sourceDir, `${f.id}.records.jsonl`))).toBe(false);
+  });
+
+  it.each(['SPEX_HOME', 'directory', 'store', 'config', 'overlay'] as const)(
+    'leaves the former default untouched with an explicit %s', async (kind) => {
+      const f = await formerDefaultInteractiveSession();
+      const destination = join(f.home, 'explicit', 'sessions');
+      const options: any = { env: f.env };
+      const argv = ['--session', f.id];
+      if (kind === 'SPEX_HOME') options.env = { ...f.env, SPEX_HOME: join(f.home, 'explicit') };
+      if (kind === 'directory') options.sessionsDir = destination;
+      if (kind === 'store') options.sessionStore = createCaptainSessionStore({ sessionsDir: destination });
+      if (kind === 'config') await writeFile(f.configPath, `sessions: ${JSON.stringify(destination)}\n${f.config}`);
+      if (kind === 'overlay') {
+        const overlay = join(f.home, 'overlay.yaml');
+        await writeFile(overlay, `sessions: ${JSON.stringify(destination)}\n`);
+        argv.unshift('--with', overlay);
+      }
+      const stderr = writer();
+      let launches = 0;
+      const result = await runPlaybookCli({
+        argv, homeDir: f.home, userConfigPath: f.configPath,
+        stderr, stdout: writer(), tmuxPlayBin: '/tmp/tmux-play.js',
+        launchManagedTmuxPlay: async () => { launches += 1; throw new Error('must not launch'); },
+        ...options,
+      });
+      expect(result, stderr.text()).toEqual({ code: 1 });
+      expect(stderr.text()).toContain('does not exist');
+      expect(stderr.text()).not.toContain('migrated');
+      expect(launches).toBe(0);
+      expect(await readFile(f.sourcePath, 'utf8')).toBe(f.sourceBytes);
+      expect(await readFile(join(f.sourceDir, `${f.id}.records.jsonl`))).toEqual(f.replayBytes);
+      expect(existsSync(join(destination, `${f.id}.json`))).toBe(false);
+    },
+  );
 });
 
 async function managedCliHarness(options: any) {
-  const home = await makeTempHome();
-  await writeUserConfig(home, minimalConfig());
+  const home = options.homeDir ?? (await makeTempHome());
+  await writeUserConfig(home, options.config ?? minimalConfig());
   const stderr = options.stderr ?? writer();
   const run = options.entry ? runPlaybookCliEntry : runPlaybookCli;
+  const launchManagedTmuxPlay = async (launchOptions: any) => {
+    let sessionCommandRequested = false;
+    const instrumentedOptions = {
+      ...launchOptions,
+      async createSessionCommand(context: any) {
+        sessionCommandRequested = true;
+        return launchOptions.createSessionCommand(context);
+      },
+    };
+    const prepared = await options.launchManagedTmuxPlay(instrumentedOptions);
+    if (!sessionCommandRequested && !options.omitManagedSessionCommand) {
+      const workDir = await requestManagedSessionCommand(instrumentedOptions);
+      return { ...prepared, workDir };
+    }
+    return prepared;
+  };
   const result = await run({
     argv: options.argv ?? [],
     env: { ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o' },
@@ -1985,7 +3249,11 @@ async function managedCliHarness(options: any) {
     tmuxPlayBin: '/tmp/tmux-play.js',
     createLogicalSessionId: () => options.sessionId,
     probeAdapterSdk: async () => true,
-    launchManagedTmuxPlay: options.launchManagedTmuxPlay,
+    launchManagedTmuxPlay,
+    ...(options.loadModule ? { loadModule: options.loadModule } : {}),
+    ...(options.sessionStore ? { sessionStore: options.sessionStore } : {}),
+    publishManagedReadinessWitness:
+      options.publishManagedReadinessWitness ?? (async () => {}),
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.processLike ? { processLike: options.processLike } : {}),
     ...(options.onBeforeManagedAttach
@@ -2015,11 +3283,11 @@ function selectedTurnZeroSnapshot(execution: any) {
     stateId: 'routing',
   };
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     captain: {
       sessionId: '80000000-0000-4000-8000-000000000058',
       runtime: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         playbookId: 'captain',
         machine: { value: parked.value, status: parked.status },
         roleResumeTokens: {},
@@ -2033,6 +3301,7 @@ function selectedTurnZeroSnapshot(execution: any) {
         },
         state: parked,
         pendingBossQuestions: [],
+        effectLedger: emptyEffectLedger(),
       },
       agent: structural.captain,
       conversation: { kind: 'unopened' },
@@ -2044,6 +3313,16 @@ function selectedTurnZeroSnapshot(execution: any) {
     sequences: { turn: 0, journal: 0 },
     journal: [],
     mode: 'chat',
+    effectLedger: emptyEffectLedger(),
+  };
+}
+
+function emptyEffectLedger() {
+  return {
+    schemaVersion: 1,
+    revision: 0,
+    boundaries: [],
+    logicalOperations: [],
   };
 }
 
@@ -2054,8 +3333,9 @@ async function makeTempHome(): Promise<string> {
 }
 
 async function writeUserConfig(home: string, contents: string): Promise<void> {
-  await mkdir(join(home, '.config', 'playbook'), { recursive: true });
-  await writeFile(resolveUserConfigPath({}, home), contents, 'utf8');
+  const path = resolveUserConfigPath({}, home);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, contents, 'utf8');
 }
 
 async function loadComposedConfig(content: string) {
@@ -2138,11 +3418,8 @@ function fakeSpawn(opts: { exitCode?: number; signal?: string } = {}) {
 }
 
 function fakeManagedLaunch(spawn: ReturnType<typeof fakeSpawn>) {
-  return async (options: {
-    configPath: string;
-    sessionId: string;
-    cwd: string;
-  }) => {
+  return async (options: any) => {
+    const workDir = await requestManagedSessionCommand(options);
     spawn.calls.push({
       command: 'launchManagedTmuxPlay',
       args: ['--config', options.configPath, '--session', options.sessionId],
@@ -2153,10 +3430,31 @@ function fakeManagedLaunch(spawn: ReturnType<typeof fakeSpawn>) {
     });
     return {
       sessionId: options.sessionId,
+      workDir,
       async attach() {},
       async cancel() {},
     };
   };
+}
+
+async function requestManagedSessionCommand(options: any) {
+  const workDir = await mkdtemp(join(tmpdir(), 'playbook-managed-ready-'));
+  const coordinationDir = await mkdtemp(
+    join(tmpdir(), 'playbook-managed-coordination-'),
+  );
+  tempDirs.push(workDir, coordinationDir);
+  await options.createSessionCommand({
+    sessionId: options.sessionId,
+    cwd: options.cwd,
+    workDir,
+    workDirOwnedByLauncher: true,
+    readinessPath: join(coordinationDir, 'status.json'),
+    inputGatePath: join(coordinationDir, 'input-ready'),
+    inputActivePath: join(coordinationDir, 'input-active'),
+    shutdownRequestPath: join(coordinationDir, 'shutdown-request'),
+    shutdownCompletePath: join(coordinationDir, 'shutdown-complete'),
+  });
+  return workDir;
 }
 
 function writer() {
@@ -2187,7 +3485,7 @@ describe('playbook --with overlays (PBCLI-27)', () => {
   async function withHarness() {
     const home = await makeTempHome();
     const configPath = resolveUserConfigPath({}, home);
-    await mkdir(join(home, '.config', 'playbook'), { recursive: true });
+    await mkdir(dirname(configPath), { recursive: true });
     await writeFile(configPath, GLOBAL_CONFIG, 'utf8');
     const overlayDir = await mkdtemp(join(tmpdir(), 'playbook-with-'));
     tempDirs.push(overlayDir);

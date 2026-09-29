@@ -31,12 +31,13 @@
 //                deterministic entry mapping, the controller captain-call
 //                strategy with its single corrective re-ask (CAPPLAY-18),
 //                controller-port submission, and status formatting.
-// Compat:        spec.compat = { artifactSchema: 2, runtimeAbi: 1 }
+// Compat:        spec.compat = { artifactSchema: 3, runtimeAbi: 1 }
 //                (DR-022; checked at construction by the loading engine).
 
 import {
   createXStatePlaybookRuntime,
   defaultComposeCaptainPrompt,
+  emptyPlaybookEffectLedger,
   normalizeError,
   normalizeErrorCompact,
   parseJudgeJson,
@@ -45,7 +46,8 @@ import {
   type PlaybookCaptainInput,
   type ScheduledStatus,
   type XStateCaptainStrategyRun,
-  type XStatePlaybookRuntimeSpec,
+  type XStatePlaybookRuntimeSpecV3,
+  type XStateRepositoryCapability,
 } from '../../../src/xstate-runtime.js';
 import {
   captainMachine,
@@ -56,6 +58,7 @@ import {
   type ParsedActingDecision,
   type SettlementEvidence,
   type SettlementReceiptEvidence,
+  type SettlementUnresolvedEffectEvidence,
 } from './captain.fsm.js';
 import type {
   CaptainCallOptions,
@@ -123,16 +126,17 @@ export type {
 /** One nonempty complete standalone request selected for `start` or `switch`. */
 export type CaptainControllerInput = string;
 
-/** One validated controller selection submitted through the port (DR-029). */
+/** One validated controller selection submitted through the port (DR-029, DR-038). */
 export type CaptainControllerSelection =
   | { readonly action: 'respond'; readonly text: string }
+  | { readonly action: 'resume'; readonly playbookId: string }
   | {
       readonly action: 'start' | 'switch';
       readonly playbookId: string;
       /** Complete standalone request synthesized from the remembered Boss conversation. */
       readonly input: CaptainControllerInput;
     }
-  | { readonly action: 'dismiss' }
+  | { readonly action: 'dismiss' | 'recover' }
   | { readonly action: 'deliver' }
   | { readonly action: 'runtime'; readonly actionId: string };
 
@@ -294,6 +298,21 @@ function validateParsedActingDecision(value: unknown): ParsedActingDecision {
     }
     return { action: 'deliver' };
   }
+  if (value.action === 'resume') {
+    const allowed = new Set(['action', 'playbookId']);
+    for (const key of Object.keys(value)) {
+      if (!allowed.has(key)) {
+        throw new TypeError(`parse-resolved decision carries undeclared ${key}`);
+      }
+    }
+    return {
+      action: 'resume',
+      playbookId: assertNonEmptyString(
+        value.playbookId,
+        'parse-resolved decision playbookId',
+      ),
+    };
+  }
   if (value.action !== 'start' && value.action !== 'switch') {
     throw new TypeError(
       `parse-resolved decision names unknown action ${String(value.action)}`,
@@ -363,8 +382,8 @@ function classifyControllerTurn(
 // ---------------------------------------------------------------------------
 
 const RESTATED_REPLY_CONTRACT = [
-  'Reply again with exactly one JSON object `{ "action": …, … }` and no other text, selecting exactly one action from the closed set `respond` | `start` | `switch` | `dismiss` | `deliver` | `runtime`:',
-  '`{ "action": "respond", "text": … }`, `{ "action": "start", "playbookId": …, "input": … }`, `{ "action": "switch", "playbookId": …, "input": … }`, `{ "action": "dismiss" }`, `{ "action": "deliver" }`, or `{ "action": "runtime", "actionId": … }`; every `input` is one nonempty complete standalone request.',
+  'Reply again with exactly one JSON object `{ "action": …, … }` and no other text, selecting exactly one action from the closed set `respond` | `resume` | `start` | `switch` | `dismiss` | `deliver` | `runtime` | `recover`:',
+  '`{ "action": "respond", "text": … }`, `{ "action": "resume", "playbookId": … }`, `{ "action": "start", "playbookId": …, "input": … }`, `{ "action": "switch", "playbookId": …, "input": … }`, `{ "action": "dismiss" }`, `{ "action": "deliver" }`, `{ "action": "runtime", "actionId": … }`, or `{ "action": "recover" }`; every `input` is one nonempty complete standalone request.',
 ].join('\n');
 
 function correctiveDecisionPrompt(prompt: string, reason: string): string {
@@ -431,6 +450,24 @@ function readDecisionReply(
       if (shape !== undefined) return { reason: shape };
       return { selection: { action, text: parsed.text as string } };
     }
+    case 'resume': {
+      const shape = requireKeys(['playbookId']) ?? nonEmpty('playbookId');
+      if (shape !== undefined) return { reason: shape };
+      const playbookId = parsed.playbookId as string;
+      if (playbookId === selfPlaybookId) {
+        return {
+          reason: `the ${action} target may never be this Captain playbook itself`,
+        };
+      }
+      if (
+        !options.enabledPlaybooks.some((entry) => entry.id === playbookId)
+      ) {
+        return {
+          reason: `the ${action} target ${JSON.stringify(playbookId)} is not an enabled catalog id`,
+        };
+      }
+      return { selection: { action, playbookId } };
+    }
     case 'start':
     case 'switch': {
       const shape =
@@ -459,6 +496,7 @@ function readDecisionReply(
         },
       };
     }
+    case 'recover':
     case 'dismiss': {
       const shape = requireKeys([]);
       if (shape !== undefined) return { reason: shape };
@@ -488,6 +526,9 @@ function selectionFromParsedDecision(
   if (decision.action === 'deliver') {
     return { action: 'deliver' };
   }
+  if (decision.action === 'resume') {
+    return { action: 'resume', playbookId: decision.playbookId };
+  }
   // A parse-resolved `start` / `switch` is always the exact command remainder
   // supplied by the host (CAPTAIN-7 command table).
   return {
@@ -513,10 +554,99 @@ function decisionOutputOf(
 
 // ---------------------------------------------------------------------------
 // Settlement validation: the returned settlement is the only evidence of
-// effects, and the machine retains only its status, facts, receipt
-// disposition, and leaf-state summary (CAPPLAY-10). A malformed settlement
-// is a host control-plane failure.
+// effects, and the machine retains only its status, facts, bounded unresolved
+// effects, receipt disposition, and leaf-state summary (CAPPLAY-10). A
+// malformed settlement is a host control-plane failure.
 // ---------------------------------------------------------------------------
+
+const SETTLEMENT_GIT_OID_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const SETTLEMENT_UNRESOLVED_CLASSIFICATIONS = new Set<
+  SettlementUnresolvedEffectEvidence['classification']
+>([
+  'one-descendant-commit',
+  'multiple-commits',
+  'rewritten-or-non-descendant',
+  'worktree-only-change',
+  'concurrent-or-foreign-change',
+  'observation-ambiguous',
+  'incomplete',
+]);
+
+function validateSettlementUnresolvedEffects(
+  value: unknown,
+): readonly SettlementUnresolvedEffectEvidence[] {
+  const detached = snapshotJsonValue(
+    value,
+    'controller settlement unresolvedEffects',
+  );
+  if (!Array.isArray(detached)) {
+    throw new TypeError(
+      'controller settlement unresolvedEffects must be an array',
+    );
+  }
+  for (const [index, raw] of detached.entries()) {
+    const path = `controller settlement unresolvedEffects[${index}]`;
+    if (!isRecord(raw)) {
+      throw new TypeError(`${path} must be an object`);
+    }
+    const allowed = new Set([
+      'classification',
+      'baselineHead',
+      'afterHead',
+      'commitOid',
+    ]);
+    const unknown = Object.keys(raw).find((key) => !allowed.has(key));
+    if (unknown !== undefined) {
+      throw new TypeError(`${path} carries undeclared ${unknown}`);
+    }
+    if (
+      typeof raw.classification !== 'string' ||
+      !SETTLEMENT_UNRESOLVED_CLASSIFICATIONS.has(
+        raw.classification as SettlementUnresolvedEffectEvidence['classification'],
+      )
+    ) {
+      throw new TypeError(`${path} classification is not supported`);
+    }
+    if (
+      typeof raw.baselineHead !== 'string' ||
+      !SETTLEMENT_GIT_OID_PATTERN.test(raw.baselineHead)
+    ) {
+      throw new TypeError(`${path} baselineHead must be a Git OID`);
+    }
+    if (
+      'afterHead' in raw &&
+      (typeof raw.afterHead !== 'string' ||
+        !SETTLEMENT_GIT_OID_PATTERN.test(raw.afterHead))
+    ) {
+      throw new TypeError(`${path} afterHead must be a Git OID`);
+    }
+    if (
+      raw.classification !== 'observation-ambiguous' &&
+      raw.classification !== 'incomplete' &&
+      !('afterHead' in raw)
+    ) {
+      throw new TypeError(
+        `${path} afterHead is required for ${raw.classification}`,
+      );
+    }
+    if (raw.classification === 'one-descendant-commit') {
+      if (
+        typeof raw.commitOid !== 'string' ||
+        !SETTLEMENT_GIT_OID_PATTERN.test(raw.commitOid) ||
+        raw.commitOid !== raw.afterHead
+      ) {
+        throw new TypeError(
+          `${path} commitOid must equal afterHead for one-descendant-commit`,
+        );
+      }
+    } else if ('commitOid' in raw) {
+      throw new TypeError(
+        `${path} commitOid is permitted only for one-descendant-commit`,
+      );
+    }
+  }
+  return detached as unknown as readonly SettlementUnresolvedEffectEvidence[];
+}
 
 function validateSettlement(value: unknown): SettlementEvidence {
   if (!isRecord(value)) {
@@ -525,6 +655,7 @@ function validateSettlement(value: unknown): SettlementEvidence {
   const allowed = new Set([
     'status',
     'facts',
+    'unresolvedEffects',
     'reason',
     'receipt',
     'leafStateSummary',
@@ -549,6 +680,12 @@ function validateSettlement(value: unknown): SettlementEvidence {
   ) {
     throw new TypeError('controller settlement facts must be a string array');
   }
+  if (!Object.prototype.hasOwnProperty.call(value, 'unresolvedEffects')) {
+    throw new TypeError('controller settlement unresolvedEffects is required');
+  }
+  const unresolvedEffects = validateSettlementUnresolvedEffects(
+    value.unresolvedEffects,
+  );
   if ('reason' in value && typeof value.reason !== 'string') {
     throw new TypeError('controller settlement reason must be a string');
   }
@@ -609,6 +746,7 @@ function validateSettlement(value: unknown): SettlementEvidence {
   return Object.freeze({
     status: value.status,
     facts: Object.freeze([...(value.facts as readonly string[])]),
+    unresolvedEffects,
     ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
     ...(receipt === undefined ? {} : { receipt }),
     ...(typeof value.leafStateSummary === 'string'
@@ -773,6 +911,8 @@ function statusesForState(
   }
 }
 
+const UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string> = new Set();
+
 // Internal export surface for verification and tests. Not part of the
 // stable public API; the leading underscore signals "subject to change."
 export const _internal = {
@@ -789,19 +929,23 @@ export const _internal = {
   validateParsedActingDecision,
   statusesForState,
   normalizeError,
+  UNFINISHED_FINAL_STATE_IDS,
 };
 
 // The Captain-specific spec handed to the shared runtime factory
 // (slc/link.md §Output, DR-019). Generic machinery — actor wiring, boundary
 // tracing, lifecycle, abort, the parked-session snapshot, and the DR-029
 // describe/apply control surface — lives in @sublang/playbook/xstate-runtime.
-const runtimeSpec: XStatePlaybookRuntimeSpec<ValidatedCaptainOptions> = {
+const runtimeSpec: XStatePlaybookRuntimeSpecV3<ValidatedCaptainOptions> = {
   label: 'CAPTAIN',
   // DR-022 / slc/link.md: the declaration carries the value current at link
   // time — a literal, never the loading engine's RUNTIME_ABI self-report,
   // which would follow whatever engine loads the module and make the
   // factory's skew check compare that engine with itself.
-  compat: { artifactSchema: 2, runtimeAbi: 1 },
+  compat: { artifactSchema: 3, runtimeAbi: 1 },
+  // DR-040: the roleless session Captain has no delegated-player outcome,
+  // but schema 3 still makes that absence explicit rather than inferred.
+  outcomeAuthority: { governedPlayerStates: {} },
   snapshotOptions: snapshotCaptainOptions,
   machineInput: (options) => ({ enabledPlaybooks: options.enabledPlaybooks }),
   classifyBossText: (text, ports, signal, snapshotOrState, boundary, options) =>
@@ -833,7 +977,9 @@ const runtimeSpec: XStatePlaybookRuntimeSpec<ValidatedCaptainOptions> = {
     'receiptReason',
     'receiptError',
     'leafStateSummary',
+    'settlementUnresolvedEffects',
   ],
+  unfinishedFinalStateIds: UNFINISHED_FINAL_STATE_IDS,
   statusesForState,
 };
 
@@ -843,18 +989,45 @@ const runtimeSpec: XStatePlaybookRuntimeSpec<ValidatedCaptainOptions> = {
 // uncaught ESM-load error that takes even `--help` down; constructing on
 // the first runtime request keeps the failure inside the caught
 // host-construction boundary that owes the Boss a setup diagnostic.
+const rejectInternalCaptainRepositoryWork = async (): Promise<never> => {
+  throw new Error(
+    'the roleless session Captain cannot perform repository-governed work',
+  );
+};
+const INTERNAL_CAPTAIN_HOST_CAPABILITIES = Object.freeze({
+  // The engine does not consult this member for an explicitly empty governed
+  // set. Keeping a fail-closed implementation satisfies the schema-3 factory
+  // boundary without granting the internal controller repository authority.
+  repository: Object.freeze({
+    runExclusive: rejectInternalCaptainRepositoryWork,
+    runDeferred: rejectInternalCaptainRepositoryWork,
+  } satisfies XStateRepositoryCapability),
+  effectLedger: Object.freeze({
+    snapshot: emptyPlaybookEffectLedger,
+    writeAhead: async (): Promise<never> => {
+      throw new Error(
+        'the roleless session Captain cannot write an effect ledger',
+      );
+    },
+  }),
+});
+
+function buildCaptainPlaybookRuntimeFactory() {
+  return createXStatePlaybookRuntime(captainMachine, runtimeSpec);
+}
+
 let createCaptainPlaybookRuntime:
-  | PlaybookRuntimeFactory<ValidatedCaptainOptions>
+  | ReturnType<typeof buildCaptainPlaybookRuntimeFactory>
   | undefined;
 
 export function createPlaybookRuntime(
   options: PlaybookRuntimeOptions,
 ): PlaybookRuntime {
-  createCaptainPlaybookRuntime ??= createXStatePlaybookRuntime(
-    captainMachine,
-    runtimeSpec,
-  );
-  return createCaptainPlaybookRuntime(options);
+  createCaptainPlaybookRuntime ??= buildCaptainPlaybookRuntimeFactory();
+  return createCaptainPlaybookRuntime({
+    configuredOptions: options,
+    hostCapabilities: INTERNAL_CAPTAIN_HOST_CAPABILITIES,
+  });
 }
 
 const factory: PlaybookRuntimeFactory<PlaybookRuntimeOptions> =

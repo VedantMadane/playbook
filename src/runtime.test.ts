@@ -67,7 +67,7 @@ function interfaceProperties(src: string, name: string): string[] {
 }
 
 function normalizeType(type: string): string {
-  return type.replace(/\s+/g, '').replace(/;}/g, '}').replace(/^\|/, '');
+  return type.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, '').replace(/;}/g, '}').replace(/^\|/, '');
 }
 
 function unionMembers(src: string, name: string): string[] {
@@ -175,6 +175,7 @@ const TRACE_TYPES = [
   'fsm.transition',
   'judge.call.finished',
   'judge.call.started',
+  'outcome.accepted',
   'playbook.call.finished',
   'playbook.call.started',
   'player.call.finished',
@@ -203,8 +204,11 @@ function applyMemberSignature(src: string): {
 }
 
 describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
-  // PBRT-35: consistency with the authored slc/link.md contract.
-  it('matches slc/link.md on result, resume, session, trace, and runtime shapes', () => {
+  // PBRT-35: consistency with the complete link contract.
+  it('matches the full link contract on result, resume, session, trace, and runtime shapes', () => {
+    for (const name of ['PlaybookRecoveryCheckpoint', 'PlaybookRecoveryOffer', 'PlaybookStepRecord']) {
+      expect(normalizeType(interfaceBody(runtimeDts, name).replace(/\/\*[\s\S]*?\*\//g, ''))).toEqual(normalizeType(interfaceBody(linkSpec, name).replace(/\/\*[\s\S]*?\*\//g, '')));
+    }
     expect(statusMembers(runtimeDts)).toEqual(['aborted', 'error', 'ok']);
     expect(statusMembers(runtimeDts, 'CaptainResult')).toEqual([
       'aborted',
@@ -231,6 +235,7 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       'resumeToken?:string',
     );
     expect(interfaceProperties(runtimeDts, 'PlayerCallOptions')).toEqual([
+      'freshPrompt?:string',
       'resume:string|false',
     ]);
     expect(interfaceProperties(runtimeDts, 'PlayerCallOptions')).toEqual(
@@ -278,6 +283,9 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       methodSignature(runtimeDts, 'PlaybookPorts', 'callPlaybook'),
     ).toEqual(methodSignature(linkSpec, 'PlaybookPorts', 'callPlaybook'));
     expect(interfaceProperties(runtimeDts, 'NormalizedError')).toEqual([
+      // DR-063 §2: a normalized error carries its structured cause exactly
+      // when the underlying error carried a valid one.
+      'cause?:PlaybookFailureCause',
       'message:string',
       'name:string',
       'stack?:string',
@@ -318,6 +326,30 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       interfaceProperties(linkSpec, 'PlaybookRoleBinding'),
     );
     expect(
+      interfaceProperties(runtimeDts, 'PlaybookRetainedGenerationMetadata'),
+    ).toEqual(['unfinishedFinalStateIds:readonlystring[]']);
+    expect(
+      interfaceProperties(runtimeDts, 'PlaybookRetainedGenerationMetadata'),
+    ).toEqual(
+      interfaceProperties(linkSpec, 'PlaybookRetainedGenerationMetadata'),
+    );
+    expect(interfaceProperties(runtimeDts, 'PlaybookAdoptionContext')).toEqual([
+      'sourceGenerationId:string',
+      'sourceSessionId:string',
+      'targetChildSessionId?:string',
+    ]);
+    expect(interfaceProperties(runtimeDts, 'PlaybookAdoptionContext')).toEqual(
+      interfaceProperties(linkSpec, 'PlaybookAdoptionContext'),
+    );
+    for (const source of [runtimeDts, linkSpec]) {
+      expect(interfaceBody(source, 'PlaybookRuntime')).toMatch(
+        /readonly retainedGenerationMetadata\?:\s*PlaybookRetainedGenerationMetadata;/,
+      );
+      expect(interfaceBody(source, 'PlaybookRuntime')).toMatch(
+        /adopt\?\s*\(\s*session:\s*PlaybookSession,\s*snapshot:\s*PlaybookRuntimeSnapshot,\s*context:\s*PlaybookAdoptionContext,?\s*\):\s*Promise<void>;/,
+      );
+    }
+    expect(
       interfaceProperties(runtimeSource, 'PlaybookPendingBossQuestion'),
     ).toEqual([
       "asker:{kind:'captain'}|{kind:'role'",
@@ -337,6 +369,7 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       /interface PlaybookSuspendedCall extends PlaybookPendingCall/,
     );
     expect(interfaceProperties(runtimeDts, 'PlaybookSuspendedCall')).toEqual([
+      'effectBoundaryPrefixSequence?:number|null',
       'stateId:string',
       'text:string',
       'turnId?:number',
@@ -404,9 +437,12 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       unionMembers(linkSpec, 'PlaybookTraceType'),
     );
     // DR-029 / PBRT-52: the optional control-surface pair and its types.
+    // DR-063 §3: every advertised action carries its standing.
     expect(interfaceProperties(runtimeDts, 'PlaybookControlAction')).toEqual([
       'id:string',
       'label:string',
+      'reason?:PlaybookControlActionReason',
+      'standing?:PlaybookControlStanding',
     ]);
     expect(interfaceProperties(runtimeDts, 'PlaybookControlAction')).toEqual(
       interfaceProperties(linkSpec, 'PlaybookControlAction'),
@@ -416,6 +452,7 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       'context?:JsonValue',
       'lastError?:NormalizedError',
       'pendingQuestions:readonlyPlaybookPendingBossQuestion[]',
+      'recovery?:PlaybookRecoveryOffer',
       'state:PlaybookState',
       'stateDescription?:string',
     ]);
@@ -447,7 +484,7 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       'payload:JsonValue',
       'playbookId:string',
       'rootSessionId:string',
-      'schemaVersion:3',
+      'schemaVersion:4',
       'sequence:number',
       'sessionId:string',
       'timestamp:number',
@@ -462,7 +499,7 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
     expect(
       methodSignature(runtimeDts, 'PlaybookRuntime', 'handleBossInput'),
     ).toEqual({
-      parameters: 'turn:{text:string;signal:AbortSignal}',
+      parameters: 'turn:{text:string;signal:AbortSignal;onAccepted?:()=>void}',
       result: 'PlaybookRunResult',
     });
     expect(
@@ -480,6 +517,45 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
     ).toEqual(
       methodSignature(linkSpec, 'PlaybookRuntime', 'resumePlaybookCall'),
     );
+  });
+
+  it('keeps unresolved-effect state-only and stateDescription terminal-only', () => {
+    for (const source of [runtimeSource, runtimeDts, linkSpec]) {
+      const result = typeAliasBody(source, 'PlaybookRunResult');
+      const terminal = result.match(
+        /\{[^{}]*outcome:\s*'terminal';[^{}]*\}/,
+      )?.[0];
+      expect(terminal).toBeDefined();
+      expect(terminal).toMatch(/stateDescription\?:\s*string;/);
+      expect(result.replace(terminal!, '')).not.toMatch(
+        /stateDescription\??:/,
+      );
+      const unresolvedEffect = result.match(
+        /\{[^{}]*outcome:\s*'unresolved-effect';[^{}]*\}/,
+      )?.[0];
+      expect(unresolvedEffect).toBeDefined();
+      expect(normalizeType(unresolvedEffect!)).toBe(
+        "{outcome:'unresolved-effect';state:PlaybookState}",
+      );
+      expect(unresolvedEffect).not.toMatch(
+        /stateDescription|output|pendingCall|error|effectLedger|receipt|unresolvedEffects|semanticCandidate/,
+      );
+    }
+  });
+
+  it('keeps the unresolved-effect envelope seam optional and identity-only', () => {
+    const expected =
+      "unresolvedEffectEnvelopes?():readonly({readonlykind:'boundary';readonlyboundaryId:string}|{readonlykind:'logical-operation';readonlyoperationId:string})[];";
+    for (const source of [runtimeSource, runtimeDts, linkSpec]) {
+      const runtime = normalizeType(interfaceBody(source, 'PlaybookRuntime'));
+      const signature = runtime
+        .match(/unresolvedEffectEnvelopes\?\(\):readonly\([\s\S]*?\)\[\];/)?.[0]
+        .replace('readonly(|', 'readonly(');
+      expect(signature).toBe(expected);
+      expect(signature).not.toMatch(
+        /receipt|projection|repository|observation|evidence|authority/,
+      );
+    }
   });
 
   // The linker contract is the source the artifacts are generated from, so a
@@ -524,6 +600,78 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
     );
   });
 
+  it('requires link-time unfinished-final metadata in emitted artifacts', () => {
+    const output = sectionOf(linkSpec, 'Output');
+    const enumeration = /Supplies in `spec` only what the factory cannot read[\s\S]*?\.\n/.exec(
+      output,
+    )?.[0];
+    expect(enumeration).toBeDefined();
+    expect(enumeration).toContain('unfinishedFinalStateIds');
+    expect(output).toMatch(/mechanical link-time metadata/);
+    expect(output).toMatch(/explicitly empty when no terminal outcome does/);
+    expect(output).toMatch(
+      /reject a declared id that does not name a root final state/,
+    );
+    expect(output).toMatch(/reject it at construction before runtime effects/);
+    expect(output).toMatch(
+      /artifact declaration is not itself the public runtime retention marker or an adoption capability/,
+    );
+    const classification = sectionOf(
+      linkSpec,
+      'Retained-generation classification (optional)',
+    );
+    expect(classification).toContain('retainedGenerationMetadata');
+    expect(classification).toMatch(/explicitly empty/);
+    expect(classification).toMatch(
+      /presence supplies only\s+terminal classification metadata\s+and does not itself supply the adoption operation/,
+    );
+    expect(classification).toMatch(
+      /parked-session snapshot pair and the independently feature-detected\s+adoption capability so a Captain can retain/,
+    );
+    expect(classification).toMatch(/opts into classification only/);
+    expect(classification).toContain('createXStatePlaybookRuntime');
+    const adoption = sectionOf(linkSpec, 'Retained-snapshot adoption (optional)');
+    expect(adoption).toContain('adopt(session, snapshot, context)');
+    expect(adoption).toMatch(
+      /Every runtime the shared `createXStatePlaybookRuntime` factory\s+constructs for a flat machine implements `adopt`/,
+    );
+    expect(adoption).toMatch(
+      /constructs for a machine that declares a parallel state omits it/,
+    );
+    expect(adoption).toMatch(/fresh valid `PlaybookSession`\s+identity/);
+    expect(adoption).toMatch(/before calling the\s+runtime capability/);
+    expect(adoption).toMatch(
+      /exact closed-schema `PlaybookAdoptionContext` whose nonempty\s+`sourceSessionId` names the retained frame's source runtime session/,
+    );
+    expect(adoption).toMatch(
+      /consumes `playbook-1` as the fresh target call id/,
+    );
+    expect(adoption).toMatch(
+      /emit exactly\s+one `session\.started` as target trace sequence `1`/,
+    );
+    expect(adoption).toMatch(
+      /same-engagement restore remains trace-silent and preserves its source\s+identities and counters exactly/,
+    );
+    expect(adoption).toMatch(
+      /shall not apply the retained snapshot's `roleResumeTokens` through a\s+supplied player-session store's `restore` operation or seed runtime-private\s+continuation from them/,
+    );
+    expect(adoption).toMatch(
+      /target\s+session `roleBindings` are the sole source of supplied player and prompt\s+identities, and any supplied player-session store is the sole conversation\s+authority/,
+    );
+    expect(adoption).toMatch(
+      /resolve the current binding and, when a store is\s+supplied, select it at the invocation boundary and pass the exact selected\s+token or `false`/,
+    );
+    expect(adoption).toMatch(
+      /ordinary\s+continuation rules authorize a store mutation, that mutation\s+shall target the same store/,
+    );
+    expect(adoption).toMatch(
+      /never fall back to the retained token\s+projection/,
+    );
+    expect(adoption).toMatch(
+      /replacement binding whose current selection is `false`\s+therefore\s+starts fresh under its new identities/,
+    );
+  });
+
   // PBRT-34/35: every authored contract type is exported.
   it('exports every shared contract type', () => {
     for (const name of [
@@ -542,8 +690,10 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       'PlaybookControlView',
       'PlaybookPorts',
       'PlaybookSession',
+      'PlaybookAdoptionContext',
       'PlaybookTraceEvent',
       'PlaybookRuntimeSnapshot',
+      'PlaybookRetainedGenerationMetadata',
       'PlaybookRuntime',
     ]) {
       expect(runtimeDts).toMatch(new RegExp(`export interface ${name}\\b`));
@@ -573,9 +723,14 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
       expect(src).not.toMatch(/\bimport\s*\(/); // dynamic import()
       expect(src).not.toMatch(/\brequire\s*\(/); // require()
     }
-    expect(runtimeSource).not.toMatch(
-      /^\s*(?:export\s+)?(?:const|let|var|function|class)\b/m,
-    );
+    // DR-063 §1: the module's only value exports are the closed failure-code
+    // list and its validator; everything else it publishes is a type.
+    expect(
+      [...runtimeSource.matchAll(/^export\s+(?:const|function)\s+(\w+)/gm)].map(
+        ([, name]) => name,
+      ),
+    ).toEqual(['PLAYBOOK_FAILURE_CODES', 'assertPlaybookFailureCause']);
+    expect(runtimeSource).not.toMatch(/^\s*(?:export\s+)?(?:let|var|class)\b/m);
   });
 
   // RELEASE-15: a downstream consumer's `./runtime` import resolves to
@@ -595,5 +750,303 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
   it('ships a valid, loadable ESM module', async () => {
     const mod = await import(new URL('runtime.js', import.meta.url).href);
     expect(typeof mod).toBe('object');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DR-063 §1: the closed failure-cause contract. The list is the contract a host
+// catalogue is tested against, and the validator is closed per code: exactly
+// the evidence members that code names, nothing else.
+// ---------------------------------------------------------------------------
+
+describe('closed failure-cause contract (DR-063 §1)', () => {
+  const OBSERVATION = '0'.repeat(40);
+  const AFTER = '1'.repeat(40);
+
+  const accepted: Record<string, unknown> = {
+    'commit-missing': {
+      code: 'commit-missing',
+      evidence: {
+        required: 'one-descendant-commit',
+        observed: 'worktree-only-change',
+        baselineHead: OBSERVATION,
+        afterHead: AFTER,
+        paths: { uncommitted: ['a.ts', 'b.ts'] },
+      },
+    },
+    'commit-residual': {
+      code: 'commit-residual',
+      evidence: {
+        required: 'one-descendant-commit',
+        observed: 'observation-ambiguous',
+        baselineHead: OBSERVATION,
+        afterHead: AFTER,
+        commitOid: AFTER,
+        paths: { uncommitted: ['stray.txt'], altered: [], truncated: 3 },
+      },
+    },
+    'pre-existing-lost': {
+      code: 'pre-existing-lost',
+      evidence: {
+        required: 'one-descendant-commit',
+        observed: 'observation-ambiguous',
+        baselineHead: OBSERVATION,
+        paths: { lost: ['notes.md'] },
+      },
+    },
+    'commits-more-than-one': {
+      code: 'commits-more-than-one',
+      evidence: {
+        required: 'one-descendant-commit',
+        observed: 'multiple-commits',
+        baselineHead: OBSERVATION,
+        afterHead: AFTER,
+      },
+    },
+    'history-rewritten': {
+      code: 'history-rewritten',
+      evidence: {
+        required: 'one-descendant-commit',
+        observed: 'rewritten-or-non-descendant',
+        baselineHead: OBSERVATION,
+        afterHead: AFTER,
+      },
+    },
+    'foreign-change': {
+      code: 'foreign-change',
+      evidence: {
+        required: 'unchanged',
+        observed: 'concurrent-or-foreign-change',
+        baselineHead: OBSERVATION,
+        afterHead: AFTER,
+        paths: { changed: ['x.ts'] },
+      },
+    },
+    'observation-unstable': {
+      code: 'observation-unstable',
+      evidence: {
+        required: 'deferred',
+        observed: 'observation-ambiguous',
+        baselineHead: OBSERVATION,
+      },
+    },
+    'attribution-ambiguous': {
+      code: 'attribution-ambiguous',
+      evidence: {
+        required: 'unchanged',
+        observed: 'observation-ambiguous',
+        baselineHead: OBSERVATION,
+      },
+    },
+    'receipt-missing': {
+      code: 'receipt-missing',
+      evidence: { baselineHead: OBSERVATION },
+    },
+    'judge-failed': {
+      code: 'judge-failed',
+      evidence: {
+        reason: 'judge transport failed',
+        error: { name: 'Error', message: 'provider refused' },
+      },
+    },
+    'player-failed': {
+      code: 'player-failed',
+      evidence: {
+        roleId: 'coder',
+        playerId: 'dev.coder',
+        error: { name: 'Error', message: 'coder is down' },
+        errorCode: 'ENOENT',
+      },
+    },
+    aborted: { code: 'aborted', evidence: {} },
+    'child-failed': {
+      code: 'child-failed',
+      evidence: {
+        playbookId: 'code',
+        cause: { code: 'aborted', evidence: {} },
+      },
+    },
+    'runtime-defect': {
+      code: 'runtime-defect',
+      evidence: { reason: 'host omitted governed semantic settlement' },
+    },
+  };
+
+  it('accepts exactly one shape per declared code and detaches it', async () => {
+    const { PLAYBOOK_FAILURE_CODES, assertPlaybookFailureCause } = (await import(
+      new URL('runtime.js', import.meta.url).href
+    )) as typeof import('./runtime.js');
+    expect([...PLAYBOOK_FAILURE_CODES]).toEqual(Object.keys(accepted));
+    for (const code of PLAYBOOK_FAILURE_CODES) {
+      const source = accepted[code] as { evidence: Record<string, unknown> };
+      const validated = assertPlaybookFailureCause(source);
+      expect(validated).toEqual(source);
+      expect(Object.isFrozen(validated)).toBe(true);
+      expect(Object.isFrozen(validated.evidence)).toBe(true);
+      expect(validated).not.toBe(source);
+      expect(validated.evidence).not.toBe(source.evidence);
+    }
+  });
+
+  const rejections: readonly [string, unknown][] = [
+    ['a non-object', 'commit-missing'],
+    ['a class instance', new Error('boom')],
+    ['an unknown code', { code: 'disk-full', evidence: {} }],
+    ['a missing code', { evidence: {} }],
+    ['an extra top-level member', { ...accepted.aborted, extra: 1 }],
+    ['missing required evidence', { code: 'runtime-defect', evidence: {} }],
+    [
+      'an evidence member the code does not name',
+      { code: 'aborted', evidence: { reason: 'why' } },
+    ],
+    [
+      'an undeclared repository disposition',
+      {
+        code: 'commits-more-than-one',
+        evidence: {
+          required: 'two-commits',
+          observed: 'multiple-commits',
+          baselineHead: OBSERVATION,
+          afterHead: AFTER,
+        },
+      },
+    ],
+    [
+      'an undeclared receipt classification',
+      {
+        code: 'commits-more-than-one',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'exploded',
+          baselineHead: OBSERVATION,
+          afterHead: AFTER,
+        },
+      },
+    ],
+    [
+      'an empty reason',
+      { code: 'runtime-defect', evidence: { reason: '' } },
+    ],
+    [
+      'a path list the code does not name',
+      {
+        code: 'foreign-change',
+        evidence: {
+          required: 'unchanged',
+          observed: 'concurrent-or-foreign-change',
+          baselineHead: OBSERVATION,
+          afterHead: AFTER,
+          paths: { changed: ['x.ts'], lost: ['y.ts'] },
+        },
+      },
+    ],
+    [
+      'an unsorted path list',
+      {
+        code: 'foreign-change',
+        evidence: {
+          required: 'unchanged',
+          observed: 'concurrent-or-foreign-change',
+          baselineHead: OBSERVATION,
+          afterHead: AFTER,
+          paths: { changed: ['b.ts', 'a.ts'] },
+        },
+      },
+    ],
+    [
+      'a duplicated path',
+      {
+        code: 'foreign-change',
+        evidence: {
+          required: 'unchanged',
+          observed: 'concurrent-or-foreign-change',
+          baselineHead: OBSERVATION,
+          afterHead: AFTER,
+          paths: { changed: ['a.ts', 'a.ts'] },
+        },
+      },
+    ],
+    [
+      'more than thirty-two paths',
+      {
+        code: 'foreign-change',
+        evidence: {
+          required: 'unchanged',
+          observed: 'concurrent-or-foreign-change',
+          baselineHead: OBSERVATION,
+          afterHead: AFTER,
+          paths: {
+            changed: Array.from({ length: 33 }, (_, index) =>
+              `f${String(index).padStart(3, '0')}.ts`,
+            ),
+          },
+        },
+      },
+    ],
+    [
+      'a non-integer truncated count',
+      {
+        code: 'foreign-change',
+        evidence: {
+          required: 'unchanged',
+          observed: 'concurrent-or-foreign-change',
+          baselineHead: OBSERVATION,
+          afterHead: AFTER,
+          paths: { changed: ['a.ts'], truncated: 1.5 },
+        },
+      },
+    ],
+    [
+      'an error evidence carrying a stack',
+      {
+        code: 'judge-failed',
+        evidence: {
+          reason: 'judge transport failed',
+          error: { name: 'Error', message: 'x', stack: 'at …' },
+        },
+      },
+    ],
+    [
+      'a nested cause five deep',
+      {
+        code: 'child-failed',
+        evidence: {
+          playbookId: 'a',
+          cause: {
+            code: 'child-failed',
+            evidence: {
+              playbookId: 'b',
+              cause: {
+                code: 'child-failed',
+                evidence: {
+                  playbookId: 'c',
+                  cause: {
+                    code: 'child-failed',
+                    evidence: {
+                      playbookId: 'd',
+                      cause: { code: 'aborted', evidence: {} },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    ],
+    [
+      'a nested cause that is not a cause',
+      {
+        code: 'child-failed',
+        evidence: { playbookId: 'code', cause: { code: 'nope', evidence: {} } },
+      },
+    ],
+  ];
+
+  it.each(rejections)('rejects %s', async (_label, value) => {
+    const { assertPlaybookFailureCause } = (await import(
+      new URL('runtime.js', import.meta.url).href
+    )) as typeof import('./runtime.js');
+    expect(() => assertPlaybookFailureCause(value)).toThrow(TypeError);
   });
 });

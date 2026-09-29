@@ -41,14 +41,21 @@ export function validateDecideOptions(optionSlice) {
 export const decidePlaybookRegistryEntry = {
     id: 'decide',
     command: 'decide',
-    intent: 'turn independent Coder and Reviewer proposals into an approved spec-design commit',
-    artifactSchema: 2,
+    intent: 'synthesize independent Coder and Reviewer proposals into an approved spec-design commit',
+    artifactSchema: 3,
+    runtimeProfile: Object.freeze({
+        kind: 'shared-factory',
+        compat: createPlaybookRuntime.compat,
+    }),
     requiredRoleIds: ['coder', 'reviewer'],
     concurrentRoleSets: [['coder', 'reviewer']],
     summaryPolicy: decideSummaryPolicy,
     validateOptions: validateDecideOptions,
-    createRuntime(options) {
-        return createPlaybookRuntime(options);
+    createRuntime(options, hostCapabilities) {
+        return createPlaybookRuntime({
+            configuredOptions: options,
+            hostCapabilities,
+        });
     },
 };
 export default decidePlaybookRegistryEntry;

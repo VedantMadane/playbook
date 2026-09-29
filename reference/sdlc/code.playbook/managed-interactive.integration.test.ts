@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
-import { fork, type ChildProcess } from 'node:child_process';
+import { execFile, fork, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import {
   chmod,
@@ -15,6 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { createEvent } from '@sublang/cligent';
 import { afterEach, describe, expect, it } from 'vitest';
 import type {
@@ -26,7 +27,10 @@ import type {
 } from '../../../src/runtime.js';
 import { executionConfigFromPlan, runPlaybookRun } from './bin/run.js';
 import { loadLaunchPlan, projectTmuxConfig } from './bin/launch-config.js';
-import { createCaptainSessionStore } from './bin/session-store.js';
+import {
+  createCaptainSessionStore,
+  sanitizeReplayRecord,
+} from './bin/session-store.js';
 
 const childFixture = fileURLToPath(
   new URL('./fixtures/managed-interactive-child.mjs', import.meta.url),
@@ -35,12 +39,15 @@ const sessionIds = [
   '92000000-0000-4000-8000-000000000001',
   '92000000-0000-4000-8000-000000000002',
   '92000000-0000-4000-8000-000000000003',
+  '92000000-0000-4000-8000-000000000004',
+  '92000000-0000-4000-8000-000000000005',
 ] as const;
 // Match Cligent's production managed-activation bound.
 const CROSS_PROCESS_BOUNDARY_TIMEOUT_MS = 30_000;
 const CROSS_FRONT_TEST_TIMEOUT_MS = 45_000;
 const tempDirs: string[] = [];
 const children: ChildProcess[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   for (const child of children.splice(0)) {
@@ -55,7 +62,7 @@ afterEach(async () => {
   );
 });
 
-describe('managed interactive cross-front durability (PBCLI-50)', () => {
+describe('managed interactive cross-front durability (PBCLI-50/56)', () => {
   it('reopens an interactive-fresh session headlessly with current tuning and prior player continuity', async () => {
     const fixture = await crossFrontFixture(sessionIds[0]);
     const first = await startManagedChild(fixture, {
@@ -93,9 +100,8 @@ describe('managed interactive cross-front durability (PBCLI-50)', () => {
     expect(effect).not.toHaveProperty('resume');
     const visible = await first.waitFor('reply-visible');
     expect(visible.durableState).toBe('settled');
-    expect(visible.durableSnapshot.playerSessions['dev.coder']).toMatchObject({
-      resumeToken: 'player-token:interactive-a:1',
-    });
+    expect(visible.durableSnapshot.playerSessions['dev.coder']).not.toHaveProperty('resumeToken');
+    expect(await localHints(fixture)).toMatchObject({ players: { 'dev.coder': 'player-token:interactive-a:1' } });
     const interactiveCaptainSessionId =
       visible.durableSnapshot.captain.sessionId;
 
@@ -148,9 +154,8 @@ describe('managed interactive cross-front durability (PBCLI-50)', () => {
       interactiveCaptainSessionId,
     );
     expect(settled.snapshot.sequences.turn).toBe(2);
-    expect(settled.snapshot.playerSessions['dev.coder']).toMatchObject({
-      resumeToken: 'player-token:headless-b:1',
-    });
+    expect(settled.snapshot.playerSessions['dev.coder']).not.toHaveProperty('resumeToken');
+    expect(await localHints(fixture)).toMatchObject({ players: { 'dev.coder': 'player-token:headless-b:1' } });
   }, CROSS_FRONT_TEST_TIMEOUT_MS);
 
   it('reopens a headless-fresh session interactively, fences its reply, and holds ownership until child shutdown', async () => {
@@ -177,9 +182,8 @@ describe('managed interactive cross-front durability (PBCLI-50)', () => {
     expect(headless.code, firstStderr.text()).toBe(0);
     expect(headless.sessionId).toBe(fixture.sessionId);
     const headlessRecord = await fixture.store.read(fixture.sessionId);
-    expect(headlessRecord.snapshot.playerSessions).toMatchObject({
-      'dev.coder': { resumeToken: 'player-token:headless-a:1' },
-    });
+    expect(headlessRecord.snapshot.playerSessions['dev.coder']).not.toHaveProperty('resumeToken');
+    expect(await localHints(fixture)).toMatchObject({ players: { 'dev.coder': 'player-token:headless-a:1' } });
     const headlessCaptainSessionId = headlessRecord.snapshot.captain.sessionId;
 
     const selected = await startManagedChild(fixture, {
@@ -241,9 +245,8 @@ describe('managed interactive cross-front durability (PBCLI-50)', () => {
     });
     const visible = await selected.waitFor('reply-visible');
     expect(visible.durableState).toBe('settled');
-    expect(visible.durableSnapshot.playerSessions['dev.coder']).toMatchObject({
-      resumeToken: 'player-token:interactive-b:1',
-    });
+    expect(visible.durableSnapshot.playerSessions['dev.coder']).not.toHaveProperty('resumeToken');
+    expect(await localHints(fixture)).toMatchObject({ players: { 'dev.coder': 'player-token:interactive-b:1' } });
     await expect(fixture.store.acquire(fixture.sessionId)).rejects.toThrow(
       /lease is active/,
     );
@@ -271,6 +274,7 @@ describe('managed interactive cross-front durability (PBCLI-50)', () => {
       tmuxConfig: fixture.tmuxA,
       namespace: 'post-fence-failure',
       failReplyObserver: true,
+      retainParked: true,
     });
 
     await child.waitFor('initialized');
@@ -293,13 +297,257 @@ describe('managed interactive cross-front durability (PBCLI-50)', () => {
     const record = await fixture.store.read(fixture.sessionId);
     expect(record).toEqual(visible.durableRecord);
     expect(record).toMatchObject({
+      schemaVersion: 6,
       state: 'settled',
       sessionId: fixture.sessionId,
-      snapshot: { sequences: { turn: 1 } },
+      snapshot: {
+        mode: 'engaged.parked',
+        sequences: { turn: 1 },
+      },
+      retainedGenerations: {
+        code: {
+          frames: [
+            {
+              playbookId: 'code',
+              depth: 0,
+              runtime: {
+                playbookId: 'code',
+                state: {
+                  stateId: 'playbook.parked',
+                  status: 'active',
+                  quiescent: true,
+                },
+              },
+            },
+          ],
+        },
+      },
     });
+    expect(record.retainedGenerations.code.frames).toEqual(
+      record.snapshot.frames,
+    );
     expect(record).not.toHaveProperty('uncertain');
     const next = await fixture.store.acquire(fixture.sessionId);
     await next.release();
+  }, CROSS_FRONT_TEST_TIMEOUT_MS);
+
+  it('arbitrates bare resumption and explicit fresh start after interactive reopen', async () => {
+    const fixture = await crossFrontFixture(sessionIds[3]);
+    const first = await startManagedChild(fixture, {
+      mode: 'fresh',
+      executionProjection: fixture.executionA,
+      tmuxConfig: fixture.tmuxA,
+      namespace: 'interactive-resume-source',
+      retainParked: true,
+      resumeArbitration: true,
+    });
+
+    await first.waitFor('initialized');
+    first.send({ type: 'release-readiness' });
+    await waitForFile(fixture.controls.readinessPath);
+    await publishInputGate(fixture.controls.inputGatePath);
+    await waitForFile(fixture.controls.inputActivePath);
+    first.send({ type: 'submit', text: '/code retain it' });
+    await first.waitFor(
+      'reply-visible',
+      (message) => message.durableSnapshot.lastAction === 'start',
+    );
+    first.send({ type: 'close' });
+    await first.waitFor('complete');
+    first.child.disconnect();
+    await waitForExit(first.child);
+    await Promise.all(
+      [
+        fixture.controls.readinessPath,
+        fixture.controls.inputGatePath,
+        fixture.controls.inputActivePath,
+        fixture.controls.shutdownRequestPath,
+        fixture.controls.shutdownCompletePath,
+      ].map((path) => rm(path, { force: true })),
+    );
+
+    const selected = await startManagedChild(fixture, {
+      mode: 'selected',
+      executionProjection: fixture.executionA,
+      tmuxConfig: fixture.tmuxA,
+      namespace: 'interactive-resume-target',
+      retainParked: true,
+      resumeArbitration: true,
+      sessionIdPrefix: '70000001',
+    });
+    await selected.waitFor('initialized');
+    expect(
+      selected.messages.filter(
+        (message) =>
+          message.type === 'runtime-lifecycle' && message.method === 'init',
+      ),
+    ).toHaveLength(0);
+    selected.send({ type: 'release-readiness' });
+    await waitForFile(fixture.controls.readinessPath);
+    await publishInputGate(fixture.controls.inputGatePath);
+    await waitForFile(fixture.controls.inputActivePath);
+
+    selected.send({ type: 'submit', text: 'dismiss' });
+    const dismissed = await selected.waitFor(
+      'reply-visible',
+      (message) => message.durableSnapshot.lastAction === 'dismiss',
+    );
+    expect(dismissed.durableRecord.retainedGenerations).toHaveProperty('code');
+
+    selected.send({ type: 'submit', text: 'continue' });
+    await selected.waitFor(
+      'runtime-lifecycle',
+      (message) => message.method === 'adopt',
+    );
+    const resumed = await selected.waitFor(
+      'reply-visible',
+      (message) =>
+        message.turnId > dismissed.turnId &&
+        message.durableSnapshot.lastAction === 'resume',
+    );
+    expect(resumed.durableSnapshot).toMatchObject({
+      mode: 'engaged.parked',
+      frames: [{ playbookId: 'code' }],
+    });
+
+    selected.send({ type: 'submit', text: 'dismiss' });
+    const dismissedAgain = await selected.waitFor(
+      'reply-visible',
+      (message) =>
+        message.turnId > resumed.turnId &&
+        message.durableSnapshot.lastAction === 'dismiss',
+    );
+    selected.send({ type: 'submit', text: '/code start fresh' });
+    await selected.waitFor(
+      'runtime-lifecycle',
+      (message) => message.method === 'init',
+    );
+    const restarted = await selected.waitFor(
+      'reply-visible',
+      (message) =>
+        message.turnId > dismissedAgain.turnId &&
+        message.durableSnapshot.lastAction === 'start',
+    );
+    expect(restarted.durableSnapshot.mode).toBe('engaged.parked');
+    expect(
+      selected.messages
+        .filter((message) => message.type === 'runtime-lifecycle')
+        .map((message) => message.method)
+        .filter((method) => method === 'adopt' || method === 'init'),
+    ).toEqual(['adopt', 'init']);
+    expect(
+      selected.messages
+        .filter(
+          (message) =>
+            message.type === 'effect' && message.kind === 'player',
+        )
+        .map((message) => message.prompt),
+    ).toEqual(['cross-front-player:start fresh']);
+    expect(
+      selected.messages
+        .filter(
+          (message) =>
+            message.type === 'effect' &&
+            message.kind === 'captain' &&
+            message.prompt.includes(
+              'Select exactly one action from the closed set',
+            ),
+        )
+        .map((message) => message.prompt.match(/\[Boss message\]\n([^\n]+)/)?.[1]),
+    ).toEqual(['dismiss', 'continue', 'dismiss']);
+
+    selected.send({ type: 'close' });
+    await selected.waitFor('complete');
+    selected.child.disconnect();
+    await waitForExit(selected.child);
+
+    const observedRecords = [...first.messages, ...selected.messages]
+      .filter((message) => message.type === 'observed-record')
+      .map((message) => message.record);
+    const replay = await fixture.store.readStream(fixture.sessionId);
+    expect(replay.entries.map(({ seq }) => seq)).toEqual(
+      replay.entries.map((_, index) => index + 1),
+    );
+    expect(replay.entries.filter(({ record }) => !['session_context', 'continuity_reset'].includes(String(record.type))).map(({ record: { contextSeq: _contextSeq, ...record } }) => record)).toEqual(
+      observedRecords.map((record) => sanitizeReplayRecord(record)),
+    );
+    expect(
+      replay.entries.some(
+        ({ record }) => record.visibility === 'hidden',
+      ),
+    ).toBe(true);
+    const playerEntries = replay.entries.filter(({ record }) =>
+      ['player_prompt', 'player_event', 'player_finished'].includes(
+        String(record.type),
+      ),
+    );
+    expect(playerEntries.length).toBeGreaterThan(0);
+    expect(new Set(playerEntries.map(({ role }) => role))).toEqual(
+      new Set(['coder']),
+    );
+    expect(first.stdout()).toBe('');
+    expect(first.stderr()).toBe('');
+    expect(selected.stdout()).toBe('');
+    expect(selected.stderr()).toBe('');
+  }, CROSS_FRONT_TEST_TIMEOUT_MS);
+
+  it('flushes an open managed block before the direct replay warning', async () => {
+    const fixture = await crossFrontFixture(sessionIds[4]);
+    const child = await startManagedChild(fixture, {
+      mode: 'fresh',
+      executionProjection: fixture.executionA,
+      tmuxConfig: fixture.tmuxA,
+      namespace: 'interactive-replay-warning',
+      failReplayAppend: true,
+    });
+
+    await child.waitFor('initialized');
+    child.send({ type: 'release-readiness' });
+    await waitForFile(fixture.controls.readinessPath);
+    await publishInputGate(fixture.controls.inputGatePath);
+    await waitForFile(fixture.controls.inputActivePath);
+    child.send({ type: 'submit', text: '/code warn after source' });
+    const visible = await child.waitFor('reply-visible');
+    expect(visible.durableState).toBe('settled');
+
+    child.send({ type: 'close' });
+    await child.waitFor('complete');
+    child.child.disconnect();
+    await waitForExit(child.child);
+
+    const presentation = child.messages
+      .filter((message) => message.type === 'presentation-output')
+      .map((message) => message.text)
+      .join('');
+    const observedRecords = child.messages
+      .filter((message) => message.type === 'observed-record')
+      .map((message) => message.record);
+    expect(observedRecords).toContainEqual(
+      expect.objectContaining({
+        type: 'captain_event',
+        visibility: 'visible',
+        event: expect.objectContaining({ type: 'text_delta' }),
+      }),
+    );
+    const warning =
+      `warning: replay history for session ` +
+      `${JSON.stringify(fixture.sessionId)} may be incomplete; ` +
+      'recording has stopped';
+    expect(presentation).toContain('replay source before warning');
+    expect(presentation.indexOf('replay source before warning')).toBeLessThan(
+      presentation.indexOf(warning),
+    );
+    expect(presentation.split(warning)).toHaveLength(2);
+    expect(child.stdout()).toBe('');
+    expect(child.stderr()).toBe('');
+
+    const replay = await fixture.store.readStream(fixture.sessionId);
+    expect(
+      replay.entries.some(
+        ({ record }) =>
+          record.type === 'captain_status' && record.message === warning,
+      ),
+    ).toBe(false);
   }, CROSS_FRONT_TEST_TIMEOUT_MS);
 });
 
@@ -309,6 +557,24 @@ async function crossFrontFixture(sessionId: string) {
   const cwd = join(root, 'working-directory');
   const sessionsDir = join(root, 'sessions');
   await mkdir(cwd);
+  await execFileAsync('git', ['init', '-q', cwd]);
+  await execFileAsync('git', [
+    '-C',
+    cwd,
+    'config',
+    'user.name',
+    'Playbook Cross-Front Test',
+  ]);
+  await execFileAsync('git', [
+    '-C',
+    cwd,
+    'config',
+    'user.email',
+    'cross-front@example.invalid',
+  ]);
+  await writeFile(join(cwd, 'tracked.txt'), 'baseline\n', 'utf8');
+  await execFileAsync('git', ['-C', cwd, 'add', 'tracked.txt']);
+  await execFileAsync('git', ['-C', cwd, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'baseline']);
   const controls = await managedControlBoundary(root, sessionId);
   const configAPath = join(root, 'playbook-a.yaml');
   const configBPath = join(root, 'playbook-b.yaml');
@@ -360,6 +626,10 @@ async function startManagedChild(
     tmuxConfig: unknown;
     namespace: string;
     failReplyObserver?: boolean;
+    failReplayAppend?: boolean;
+    retainParked?: boolean;
+    resumeArbitration?: boolean;
+    sessionIdPrefix?: string;
   },
 ) {
   await writeFile(
@@ -385,10 +655,24 @@ async function startManagedChild(
       ...(options.failReplyObserver
         ? { PLAYBOOK_FAIL_REPLY_OBSERVER: '1' }
         : {}),
+      ...(options.failReplayAppend
+        ? { PLAYBOOK_FAIL_REPLAY_APPEND: '1' }
+        : {}),
+      ...(options.retainParked ? { PLAYBOOK_RETAIN_PARKED: '1' } : {}),
+      ...(options.resumeArbitration
+        ? { PLAYBOOK_RESUME_ARBITRATION: '1' }
+        : {}),
+      ...(options.sessionIdPrefix
+        ? { PLAYBOOK_SESSION_ID_PREFIX: options.sessionIdPrefix }
+        : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   children.push(child);
+  let stdout = '';
+  child.stdout!.on('data', (chunk) => {
+    stdout += String(chunk);
+  });
   let stderr = '';
   child.stderr!.on('data', (chunk) => {
     stderr += String(chunk);
@@ -424,6 +708,9 @@ async function startManagedChild(
   });
   return {
     child,
+    messages,
+    stdout: () => stdout,
+    stderr: () => stderr,
     send: (message: unknown) => child.send(message),
     waitFor(type: string, predicate = (_value: any) => true) {
       const prior = messages.find(
@@ -468,19 +755,25 @@ async function managedControlBoundary(root: string, sessionId: string) {
   };
 }
 
+async function localHints(fixture: { sessionsDir: string; sessionId: string }) {
+  return JSON.parse(await readFile(join(fixture.sessionsDir, `${fixture.sessionId}.hints.json`), 'utf8'));
+}
+
 async function assertSettledTurnZero(
   fixture: Awaited<ReturnType<typeof crossFrontFixture>>,
 ) {
   const record = await fixture.store.read(fixture.sessionId);
   expect(record).toMatchObject({
+    schemaVersion: 6,
     state: 'settled',
     sessionId: fixture.sessionId,
     cwd: fixture.cwd,
     snapshot: {
-      schemaVersion: 3,
+      schemaVersion: 4,
       sequences: { turn: 0, journal: 0 },
       playerSessions: { 'dev.coder': { adapter: 'claude' } },
     },
+    retainedGenerations: {},
   });
   expect(record.snapshot.playerSessions['dev.coder']).not.toHaveProperty(
     'resumeToken',
@@ -616,7 +909,8 @@ function fixtureRegistryEntry() {
     id: 'code',
     command: 'code',
     intent: 'exercise one durable player',
-    artifactSchema: 2 as const,
+    artifactSchema: 3 as const,
+    runtimeProfile: { kind: 'bespoke', artifactSchema: 3 } as const,
     requiredRoleIds: ['coder'],
     concurrentRoleSets: [] as const,
     validateOptions: (value: unknown) => value,
@@ -697,7 +991,7 @@ function fixtureCaptainRuntime({ controller }: any): PlaybookRuntime {
 function runtimeSnapshot(turn: number): PlaybookRuntimeSnapshot {
   const state = activeState();
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     playbookId: 'captain',
     machine: { value: state.value, status: state.status },
     roleResumeTokens: {},
@@ -711,6 +1005,12 @@ function runtimeSnapshot(turn: number): PlaybookRuntimeSnapshot {
     },
     state,
     pendingBossQuestions: [],
+    effectLedger: {
+      schemaVersion: 1,
+      revision: 0,
+      boundaries: [],
+      logicalOperations: [],
+    },
   };
 }
 

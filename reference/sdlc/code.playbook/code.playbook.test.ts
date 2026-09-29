@@ -1,7 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
-import { describe, expect, it } from 'vitest';
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+
+import { afterEach, describe, expect, it } from 'vitest';
+import { assertWorkflowTerminal } from '../../../scripts/test-support/workflow-contracts.mjs';
+
+import {
+  assertPlaybookEffectLedger,
+  emptyPlaybookEffectLedger,
+} from '../../../src/xstate-runtime.js';
 
 import createPlaybookRuntime, {
   type JsonValue,
@@ -16,19 +28,170 @@ import {
   codeStateCountLabels,
   validateCodeOptions,
 } from './code.registry.js';
+import { createRepositoryEffectCapabilities } from './bin/repository-effects.js';
 
 const APPROVED = {
-  approvedCommit: 'latest',
+  evaluatedRevision: 'review-rev',
   noUnsettledFindings: true,
 } as const;
 
+const childAcceptanceCases: Array<{
+  label: string;
+  output: JsonValue;
+  accepted: boolean;
+}> = [
+  { label: 'complete clean evidence', output: APPROVED, accepted: true },
+  {
+    label: 'missing revision',
+    output: { noUnsettledFindings: true },
+    accepted: false,
+  },
+  {
+    label: 'invalid revision',
+    output: { noUnsettledFindings: true, evaluatedRevision: 7 },
+    accepted: false,
+  },
+  {
+    label: 'unsettled findings',
+    output: { noUnsettledFindings: false, evaluatedRevision: 'review-rev' },
+    accepted: false,
+  },
+  {
+    label: 'foreign approval shape',
+    output: { approvedCommit: 'old', noUnsettledFindings: true },
+    accepted: false,
+  },
+];
+
+type RepositoryEffect =
+  | 'commit'
+  | 'commit-all'
+  | 'unchanged'
+  | 'worktree'
+  | 'multiple'
+  | 'rewritten'
+  | 'residual';
+
+type PlayerFixture = PlayerResult & {
+  readonly repositoryEffect?: RepositoryEffect;
+};
+
 interface Fixtures {
-  players: PlayerResult[];
+  players: PlayerFixture[];
   judges: unknown[];
   children: Array<PlaybookCallStart | Error>;
 }
 
-function harness(fixtures: Partial<Fixtures> = {}) {
+const execFileAsync = promisify(execFile);
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    tempDirs.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
+
+async function git(repo: string, ...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['-c', 'commit.gpgsign=false', ...args], {
+    cwd: repo,
+    encoding: 'utf8',
+  });
+  return stdout.trim();
+}
+
+async function initRepository(): Promise<string> {
+  const repo = await mkdtemp(join(tmpdir(), 'code-authority-'));
+  tempDirs.push(repo);
+  await git(repo, 'init', '--quiet');
+  await git(repo, 'config', 'user.name', 'CODE Authority Test');
+  await git(repo, 'config', 'user.email', 'code@example.invalid');
+  await writeFile(join(repo, 'base.txt'), 'base\n', 'utf8');
+  await git(repo, 'add', '--all');
+  await git(repo, 'commit', '--quiet', '-m', 'base');
+  return repo;
+}
+
+function effectLedgerService() {
+  let ledger = emptyPlaybookEffectLedger();
+  return {
+    snapshot: () => ledger,
+    async writeAhead(_authority: unknown, commands: any[]) {
+      const boundaries = [...ledger.boundaries] as any[];
+      const logicalOperations = [...ledger.logicalOperations] as any[];
+      for (const command of commands) {
+        if (command.kind === 'start-boundaries') {
+          const attemptId = '10000000-0000-4000-8000-000000000001';
+          for (const seed of command.boundaries) {
+            boundaries.push({
+              sequence: boundaries.length + 1,
+              ...seed,
+              attemptId,
+              attemptNumber: 1,
+            });
+          }
+          continue;
+        }
+        if (command.kind === 'replace-boundaries') {
+          for (const replacement of command.replacements) {
+            const index = boundaries.findIndex(
+              (boundary) =>
+                boundary.boundaryId === replacement.expected.boundaryId,
+            );
+            if (
+              index < 0 ||
+              JSON.stringify(boundaries[index]) !==
+                JSON.stringify(replacement.expected)
+            ) {
+              throw new Error('CODE test effect-ledger replacement is stale');
+            }
+            boundaries[index] = replacement.next;
+          }
+          continue;
+        }
+        if (command.kind === 'append-logical-operations') {
+          for (const operation of command.operations) {
+            logicalOperations.push({
+              sequence: logicalOperations.length + 1,
+              ...operation,
+            });
+          }
+          continue;
+        }
+        if (command.kind === 'replace-logical-operations') {
+          for (const replacement of command.replacements) {
+            const index = logicalOperations.findIndex(
+              (operation) =>
+                operation.operationId === replacement.expected.operationId,
+            );
+            if (
+              index < 0 ||
+              JSON.stringify(logicalOperations[index]) !==
+                JSON.stringify(replacement.expected)
+            ) {
+              throw new Error(
+                'CODE test logical-operation replacement is stale',
+              );
+            }
+            logicalOperations[index] = replacement.next;
+          }
+          continue;
+        }
+        throw new Error(`unsupported CODE test ledger command ${command.kind}`);
+      }
+      ledger = assertPlaybookEffectLedger({
+        ...ledger,
+        revision: ledger.revision + 1,
+        boundaries,
+        logicalOperations,
+      });
+      return ledger;
+    },
+  };
+}
+
+async function harness(fixtures: Partial<Fixtures> = {}) {
+  const repo = await initRepository();
+  const ledgerService = effectLedgerService();
   const players = [...(fixtures.players ?? [])];
   const judges = [...(fixtures.judges ?? [])];
   const children = [...(fixtures.children ?? [])];
@@ -36,6 +199,7 @@ function harness(fixtures: Partial<Fixtures> = {}) {
     playerId: string;
     prompt: string;
     resume: string | false;
+    freshPrompt?: string;
   }> = [];
   const judgePrompts: string[] = [];
   const childRequests: Array<{
@@ -45,11 +209,57 @@ function harness(fixtures: Partial<Fixtures> = {}) {
   }> = [];
   const statuses: string[] = [];
   const telemetry: Array<{ topic: string; payload: unknown }> = [];
+  const commitOids: string[] = [];
+  let effectIndex = 0;
+  const applyRepositoryEffect = async (
+    effect: RepositoryEffect,
+  ): Promise<void> => {
+    effectIndex += 1;
+    if (effect === 'unchanged') return;
+    if (effect === 'worktree') {
+      await writeFile(join(repo, `effect-${effectIndex}.txt`), 'changed\n');
+      return;
+    }
+    if (effect === 'rewritten') {
+      const tree = await git(repo, 'rev-parse', 'HEAD^{tree}');
+      const oid = await git(repo, 'commit-tree', tree, '-m', 'foreign root');
+      await git(repo, 'reset', '--hard', '--quiet', oid);
+      return;
+    }
+    const commit = async (message: string): Promise<void> => {
+      await git(repo, 'commit', '--quiet', '--allow-empty', '-m', message);
+      commitOids.push(await git(repo, 'rev-parse', 'HEAD'));
+    };
+    if (effect === 'multiple') {
+      await commit(`phase ${effectIndex}.1`);
+      await commit(`phase ${effectIndex}.2`);
+      return;
+    }
+    if (effect === 'commit-all') {
+      await git(repo, 'add', '--all');
+      await git(repo, 'commit', '--quiet', '-m', `phase ${effectIndex}`);
+      commitOids.push(await git(repo, 'rev-parse', 'HEAD'));
+      return;
+    }
+    await commit(`phase ${effectIndex}`);
+    if (effect === 'residual') {
+      await writeFile(join(repo, `residual-${effectIndex}.txt`), 'residual\n');
+    }
+  };
   const ports: PlaybookPorts = {
     async callPlayer(playerId, prompt, _signal, options) {
-      playerCalls.push({ playerId, prompt, resume: options.resume });
-      const result = players.shift();
-      if (result === undefined) throw new Error('missing player fixture');
+      playerCalls.push({
+        playerId,
+        prompt,
+        resume: options.resume,
+        ...(options.freshPrompt === undefined
+          ? {}
+          : { freshPrompt: options.freshPrompt }),
+      });
+      const fixture = players.shift();
+      if (fixture === undefined) throw new Error('missing player fixture');
+      const { repositoryEffect = 'commit', ...result } = fixture;
+      await applyRepositoryEffect(repositoryEffect);
       return result;
     },
     async callCaptain() {
@@ -74,6 +284,24 @@ function harness(fixtures: Partial<Fixtures> = {}) {
       telemetry.push(event);
     },
   };
+  const capabilities = await createRepositoryEffectCapabilities({
+    cwd: repo,
+    catalog: {
+      code: {
+        id: 'code',
+        artifactSchema: 3,
+        requiredRoleIds: ['coder'],
+        concurrentRoleSets: [],
+      },
+    },
+    sessionId: '20000000-0000-4000-8000-000000000001',
+    sessionLease: {
+      sessionId: '20000000-0000-4000-8000-000000000001',
+      ownerToken: '30000000-0000-4000-8000-000000000001',
+      assertOwner: async () => undefined,
+    },
+    createWriteAhead: () => ledgerService,
+  });
   return {
     ports,
     playerCalls,
@@ -81,14 +309,34 @@ function harness(fixtures: Partial<Fixtures> = {}) {
     childRequests,
     statuses,
     telemetry,
+    commitOids,
+    effectLedger: ledgerService,
+    hostCapabilities: capabilities.code,
   };
+}
+
+type CodeHarness = Awaited<ReturnType<typeof harness>>;
+
+function linkedRuntime(host: CodeHarness, options: unknown = {}) {
+  return createPlaybookRuntime({
+    configuredOptions: options,
+    hostCapabilities: host.hostCapabilities,
+  });
+}
+
+function acceptedOutcomes(host: CodeHarness): unknown[] {
+  return host.telemetry
+    .filter(({ topic }) => topic === 'playbook.trace')
+    .map(({ payload }) => payload as { type?: string; payload?: unknown })
+    .filter(({ type }) => type === 'outcome.accepted')
+    .map(({ payload }) => payload);
 }
 
 function rootSession(ports: PlaybookPorts): PlaybookSession {
   return {
-    sessionId: 'code-root',
+    sessionId: '40000000-0000-4000-8000-000000000001',
     playbookId: 'code',
-    rootSessionId: 'code-root',
+    rootSessionId: '40000000-0000-4000-8000-000000000001',
     depth: 0,
     roleBindings: {
       coder: { playerId: 'coder', promptIdentity: 'GPT-5.6 Sol' },
@@ -120,28 +368,41 @@ describe('linked CODE runtime', () => {
     ]);
   });
 
-  it('advertises the schema-2 local-role manifest', () => {
+  it('advertises the schema-3 local-role manifest', async () => {
+    const host = await harness();
     expect(codePlaybookRegistryEntry).toMatchObject({
-      artifactSchema: 2,
+      artifactSchema: 3,
+      runtimeProfile: {
+        kind: 'shared-factory',
+        compat: { artifactSchema: 3, runtimeAbi: 1 },
+      },
       requiredRoleIds: ['coder'],
       concurrentRoleSets: [],
     });
-    expect(codePlaybookRegistryEntry.createRuntime(validateCodeOptions({}))).toBeDefined();
+    expect(codePlaybookRegistryEntry.runtimeProfile.compat).toBe(
+      createPlaybookRuntime.compat,
+    );
+    expect(
+      codePlaybookRegistryEntry.createRuntime(
+        validateCodeOptions({}),
+        host.hostCapabilities,
+      ),
+    ).toBeDefined();
   });
 
   it('runs one direct commit and calls REVIEW with exact quoted context', async () => {
-    const host = harness({
+    const host = await harness({
       players: [
         {
           status: 'ok',
-          finalText: 'Tests passed.\nCommit: abc123',
+          finalText: 'Tests passed.',
           resumeToken: 'coder-1',
         },
       ],
-      judges: [{ guard: 'directCommit', latestCommit: 'abc123' }],
+      judges: [{ guard: 'directCommit' }],
       children: [approvedChild(1)],
     });
-    const runtime = createPlaybookRuntime({});
+    const runtime = linkedRuntime(host);
     await runtime.init(rootSession(host.ports));
 
     const result = await runtime.handleBossInput({
@@ -150,189 +411,348 @@ describe('linked CODE runtime', () => {
     });
 
     expect(result.outcome).toBe('terminal');
+    assertWorkflowTerminal('code', result);
+    expect(
+      result.outcome === 'terminal' ? result.stateDescription : undefined,
+    ).toBe(
+      "CODE completed: every phase's review passed with no unsettled findings.",
+    );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'complete',
-      lastCodeCommit: 'abc123',
-      lastCodeOutput: 'Tests passed.\nCommit: abc123',
+      lastCodeCommit: host.commitOids[0],
+      finalEvaluatedRevision: 'review-rev',
+      allReviewsPassed: true,
     });
     expect(host.playerCalls).toHaveLength(1);
     expect(host.playerCalls[0]).toMatchObject({
       playerId: 'coder',
       resume: false,
     });
-    expect(host.playerCalls[0]?.prompt).toContain(
-      '> Fix the bug.\n> Preserve compatibility.',
+    // DR-065: the prompt leads with its instructions; the relayed request
+    // follows the last instruction line.
+    expect(host.playerCalls[0]?.prompt).toMatch(
+      /^First determine whether the coding request starts a new coding intent/,
     );
-    expect(host.playerCalls[0]?.prompt).toContain('Coder is GPT-5.6 Sol;');
     expect(host.playerCalls[0]?.prompt).toContain(
-      'exactly one final-response line beginning `Commit: `',
+      'Credit every AI that contributed to this commit: Coder GPT-5.6 Sol.\n\n' +
+        '> Original request: Fix the bug.\n> Preserve compatibility.',
     );
+    expect(host.playerCalls[0]?.prompt).not.toContain('`Commit: `');
     expect(host.childRequests).toHaveLength(1);
     expect(host.childRequests[0]).toMatchObject({
       playbookId: 'review',
       text:
-        '> Initial intent: Fix the bug.\n' +
+        '> Original intent: Fix the bug.\n' +
         '> Preserve compatibility.\n' +
-        '> Coder output: Tests passed.\n' +
-        '> Commit: abc123',
+        `> Review scope: the commit ${host.commitOids[0]} from this coding phase and its resulting repository state.\n` +
+        '> Coder output: Tests passed.',
+    });
+    expect(host.statuses).toContain('→ directCommit');
+    expect(acceptedOutcomes(host)).toContainEqual({
+      source: 'firstPhase',
+      target: 'reviewNewIntentPhase',
+      acceptedOutcome: 'directCommit',
     });
     const view = runtime.describe!();
     expect(view.state.stateId).toBe('done');
     expect(view.stateDescription).toBe(
-      'The coding workflow completed after REVIEW found no unsettled findings.',
+      "CODE completed: every phase's review passed with no unsettled findings.",
     );
     await runtime.dispose();
   });
 
-  it('requires a nonempty commit identity before calling REVIEW', async () => {
-    const host = harness({
-      players: [{ status: 'ok', finalText: 'Committed without an identity.' }],
-      judges: [{ guard: 'directCommit', latestCommit: '   ' }],
-    });
-    const runtime = createPlaybookRuntime({});
-    await runtime.init(rootSession(host.ports));
+  it.each([
+    ['missing', 'Finished successfully.'],
+    ['glued', 'Finished. Commit:abc123'],
+    ['fenced', '```\nCommit: abc123\n```'],
+    ['quoted', '> Commit: abc123'],
+    ['duplicated', 'Commit: first\nCommit: second'],
+    ['misleading', 'Commit: definitely-not-the-observed-oid'],
+  ])(
+    'ignores %s Commit prose when effect evidence proves the commit',
+    async (_label, finalText) => {
+      const host = await harness({
+        players: [{ status: 'ok', finalText }],
+        judges: [{ guard: 'directCommit' }],
+        children: [approvedChild(1)],
+      });
+      const runtime = linkedRuntime(host);
+      await runtime.init(rootSession(host.ports));
 
-    const result = await runtime.handleBossInput({
-      text: 'Fix it.',
-      signal: new AbortController().signal,
-    });
-
-    expect(result).toMatchObject({
-      outcome: 'failed',
-      state: { stateId: 'failed' },
-      error: {
-        message: 'Coder result for CODE-1 did not match a declared outcome.',
-      },
-    });
-    expect(host.childRequests).toEqual([]);
-    await runtime.dispose();
-  });
-
-  it('requires the adjudicated commit identity in the Coder final text', async () => {
-    const host = harness({
-      players: [{ status: 'ok', finalText: 'Committed the requested fix.' }],
-      judges: [{ guard: 'directCommit', latestCommit: 'abc123' }],
-    });
-    const runtime = createPlaybookRuntime({});
-    await runtime.init(rootSession(host.ports));
-
-    const result = await runtime.handleBossInput({
-      text: 'Fix it.',
-      signal: new AbortController().signal,
-    });
-
-    expect(result).toMatchObject({
-      outcome: 'failed',
-      state: { stateId: 'failed' },
-      error: {
-        message: 'Coder result for CODE-1 did not match a declared outcome.',
-      },
-    });
-    expect(host.childRequests).toEqual([]);
-    await runtime.dispose();
-  });
-
-  it('makes the commit identity a required adjudication field', async () => {
-    const host = harness({
-      players: [{ status: 'ok', finalText: 'Committed.\nCommit: abc123' }],
-      judges: [{ guard: 'directCommit' }],
-    });
-    const runtime = createPlaybookRuntime({});
-    await runtime.init(rootSession(host.ports));
-
-    await expect(
-      runtime.handleBossInput({
+      const result = await runtime.handleBossInput({
         text: 'Fix it.',
         signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow(
-      'adjudicate: judge response missing required field "latestCommit" ' +
-        'for guard "directCommit"',
-    );
+      });
+
+      expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
+        status: 'complete',
+        lastCodeCommit: host.commitOids[0],
+        finalEvaluatedRevision: 'review-rev',
+        allReviewsPassed: true,
+      });
+      expect(host.commitOids[0]).toMatch(/^[0-9a-f]{40}$/);
+      expect(host.childRequests).toHaveLength(1);
+      await runtime.dispose();
+    },
+  );
+
+  it('rejects a semantic attempt to supply effect-owned latestCommit', async () => {
+    const forged = { guard: 'directCommit', latestCommit: 'f'.repeat(40) };
+    const host = await harness({
+      players: [{ status: 'ok', finalText: 'Finished.' }],
+      judges: [forged, forged],
+    });
+    const runtime = linkedRuntime(host);
+    await runtime.init(rootSession(host.ports));
+
+    const result = await runtime.handleBossInput({
+      text: 'Fix it.',
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'failed',
+      state: { stateId: 'failed' },
+    });
+    expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
+      'reconcile:unresolved-effect',
+      'abandon:unresolved-effect',
+    ]);
+    expect(host.judgePrompts).toHaveLength(2);
     expect(host.childRequests).toEqual([]);
+    expect(host.statuses).not.toContain('→ directCommit');
     await runtime.dispose();
   });
 
-  it('keeps one Coder conversation across reviewed IR phases', async () => {
-    const host = harness({
+  // DR-040 §4 / PBRT-77: an `unchanged` receipt excludes any effect, so a
+  // claimed commit over it is an ordinary failure with the ordinary retry —
+  // never a parked reconciliation, whose reconcile would be a no-op and
+  // whose abandonment would have no effect evidence to record.
+  it('fails a directCommit candidate over unchanged repository evidence into the ordinary retryable failure', async () => {
+    const host = await harness({
+      players: [
+        { status: 'ok', finalText: 'Finished.', repositoryEffect: 'unchanged' },
+      ],
+      judges: [{ guard: 'directCommit' }],
+    });
+    const runtime = linkedRuntime(host);
+    await runtime.init(rootSession(host.ports));
+
+    const result = await runtime.handleBossInput({
+      text: 'Fix it.',
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      outcome: 'failed',
+      state: { stateId: 'failed' },
+    });
+    // The complete `unchanged` receipt passes the PBRT-71 replay fence, so
+    // the root interrupt's jump back to the first phase is offered with the
+    // retry; both restart the same work.
+    expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
+      'retry:START_CODE',
+      'jump:firstPhase',
+    ]);
+    expect(runtime.unresolvedEffectEnvelopes?.()).toEqual([]);
+    expect(host.childRequests).toEqual([]);
+    expect(host.effectLedger.snapshot().boundaries[0]?.physicalReceipt)
+      .toMatchObject({ classification: 'unchanged' });
+    expect(host.statuses).not.toContain('→ directCommit');
+    await runtime.dispose();
+  });
+
+  it.each([
+    ['worktree', 'worktree-only-change'],
+    ['multiple', 'multiple-commits'],
+    ['rewritten', 'rewritten-or-non-descendant'],
+    ['residual', 'observation-ambiguous'],
+  ] as const)(
+    'parks a directCommit candidate for %s repository evidence',
+    async (repositoryEffect, classification) => {
+      const host = await harness({
+        players: [
+          { status: 'ok', finalText: 'Finished.', repositoryEffect },
+        ],
+        judges: [{ guard: 'directCommit' }],
+      });
+      const runtime = linkedRuntime(host);
+      await runtime.init(rootSession(host.ports));
+
+      const result = await runtime.handleBossInput({
+        text: 'Fix it.',
+        signal: new AbortController().signal,
+      });
+
+      expect(result).toMatchObject({
+        outcome: 'failed',
+        state: { stateId: 'failed' },
+      });
+      expect(runtime.describe?.().actions.map(({ id }) => id)).toEqual([
+        'reconcile:unresolved-effect',
+        'abandon:unresolved-effect',
+      ]);
+      expect(host.childRequests).toEqual([]);
+      expect(host.effectLedger.snapshot().boundaries[0]?.physicalReceipt)
+        .toMatchObject({ classification });
+      expect(host.statuses).not.toContain('→ directCommit');
+      await runtime.dispose();
+    },
+  );
+
+  it('keeps one Coder conversation through an IR-task Boss question', async () => {
+    const host = await harness({
       players: [
         {
           status: 'ok',
-          finalText: 'Created IR-040.\nCommit: ir040',
+          finalText: 'Created IR-040.',
           resumeToken: 'coder-1',
         },
         {
           status: 'ok',
-          finalText: 'Completed task 1.\nCommit: task1',
-          resumeToken: 'coder-2',
+          finalText: 'Which compatibility boundary should I use?',
+          resumeToken: 'coder-question',
+          repositoryEffect: 'worktree',
         },
         {
           status: 'ok',
-          finalText: 'Completed task 2.\nCommit: task2',
+          finalText: 'Completed task 1.',
+          resumeToken: 'coder-2',
+          repositoryEffect: 'commit-all',
+        },
+        {
+          status: 'ok',
+          finalText: 'Completed task 2.',
           resumeToken: 'coder-3',
         },
       ],
       judges: [
         {
           guard: 'irCommit',
-          latestCommit: 'ir040',
+          irNumber: '040',
+        },
+        {
+          guard: 'needsBossReply',
+        },
+        { type: 'BOSS_REPLY' },
+        {
+          guard: 'moreTasks',
           irNumber: '040',
           irTask: 'Implement task 1.',
         },
         {
-          guard: 'moreTasks',
-          latestCommit: 'task1',
+          guard: 'finalTask',
+          irNumber: '040',
           irTask: 'Implement task 2.',
         },
-        { guard: 'finalTask', latestCommit: 'task2' },
       ],
       children: [approvedChild(1), approvedChild(2), approvedChild(3)],
     });
-    const runtime = createPlaybookRuntime({});
+    const runtime = linkedRuntime(host);
     await runtime.init(rootSession(host.ports));
 
-    const result = await runtime.handleBossInput({
+    const parked = await runtime.handleBossInput({
       text: 'Implement the large change.',
+      signal: new AbortController().signal,
+    });
+    expect(parked.outcome).toBe('quiescent');
+    expect(host.effectLedger.snapshot().logicalOperations[0]).toMatchObject({
+      pendingQuestion: {
+        question: 'Which compatibility boundary should I use?',
+      },
+    });
+
+    const result = await runtime.handleBossInput({
+      text: 'Preserve the narrow compatibility boundary.',
       signal: new AbortController().signal,
     });
 
     expect(result.outcome).toBe('terminal');
+    assertWorkflowTerminal('code', result);
+    expect(
+      result.outcome === 'terminal' ? result.stateDescription : undefined,
+    ).toBe(
+      "CODE completed: every phase's review passed with no unsettled findings.",
+    );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'complete',
-      lastCodeCommit: 'task2',
-      lastCodeOutput: 'Completed task 2.\nCommit: task2',
+      lastCodeCommit: host.commitOids[2],
+      finalEvaluatedRevision: 'review-rev',
+      allReviewsPassed: true,
     });
     expect(host.playerCalls.map(({ resume }) => resume)).toEqual([
       false,
       'coder-1',
+      'coder-question',
       'coder-2',
     ]);
-    expect(host.playerCalls[1]?.prompt).toContain(
-      '> Implement task 1.\n\nRead IR-040',
+    expect(host.playerCalls[1]?.prompt).toMatch(
+      /^Read the identified IR[\s\S]*Coder GPT-5\.6 Sol\.\n\n> Original request: Implement the large change\.\n> IR number: 040/,
     );
+    expect(host.playerCalls[2]?.prompt).not.toContain('Which compatibility boundary should I use?');
     expect(host.playerCalls[2]?.prompt).toContain(
-      '> Implement task 2.\n\nRead IR-040',
+      'Boss reply:\nPreserve the narrow compatibility boundary.',
+    );
+    for (const prompt of [
+      host.playerCalls[2]?.prompt,
+      host.playerCalls[2]?.freshPrompt,
+    ]) {
+      expect(prompt).toContain('> Original request: Implement the large change.');
+      expect(prompt).toContain('> IR number: 040');
+    }
+    expect(host.playerCalls[3]?.prompt).toMatch(
+      /^Read the identified IR[\s\S]*Coder GPT-5\.6 Sol\.\n\n> Original request: Implement the large change\.\n> IR number: 040/,
     );
     expect(host.childRequests.map(({ text }) => text)).toEqual([
-      '> Initial intent: Implement the large change.\n' +
-        '> Coder output: Created IR-040.\n> Commit: ir040',
-      '> IR task: Implement task 1.\n' +
-        '> Coder output: Completed task 1.\n> Commit: task1',
-      '> IR task: Implement task 2.\n' +
-        '> Coder output: Completed task 2.\n> Commit: task2',
+      '> Original intent: Implement the large change.\n' +
+        `> Review scope: the commit ${host.commitOids[0]} from this coding phase and its resulting repository state.\n` +
+        '> Coder output: Created IR-040.',
+      '> Original intent: Implement the large change.\n' +
+        `> Review scope: the commit ${host.commitOids[1]} from this coding phase and its resulting repository state.\n` +
+        '> Coder output: Completed task 1.\n' +
+        '\n' +
+        '> Current IR task: Implement task 1.',
+      '> Original intent: Implement the large change.\n' +
+        `> Review scope: the commit ${host.commitOids[2]} from this coding phase and its resulting repository state.\n` +
+        '> Coder output: Completed task 2.\n' +
+        '\n' +
+        '> Current IR task: Implement task 2.',
+    ]);
+    expect(host.commitOids).toHaveLength(3);
+    expect(acceptedOutcomes(host)).toEqual([
+      {
+        source: 'firstPhase',
+        target: 'reviewNewIntentPhase',
+        acceptedOutcome: 'irCommit',
+      },
+      {
+        source: 'irTaskPhase',
+        target: 'awaitBossReply',
+        acceptedOutcome: 'needsBossReply',
+      },
+      {
+        source: 'irTaskPhase',
+        target: 'reviewIrTaskPhase',
+        acceptedOutcome: 'moreTasks',
+      },
+      {
+        source: 'irTaskPhase',
+        target: 'reviewIrTaskPhase',
+        acceptedOutcome: 'finalTask',
+      },
     ]);
     await runtime.dispose();
   });
 
   it('suspends on REVIEW and validates its exact approval on resume', async () => {
-    const host = harness({
-      players: [{ status: 'ok', finalText: 'Committed.\nCommit: abc123' }],
-      judges: [{ guard: 'directCommit', latestCommit: 'abc123' }],
+    const host = await harness({
+      players: [{ status: 'ok', finalText: 'Committed.' }],
+      judges: [{ guard: 'directCommit' }],
       children: [
         { state: 'suspended', childSessionId: 'review-suspended' },
       ],
     });
-    const runtime = createPlaybookRuntime({});
+    const runtime = linkedRuntime(host);
     await runtime.init(rootSession(host.ports));
     const suspended = await runtime.handleBossInput({
       text: 'Fix it.',
@@ -352,13 +772,14 @@ describe('linked CODE runtime', () => {
       },
     });
     expect(resumed.outcome).toBe('terminal');
+    assertWorkflowTerminal('code', resumed);
     await runtime.dispose();
   });
 
   it('reports valid REVIEW abort/error results with the last CODE evidence', async () => {
-    const host = harness({
-      players: [{ status: 'ok', finalText: 'Committed.\nCommit: abc123' }],
-      judges: [{ guard: 'directCommit', latestCommit: 'abc123' }],
+    const host = await harness({
+      players: [{ status: 'ok', finalText: 'Committed.' }],
+      judges: [{ guard: 'directCommit' }],
       children: [
         {
           state: 'settled',
@@ -371,37 +792,42 @@ describe('linked CODE runtime', () => {
         },
       ],
     });
-    const runtime = createPlaybookRuntime({});
+    const runtime = linkedRuntime(host);
     await runtime.init(rootSession(host.ports));
     const result = await runtime.handleBossInput({
       text: 'Fix it.',
       signal: new AbortController().signal,
     });
     expect(result.outcome).toBe('terminal');
+    assertWorkflowTerminal('code', result);
+    expect(
+      result.outcome === 'terminal' ? result.stateDescription : undefined,
+    ).toBe(
+      'CODE stopped because review did not pass a phase and reports the failure with its last code-owned commit.',
+    );
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'review-failed',
-      lastCodeCommit: 'abc123',
-      lastCodeOutput: 'Committed.\nCommit: abc123',
+      lastCodeCommit: host.commitOids[0],
       error: { name: 'ReviewError', message: 'Reviewer unavailable.' },
     });
     expect(host.playerCalls).toHaveLength(1);
     // A host with no access to the run output quotes this published meaning to
     // report the outcome, so it must not read as an approval.
     const view = runtime.describe!();
-    expect(view.state.stateId).toBe('reportedReviewFailure');
+    expect(view.state.stateId).toBe('reviewFailed');
     expect(view.stateDescription).toBe(
-      'The coding workflow reported a REVIEW failure and the last code-owned commit.',
+      'CODE stopped because review did not pass a phase and reports the failure with its last code-owned commit.',
     );
     await runtime.dispose();
   });
 
   it('parks a raw nested-call rejection with the committed phase visible', async () => {
-    const host = harness({
-      players: [{ status: 'ok', finalText: 'Committed.\nCommit: abc123' }],
-      judges: [{ guard: 'directCommit', latestCommit: 'abc123' }],
+    const host = await harness({
+      players: [{ status: 'ok', finalText: 'Committed.' }],
+      judges: [{ guard: 'directCommit' }],
       children: [new Error('nested REVIEW bridge failed')],
     });
-    const runtime = createPlaybookRuntime({});
+    const runtime = linkedRuntime(host);
     await runtime.init(rootSession(host.ports));
 
     await expect(
@@ -418,25 +844,26 @@ describe('linked CODE runtime', () => {
       name: 'Error',
       message: 'nested REVIEW bridge failed',
     });
-    expect(view.context).toEqual({ phase: 'direct' });
+    expect(view.context).toEqual({
+      phaseOutcome: 'directCommit',
+      codeCommit: host.commitOids[0],
+    });
     await runtime.dispose();
   });
 
   it('reports the new-IR commit and starts no task after REVIEW fails', async () => {
-    const host = harness({
+    const host = await harness({
       players: [
         {
           status: 'ok',
-          finalText: 'Created IR-041.\nCommit: ir041',
+          finalText: 'Created IR-041.',
           resumeToken: 'coder-ir',
         },
       ],
       judges: [
         {
           guard: 'irCommit',
-          latestCommit: 'ir041',
           irNumber: '041',
-          irTask: 'Implement task 1.',
         },
       ],
       children: [
@@ -451,7 +878,7 @@ describe('linked CODE runtime', () => {
         },
       ],
     });
-    const runtime = createPlaybookRuntime({});
+    const runtime = linkedRuntime(host);
     await runtime.init(rootSession(host.ports));
 
     const result = await runtime.handleBossInput({
@@ -461,8 +888,7 @@ describe('linked CODE runtime', () => {
 
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'review-failed',
-      lastCodeCommit: 'ir041',
-      lastCodeOutput: 'Created IR-041.\nCommit: ir041',
+      lastCodeCommit: host.commitOids[0],
       error: { name: 'ReviewError', message: 'IR review failed.' },
     });
     expect(host.playerCalls).toHaveLength(1);
@@ -471,30 +897,28 @@ describe('linked CODE runtime', () => {
   });
 
   it('reports the current task commit and starts no next task after REVIEW fails', async () => {
-    const host = harness({
+    const host = await harness({
       players: [
         {
           status: 'ok',
-          finalText: 'Created IR-041.\nCommit: ir041',
+          finalText: 'Created IR-041.',
           resumeToken: 'coder-ir',
         },
         {
           status: 'ok',
-          finalText: 'Completed task 1.\nCommit: task1',
+          finalText: 'Completed task 1.',
           resumeToken: 'coder-task-1',
         },
       ],
       judges: [
         {
           guard: 'irCommit',
-          latestCommit: 'ir041',
           irNumber: '041',
-          irTask: 'Implement task 1.',
         },
         {
           guard: 'moreTasks',
-          latestCommit: 'task1',
-          irTask: 'Implement task 2.',
+          irNumber: '041',
+          irTask: 'Implement task 1.',
         },
       ],
       children: [
@@ -510,7 +934,7 @@ describe('linked CODE runtime', () => {
         },
       ],
     });
-    const runtime = createPlaybookRuntime({});
+    const runtime = linkedRuntime(host);
     await runtime.init(rootSession(host.ports));
 
     const result = await runtime.handleBossInput({
@@ -520,8 +944,7 @@ describe('linked CODE runtime', () => {
 
     expect(result.outcome === 'terminal' ? result.output : undefined).toEqual({
       status: 'review-failed',
-      lastCodeCommit: 'task1',
-      lastCodeOutput: 'Completed task 1.\nCommit: task1',
+      lastCodeCommit: host.commitOids[1],
       error: { name: 'ReviewError', message: 'Task review failed.' },
     });
     expect(host.playerCalls).toHaveLength(2);
@@ -529,107 +952,183 @@ describe('linked CODE runtime', () => {
     await runtime.dispose();
   });
 
-  it('treats an invalid REVIEW success result as terminal failure', async () => {
-    const host = harness({
-      players: [{ status: 'ok', finalText: 'Committed.\nCommit: abc123' }],
-      judges: [{ guard: 'directCommit', latestCommit: 'abc123' }],
-      children: [
-        {
-          state: 'settled',
-          result: {
-            status: 'ok',
-            playbookId: 'review',
-            childSessionId: 'review-invalid',
-            output: { approvedCommit: 'old', noUnsettledFindings: true },
-          },
+  it.each(
+    [false, true].flatMap((declaredTerminal) =>
+      childAcceptanceCases.map((row) => ({ ...row, declaredTerminal })),
+    ),
+  )(
+    'checks caller-owned $label after bridge delivery (terminal declared: $declaredTerminal)',
+    async ({ declaredTerminal, output, accepted }) => {
+      const child: PlaybookCallStart = {
+        state: 'settled',
+        result: {
+          status: 'ok',
+          playbookId: 'review',
+          childSessionId: 'review-evidence',
+          ...(declaredTerminal
+            ? {
+                terminal: {
+                  stateId: 'reviewComplete',
+                  kind: 'success' as const,
+                },
+              }
+            : {}),
+          output,
         },
-      ],
-    });
-    const runtime = createPlaybookRuntime({});
-    await runtime.init(rootSession(host.ports));
-    const result = await runtime.handleBossInput({
-      text: 'Fix it.',
-      signal: new AbortController().signal,
-    });
-    expect(result.outcome).toBe('terminal');
-    const output = result.outcome === 'terminal' ? result.output : undefined;
-    expect(output).toMatchObject({
-      status: 'review-failed',
-      lastCodeCommit: 'abc123',
-      lastCodeOutput: 'Committed.\nCommit: abc123',
-      error: { name: 'ReviewContractError' },
-    });
-    await runtime.dispose();
-  });
+      };
+      const originalChild = JSON.stringify(child);
+      const host = await harness({
+        players: [{ status: 'ok', finalText: 'Committed.' }],
+        judges: [{ guard: 'directCommit' }],
+        children: [child],
+      });
+      const runtime = linkedRuntime(host);
+      await runtime.init(rootSession(host.ports));
+      const result = await runtime.handleBossInput({
+        text: 'Fix it.',
+        signal: new AbortController().signal,
+      });
+      expect(result.outcome).toBe('terminal');
+      assertWorkflowTerminal('code', result);
+      if (result.outcome !== 'terminal')
+        throw new Error('Expected CODE terminal result');
+      expect(result.terminal?.kind).toBe(accepted ? 'success' : 'failure');
+      if (accepted) {
+        expect(result.output).toEqual({
+          status: 'complete',
+          lastCodeCommit: host.commitOids[0],
+          finalEvaluatedRevision: 'review-rev',
+          allReviewsPassed: true,
+        });
+      } else {
+        expect(result.output).toMatchObject({
+          status: 'review-failed',
+          lastCodeCommit: host.commitOids[0],
+          error: { name: 'ReviewNotPassed' },
+        });
+      }
+      expect(host.playerCalls).toHaveLength(1);
+      expect(host.childRequests).toHaveLength(1);
+      expect(host.childRequests[0]?.text).toContain(
+        `> Review scope: the commit ${host.commitOids[0]} from this coding phase and its resulting repository state.`,
+      );
+      expect(JSON.stringify(child)).toBe(originalChild);
+      await runtime.dispose();
+    },
+  );
 
   it('resumes the same Coder state with a quoted Boss answer', async () => {
-    const host = harness({
+    const host = await harness({
       players: [
         {
           status: 'ok',
           finalText: 'Which branch should I use?',
           resumeToken: 'coder-question',
+          repositoryEffect: 'worktree',
         },
         {
           status: 'ok',
-          finalText: 'Committed after the answer.\nCommit: def456',
+          finalText: 'Committed after the answer.',
           resumeToken: 'coder-done',
+          repositoryEffect: 'commit-all',
         },
       ],
       judges: [
-        {
-          guard: 'needsBossReply',
-          question: 'Which branch should I use?',
-        },
+        { guard: 'needsBossReply' },
         { type: 'BOSS_REPLY' },
-        { guard: 'directCommit', latestCommit: 'def456' },
+        { guard: 'directCommit' },
       ],
       children: [approvedChild(1)],
     });
-    const runtime = createPlaybookRuntime({});
+    const runtime = linkedRuntime(host);
     await runtime.init(rootSession(host.ports));
     const parked = await runtime.handleBossInput({
       text: 'Implement it.',
       signal: new AbortController().signal,
     });
     expect(parked.outcome).toBe('quiescent');
+    const openOperation = host.effectLedger.snapshot().logicalOperations[0];
+    expect(openOperation).toMatchObject({
+      originalBaseline: { projection: {} },
+      checkpoint: {
+        projection: {
+          'effect-1.txt': expect.any(Object),
+        },
+      },
+      pendingQuestion: { question: 'Which branch should I use?' },
+    });
+    expect(host.childRequests).toEqual([]);
 
     const completed = await runtime.handleBossInput({
       text: 'Use the narrow branch.',
       signal: new AbortController().signal,
     });
     expect(completed.outcome).toBe('terminal');
+    assertWorkflowTerminal('code', completed);
+    expect(
+      completed.outcome === 'terminal' ? completed.output : undefined,
+    ).toMatchObject({ lastCodeCommit: host.commitOids[0] });
     expect(host.playerCalls.map(({ resume }) => resume)).toEqual([
       false,
       'coder-question',
     ]);
+    expect(host.playerCalls[1]?.prompt).not.toContain('Which branch should I use?');
     expect(host.playerCalls[1]?.prompt).toContain(
-      'Boss question:\nWhich branch should I use?\n\n' +
-        'Boss reply:\nUse the narrow branch.',
+      'Boss reply:\nUse the narrow branch.',
     );
+    for (const prompt of [
+      host.playerCalls[1]?.prompt,
+      host.playerCalls[1]?.freshPrompt,
+    ]) {
+      expect(prompt).toContain('> Original request: Implement it.');
+    }
+    expect(host.effectLedger.snapshot().logicalOperations[0]).toMatchObject({
+      operationId: openOperation?.operationId,
+      originalBaseline: openOperation?.originalBaseline,
+      logicalReceipt: {
+        classification: 'one-descendant-commit',
+        commitOid: host.commitOids[0],
+      },
+    });
+    expect(host.statuses).toEqual(
+      expect.arrayContaining(['→ needsBossReply', '→ directCommit']),
+    );
+    expect(acceptedOutcomes(host)).toEqual([
+      {
+        source: 'firstPhase',
+        target: 'awaitBossReply',
+        acceptedOutcome: 'needsBossReply',
+      },
+      {
+        source: 'firstPhase',
+        target: 'reviewNewIntentPhase',
+        acceptedOutcome: 'directCommit',
+      },
+    ]);
     await runtime.dispose();
   });
 
-  it('validates and snapshots the small runtime option surface', () => {
-    expect(() => createPlaybookRuntime({ extra: true } as never)).toThrow(
+  it('validates and snapshots the small runtime option surface', async () => {
+    const host = await harness();
+    expect(() => linkedRuntime(host, { extra: true })).toThrow(
       'CODE runtime options.extra is not declared',
     );
-    expect(() => createPlaybookRuntime({ runResults: 5 } as never)).toThrow(
+    expect(() => linkedRuntime(host, { runResults: 5 })).toThrow(
       'CODE runtime options.runResults must be a string',
     );
     const mutable = { runResults: 'previous verification' };
-    const runtime = createPlaybookRuntime(mutable);
+    const runtime = linkedRuntime(host, mutable);
     mutable.runResults = 'changed';
     expect(runtime).toBeDefined();
   });
 
   it('emits a complete trace pair around every nested REVIEW call', async () => {
-    const host = harness({
-      players: [{ status: 'ok', finalText: 'Committed.\nCommit: abc123' }],
-      judges: [{ guard: 'directCommit', latestCommit: 'abc123' }],
+    const host = await harness({
+      players: [{ status: 'ok', finalText: 'Committed.' }],
+      judges: [{ guard: 'directCommit' }],
       children: [approvedChild(1)],
     });
-    const runtime = createPlaybookRuntime({});
+    const runtime = linkedRuntime(host);
     await runtime.init(rootSession(host.ports));
     await runtime.handleBossInput({
       text: 'Fix it.',

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
+import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
+  chmod,
   mkdir,
   mkdtemp,
   open,
@@ -14,7 +16,8 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import {
   createEvent,
   type AgentAdapter,
@@ -25,7 +28,7 @@ import {
 } from '@sublang/cligent';
 import { createTmuxPlayRuntime } from '@sublang/cligent/tmux-play';
 import { createXStatePlaybookRuntime } from '@sublang/playbook/xstate-runtime';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { captainMachine } from '../captain.playbook/captain.fsm.js';
 import type {
   PlaybookCallResult,
@@ -34,22 +37,31 @@ import type {
   PlaybookSession,
   PlaybookState,
 } from '../../../src/runtime.js';
+import { emptyPlaybookEffectLedger } from '../../../src/xstate-runtime.js';
 
 const { runPlaybookCli, runPlaybookCliEntry } = await import(
   new URL('./bin/playbook.js', import.meta.url).href
 );
-const { parseRunArgs } = await import(
-  new URL('./bin/run.js', import.meta.url).href
-);
-const { createCaptainSessionStore } = await import(
+const {
+  installRetainedGenerationsForLaunch,
+  parseRunArgs,
+  validateFrozenExecutionConfig,
+} = await import(new URL('./bin/run.js', import.meta.url).href);
+const { createCaptainSessionStore, sanitizeReplayRecord } = await import(
   new URL('./bin/session-store.js', import.meta.url).href
+);
+const { createRepositoryEffectCapabilities } = await import(
+  new URL('./bin/repository-effects.js', import.meta.url).href
 );
 
 const tempDirs: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   FakeAdapter.calls = [];
   FakeAdapter.options = [];
+  FakeAdapter.decision = undefined;
+  FakeAdapter.failure = undefined;
   await Promise.all(
     tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
   );
@@ -69,6 +81,8 @@ function writer() {
 class FakeAdapter implements AgentAdapter {
   static calls: Array<{ prompt: string; resume: string | undefined }> = [];
   static options: Array<AgentOptions | undefined> = [];
+  static failure: 'rejected' | 'ambiguous' | undefined;
+  static decision: ((prompt: string) => unknown) | undefined;
   readonly agent = 'claude-code';
 
   async *run(
@@ -77,13 +91,23 @@ class FakeAdapter implements AgentAdapter {
   ): AsyncGenerator<AgentEvent, void, void> {
     FakeAdapter.calls.push({ prompt, resume: options?.resume });
     FakeAdapter.options.push(options);
+    if (options?.resume && FakeAdapter.failure) {
+      yield createEvent('error', this.agent, {
+        code: FakeAdapter.failure === 'rejected' ? 'SESSION_RESUME_REJECTED' : 'PROVIDER_ERROR',
+        message: 'fixture provider failure', recoverable: true,
+      });
+      yield createEvent('done', this.agent, { status: 'error', usage: { toolUses: 0 }, durationMs: 1 });
+      return;
+    }
     const result = prompt.includes(
       'Select exactly one action from the closed set',
     )
-      ? JSON.stringify({
-          action: 'respond',
-          text: 'Shipped Captain answered the Boss.',
-        })
+      ? JSON.stringify(
+          FakeAdapter.decision?.(prompt) ?? {
+            action: 'respond',
+            text: 'Shipped Captain answered the Boss.',
+          },
+        )
       : prompt.includes('compose closing reply')
         ? 'Nested CODE and REVIEW completed.'
         : prompt.includes('compose conversational reply')
@@ -143,7 +167,7 @@ function runtimeSnapshot(
 ): PlaybookRuntimeSnapshot {
   const state = activeState('playbook.parked');
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     playbookId,
     machine: { value: state.value, status: state.status },
     roleResumeTokens: {},
@@ -157,12 +181,67 @@ function runtimeSnapshot(
     },
     state,
     pendingBossQuestions: [],
+    effectLedger: emptyPlaybookEffectLedger(),
   };
+}
+
+function preEffectSessionRecord(
+  value: any,
+  schemaVersion: 3 | 4,
+  retainGenerations: boolean,
+) {
+  const record = JSON.parse(JSON.stringify(value));
+  const downgradeRuntime = (runtime: any) => {
+    runtime.schemaVersion = 3;
+    delete runtime.effectLedger;
+  };
+  record.schemaVersion = schemaVersion;
+  delete record.replay;
+  delete record.contextSeq;
+  delete record.effectLedger;
+  delete record.unresolvedEffects;
+  record.snapshot.schemaVersion = 3;
+  delete record.snapshot.effectLedger;
+  downgradeRuntime(record.snapshot.captain.runtime);
+  for (const frame of record.snapshot.frames ?? []) {
+    downgradeRuntime(frame.runtime);
+  }
+  if (!retainGenerations) {
+    delete record.retainedGenerations;
+  } else {
+    for (const generation of Object.values(
+      record.retainedGenerations ?? {},
+    ) as any[]) {
+      for (const frame of generation.frames ?? []) {
+        downgradeRuntime(frame.runtime);
+      }
+    }
+  }
+  return record;
+}
+
+function preUnresolvedEffectsSessionRecord(value: any) {
+  const record = JSON.parse(JSON.stringify(value));
+  record.schemaVersion = 5;
+  delete record.replay;
+  delete record.contextSeq;
+  delete record.unresolvedEffects;
+  for (const projection of [
+    record.structuralProjection,
+    record.lastAppliedExecutionProjection,
+    record.uncertain?.attemptedExecutionProjection,
+  ]) {
+    for (const item of Object.values(projection?.catalog ?? {}) as any[]) {
+      item.artifactSchema = 2;
+    }
+  }
+  return record;
 }
 
 function scriptedCaptainRuntime(
   inputs: string[],
-  restoredDecision?: { action: string },
+  selectedDecision?: { action: string; playbookId?: string },
+  selectAfterInit = false,
 ) {
   return ({ controller }: any): PlaybookRuntime => {
     let session: PlaybookSession;
@@ -188,8 +267,8 @@ function scriptedCaptainRuntime(
           payload: { turn: turns },
         });
         const parsed =
-          restored && restoredDecision !== undefined
-            ? { kind: 'action', decision: restoredDecision }
+          selectedDecision !== undefined && (restored || selectAfterInit)
+            ? { kind: 'action', decision: selectedDecision }
             : controller.resolveParsedTurn(text);
         if (parsed?.kind === 'action') {
           await controller.submit(parsed.decision, signal);
@@ -233,7 +312,8 @@ function nestedEntries(events: string[]) {
     id: 'code',
     command: 'code',
     intent: 'implement with review',
-    artifactSchema: 2 as const,
+    artifactSchema: 3 as const,
+    runtimeProfile: { kind: 'bespoke', artifactSchema: 3 } as const,
     requiredRoleIds: ['coder'],
     concurrentRoleSets: [] as const,
     validateOptions: (value: unknown) => value,
@@ -292,7 +372,8 @@ function nestedEntries(events: string[]) {
     id: 'review',
     command: 'review',
     intent: 'review work',
-    artifactSchema: 2 as const,
+    artifactSchema: 3 as const,
+    runtimeProfile: { kind: 'bespoke', artifactSchema: 3 } as const,
     requiredRoleIds: ['coder', 'reviewer'],
     concurrentRoleSets: [] as const,
     validateOptions: (value: unknown) => value,
@@ -334,6 +415,71 @@ function nestedEntries(events: string[]) {
   return { code, review };
 }
 
+function retainedRootEntry(
+  events: string[],
+  lifecycle: { inits: number; restores: number; adopts: number },
+) {
+  return {
+    id: 'code',
+    command: 'code',
+    intent: 'retain a parked root',
+    artifactSchema: 3 as const,
+    runtimeProfile: { kind: 'bespoke', artifactSchema: 3 } as const,
+    requiredRoleIds: ['coder'],
+    concurrentRoleSets: [] as const,
+    validateOptions: (value: unknown) => value,
+    createRuntime(): PlaybookRuntime {
+      let state = activeState();
+      let turnCount = 0;
+      return {
+        retainedGenerationMetadata: { unfinishedFinalStateIds: [] },
+        async init() {
+          lifecycle.inits += 1;
+        },
+        async restore(_session, snapshot) {
+          lifecycle.restores += 1;
+          state = snapshot.state;
+          turnCount = snapshot.sequences.turn;
+        },
+        async adopt(_session, snapshot) {
+          lifecycle.adopts += 1;
+          state = snapshot.state;
+          turnCount = snapshot.sequences.turn;
+        },
+        exportSnapshot() {
+          return {
+            schemaVersion: 4,
+            playbookId: 'code',
+            machine: { value: state.value, status: state.status },
+            roleResumeTokens: {},
+            sequences: {
+              trace: 0,
+              turn: turnCount,
+              judgeCall: 0,
+              playerCall: 0,
+              playbookCall: 0,
+              captainCall: 0,
+            },
+            state,
+            pendingBossQuestions: [],
+            effectLedger: emptyPlaybookEffectLedger(),
+          } as PlaybookRuntimeSnapshot;
+        },
+        async handleBossInput({ text }) {
+          turnCount += 1;
+          events.push(`code:park:${text}`);
+          state = activeState('editing');
+          return { outcome: 'quiescent', state };
+        },
+        async resumePlaybookCall() {
+          return { outcome: 'no-action', state };
+        },
+        async dispose() {},
+      };
+    },
+  };
+}
+
 function nestedParkedEntries(
   events: string[],
   lifecycle: {
@@ -354,7 +500,8 @@ function nestedParkedEntries(
     id: 'code',
     command: 'code',
     intent: 'park on nested review',
-    artifactSchema: 2 as const,
+    artifactSchema: 3 as const,
+    runtimeProfile: { kind: 'bespoke', artifactSchema: 3 } as const,
     requiredRoleIds: ['coder'],
     concurrentRoleSets: [] as const,
     validateOptions: (value: unknown) => value,
@@ -364,6 +511,7 @@ function nestedParkedEntries(
       let turnCount = 0;
       let suspendedCall: any;
       return {
+        retainedGenerationMetadata: { unfinishedFinalStateIds: [] },
         async init(next) {
           lifecycle.codeInits += 1;
           session = next;
@@ -375,9 +523,16 @@ function nestedParkedEntries(
           turnCount = snapshot.sequences.turn;
           suspendedCall = snapshot.suspendedCall;
         },
+        async adopt(next, snapshot) {
+          lifecycle.codeRestores += 1;
+          session = next;
+          state = snapshot.state;
+          turnCount = snapshot.sequences.turn;
+          suspendedCall = snapshot.suspendedCall;
+        },
         exportSnapshot() {
           return {
-            schemaVersion: 3,
+            schemaVersion: 4,
             playbookId: 'code',
             machine: { value: state.value, status: state.status },
             roleResumeTokens: {},
@@ -391,6 +546,7 @@ function nestedParkedEntries(
             },
             state,
             pendingBossQuestions: [],
+            effectLedger: emptyPlaybookEffectLedger(),
             ...(suspendedCall === undefined ? {} : { suspendedCall }),
           } as PlaybookRuntimeSnapshot;
         },
@@ -446,7 +602,8 @@ function nestedParkedEntries(
     id: 'review',
     command: 'review',
     intent: 'park then accept exact Boss reply',
-    artifactSchema: 2 as const,
+    artifactSchema: 3 as const,
+    runtimeProfile: { kind: 'bespoke', artifactSchema: 3 } as const,
     requiredRoleIds: ['coder', 'reviewer'],
     concurrentRoleSets: [] as const,
     validateOptions: (value: unknown) => value,
@@ -455,6 +612,7 @@ function nestedParkedEntries(
       let turnCount = 0;
       let restored = false;
       return {
+        retainedGenerationMetadata: { unfinishedFinalStateIds: [] },
         async init() {
           lifecycle.reviewInits += 1;
         },
@@ -464,9 +622,15 @@ function nestedParkedEntries(
           state = snapshot.state;
           turnCount = snapshot.sequences.turn;
         },
+        async adopt(_session, snapshot) {
+          lifecycle.reviewRestores += 1;
+          restored = true;
+          state = snapshot.state;
+          turnCount = snapshot.sequences.turn;
+        },
         exportSnapshot() {
           return {
-            schemaVersion: 3,
+            schemaVersion: 4,
             playbookId: 'review',
             machine: { value: state.value, status: state.status },
             roleResumeTokens: {},
@@ -480,6 +644,7 @@ function nestedParkedEntries(
             },
             state,
             pendingBossQuestions: [],
+            effectLedger: emptyPlaybookEffectLedger(),
           } as PlaybookRuntimeSnapshot;
         },
         async handleBossInput({ text }) {
@@ -515,6 +680,28 @@ async function writeConfig(contents: string) {
   return path;
 }
 
+async function initHeadlessTestRepository(prefix: string) {
+  const cwd = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.push(cwd);
+  await initializeHeadlessTestRepository(cwd);
+  return cwd;
+}
+
+async function initializeHeadlessTestRepository(cwd: string) {
+  await execFileAsync('git', ['init', '-q', cwd]);
+  await execFileAsync('git', ['-C', cwd, 'config', 'user.name', 'Playbook Test']);
+  await execFileAsync('git', [
+    '-C',
+    cwd,
+    'config',
+    'user.email',
+    'playbook-test@example.invalid',
+  ]);
+  await writeFile(join(cwd, 'tracked.txt'), 'baseline\n', 'utf8');
+  await execFileAsync('git', ['-C', cwd, 'add', 'tracked.txt']);
+  await execFileAsync('git', ['-C', cwd, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'baseline']);
+}
+
 function sharedConfig() {
   return [
     'captain: { adapter: claude, model: captain-model }',
@@ -534,10 +721,41 @@ function sharedConfig() {
   ].join('\n');
 }
 
+function sharedProfilesConfig() {
+  return [
+    'profiles:',
+    '  captain-default: { adapter: claude, model: captain-model }',
+    '  coder-default: { adapter: claude, model: coder-model }',
+    '  reviewer-default: { adapter: codex, model: reviewer-model }',
+    'captain: captain-default',
+    'players:',
+    '  dev.coder: coder-default',
+    '  dev.reviewer: reviewer-default',
+    'playbooks:',
+    '  code:',
+    '    from: mod://code',
+    '    roles: { coder: dev.coder }',
+    '  review:',
+    '    from: mod://review',
+    '    roles:',
+    '      coder: { player: dev.coder, model: review-coder-fallback }',
+    '      reviewer: dev.reviewer',
+    '',
+  ].join('\n');
+}
+
 async function headlessHarness(
   argv: string[],
   extra: Record<string, unknown> = {},
 ) {
+  const entryTransform =
+    (extra.entryTransform as
+      | ((entry: ReturnType<typeof nestedEntries>['code']) => unknown)
+      | undefined) ?? ((entry: unknown) => entry);
+  const runOptions = { ...extra };
+  delete runOptions.entryTransform;
+  const injectSessionsDir = runOptions.injectSessionsDir !== false;
+  delete runOptions.injectSessionsDir;
   const events: string[] = [];
   const inputs: string[] = [];
   const entries = nestedEntries(events);
@@ -548,8 +766,8 @@ async function headlessHarness(
   const stdout = writer();
   const stderr = writer();
   const modules: Record<string, unknown> = {
-    'mod://code': { default: entries.code },
-    'mod://review': { default: entries.review },
+    'mod://code': { default: entryTransform(entries.code) },
+    'mod://review': { default: entryTransform(entries.review) },
   };
   const result = await runPlaybookCli({
     argv,
@@ -565,13 +783,13 @@ async function headlessHarness(
       '90000000-0000-4000-8000-000000000001',
     createCaptainSessionId: uuidSequence(),
     probeAdapterSdk: async () => true,
-    sessionsDir,
+    ...(injectSessionsDir ? { sessionsDir } : {}),
     stdout,
     stderr,
     spawn: () => {
       throw new Error('headless run must not spawn tmux-play');
     },
-    ...extra,
+    ...runOptions,
   });
   return {
     result,
@@ -589,6 +807,634 @@ function uuidSequence() {
   return () =>
     `10000000-0000-4000-8000-${String(++value).padStart(12, '0')}`;
 }
+
+async function readReplayEntries(sessionsDir: string, sessionId: string) {
+  const text = await readFile(
+    join(sessionsDir, `${sessionId}.records.jsonl`),
+    'utf8',
+  );
+  expect(text.endsWith('\n')).toBe(true);
+  return text
+    .slice(0, -1)
+    .split('\n')
+    .map((line) => JSON.parse(line));
+}
+
+function headlessReplayWarning(sessionId: string) {
+  return (
+    `playbook run: warning: replay history for session ` +
+    `${JSON.stringify(sessionId)} may be incomplete; recording has stopped\n`
+  );
+}
+
+function warningCount(text: string, warning: string) {
+  return text.split(warning).length - 1;
+}
+
+async function formerDefaultSession(useXdg = true) {
+  const home = await mkdtemp(join(tmpdir(), 'playbook-former-default-'));
+  tempDirs.push(home);
+  const env = {
+    ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o',
+    ...(useXdg ? { XDG_STATE_HOME: join(home, 'xdg') } : {}),
+  };
+  const sourceDir = join(
+    useXdg ? join(home, 'xdg') : join(home, '.local', 'state'),
+    'playbook', 'sessions',
+  );
+  const first = await headlessHarness(['run', 'remember the original task'], {
+    sessionsDir: sourceDir, homeDir: home, env,
+    createCaptainRuntime: undefined,
+  });
+  expect(first.result.code, first.stderr).toBe(0);
+  const id = first.result.sessionId;
+  const record = await createCaptainSessionStore({ sessionsDir: sourceDir }).read(id);
+  expect(record.schemaVersion).toBe(6);
+  const sourcePath = join(sourceDir, `${id}.json`);
+  const sourceBytes = `${JSON.stringify(record)}\n`;
+  await writeFile(sourcePath, sourceBytes);
+  const replayBytes = await readFile(join(sourceDir, `${id}.records.jsonl`));
+  return { home, env, sourceDir, sourcePath, sourceBytes, replayBytes, id, configPath: first.configPath };
+}
+
+describe('former-default headless migration', () => {
+  it.each([false, true])('migrates and continues complete history (XDG override: %s)', async (useXdg) => {
+    const f = await formerDefaultSession(useXdg);
+    const callOffset = FakeAdapter.calls.length;
+    const continued = await headlessHarness(['run', '--session', f.id, 'continue the original task'], {
+      injectSessionsDir: false, homeDir: f.home, env: f.env,
+      userConfigPath: f.configPath, createCaptainRuntime: undefined,
+    });
+    expect(continued.result.code, continued.stderr).toBe(0);
+    expect(continued.result.sessionId).toBe(f.id);
+    expect(continued.stderr).toContain(`migrated 1 sessions from ${f.sourceDir}`);
+    const calls = FakeAdapter.calls.slice(callOffset);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].resume).toBeUndefined();
+    expect(calls[0].prompt).toContain('remember the original task');
+    const destination = join(f.home, '.spex', 'sessions');
+    const record = JSON.parse(await readFile(join(destination, `${f.id}.json`), 'utf8'));
+    expect(record).toMatchObject({ schemaVersion: 7, state: 'settled' });
+    expect(record.snapshot.sequences.turn).toBe(2);
+    const replay = await readFile(join(destination, `${f.id}.records.jsonl`));
+    expect(replay.subarray(0, f.replayBytes.length)).toEqual(f.replayBytes);
+    await expect(stat(f.sourcePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(f.sourceDir, `${f.id}.records.jsonl`))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['SPEX_HOME', 'directory', 'store', 'config', 'overlay'] as const)(
+    'leaves the former default untouched with an explicit %s', async (kind) => {
+      const f = await formerDefaultSession();
+      const destination = join(f.home, 'explicit', 'sessions');
+      const extra: Record<string, unknown> = {
+        injectSessionsDir: false, homeDir: f.home, env: f.env,
+        userConfigPath: f.configPath,
+      };
+      const argv = ['run', '--session', f.id, 'must not start'];
+      if (kind === 'SPEX_HOME') extra.env = { ...f.env, SPEX_HOME: join(f.home, 'explicit') };
+      if (kind === 'directory') extra.sessionsDir = destination;
+      if (kind === 'store') extra.sessionStore = createCaptainSessionStore({ sessionsDir: destination });
+      if (kind === 'config') {
+        extra.userConfigPath = await writeConfig(`sessions: ${JSON.stringify(destination)}\n${sharedConfig()}`);
+      }
+      if (kind === 'overlay') {
+        const overlay = await writeConfig(`sessions: ${JSON.stringify(destination)}\n`);
+        argv.splice(1, 0, '--with', overlay);
+      }
+      const beforeCalls = FakeAdapter.calls.length;
+      const result = await headlessHarness(argv, extra);
+      expect(result.result.code, result.stderr).toBe(1);
+      expect(result.stderr).toContain('does not exist');
+      expect(result.stderr).not.toContain('migrated');
+      expect(FakeAdapter.calls).toHaveLength(beforeCalls);
+      expect(await readFile(f.sourcePath, 'utf8')).toBe(f.sourceBytes);
+      expect(await readFile(join(f.sourceDir, `${f.id}.records.jsonl`))).toEqual(f.replayBytes);
+      await expect(stat(join(destination, `${f.id}.json`))).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+});
+
+describe('headless sessions locator (PBCLI-78/81)', () => {
+  it('selects and persists through a configured relative directory without projecting the locator', async () => {
+    const configPath = await writeConfig(
+      ['sessions: replay-sessions', sharedConfig()].join('\n'),
+    );
+    const configuredSessionsDir = join(
+      dirname(configPath),
+      'replay-sessions',
+    );
+    const first = await headlessHarness(['run', 'first turn'], {
+      injectSessionsDir: false,
+      userConfigPath: configPath,
+    });
+
+    expect(first.result.code, first.stderr).toBe(0);
+    const recordPath = join(
+      configuredSessionsDir,
+      `${first.result.sessionId}.json`,
+    );
+    const record = JSON.parse(await readFile(recordPath, 'utf8'));
+    expect(record.structuralProjection).not.toHaveProperty('sessions');
+    expect(record.lastAppliedExecutionProjection).not.toHaveProperty(
+      'sessions',
+    );
+
+    const hostFactory = vi.fn((options: any) =>
+      createTmuxPlayRuntime(options),
+    );
+    const continued = await headlessHarness(
+      ['run', '--continue', 'second turn'],
+      {
+        injectSessionsDir: false,
+        userConfigPath: configPath,
+        createHostRuntime: hostFactory,
+      },
+    );
+
+    expect(continued.result.code, continued.stderr).toBe(0);
+    expect(continued.result.sessionId).toBe(first.result.sessionId);
+    expect(continued.inputs).toEqual(['second turn']);
+    expect(hostFactory).toHaveBeenCalledOnce();
+  });
+
+  it('gives an injected store precedence over an invalid configured locator', async () => {
+    const configPath = await writeConfig(
+      ['sessions: "~another-user/replay"', sharedConfig()].join('\n'),
+    );
+    const stateRoot = await mkdtemp(
+      join(tmpdir(), 'playbook-injected-session-store-'),
+    );
+    tempDirs.push(stateRoot);
+    const injectedSessionsDir = join(stateRoot, 'sessions');
+    const sessionStore = createCaptainSessionStore({
+      sessionsDir: injectedSessionsDir,
+    });
+    const out = await headlessHarness(['run', 'injected store'], {
+      injectSessionsDir: false,
+      userConfigPath: configPath,
+      sessionStore,
+    });
+
+    expect(out.result.code, out.stderr).toBe(0);
+    await expect(
+      stat(join(injectedSessionsDir, `${out.result.sessionId}.json`)),
+    ).resolves.toBeDefined();
+  });
+
+  it('rejects an unusable configured directory before agent or host work', async () => {
+    const stateRoot = await mkdtemp(
+      join(tmpdir(), 'playbook-unusable-sessions-'),
+    );
+    tempDirs.push(stateRoot);
+    const unusablePath = join(stateRoot, 'not-a-directory');
+    await writeFile(unusablePath, 'occupied\n', 'utf8');
+    const configPath = await writeConfig(
+      [`sessions: ${JSON.stringify(unusablePath)}`, sharedConfig()].join(
+        '\n',
+      ),
+    );
+    const calls = { prepare: 0, load: 0, host: 0 };
+    const out = await headlessHarness(['run', 'must not run'], {
+      injectSessionsDir: false,
+      userConfigPath: configPath,
+      prepareRegistryModule: async ({ from }: any) => {
+        calls.prepare += 1;
+        return from;
+      },
+      loadModule: async () => {
+        calls.load += 1;
+        return {};
+      },
+      createHostRuntime: async () => {
+        calls.host += 1;
+        throw new Error('must not construct host');
+      },
+    });
+
+    expect(out.result.code).toBe(1);
+    expect(out.stdout).toBe('');
+    expect(calls).toEqual({ prepare: 0, load: 0, host: 0 });
+    expect(out.stderr).toContain(
+      'session permission preparation refuses unsafe ownership, links, type, or owner access',
+    );
+  });
+
+  it('rejects a missing directory below an unwritable parent before host work', async () => {
+    const stateRoot = await mkdtemp(
+      join(tmpdir(), 'playbook-unwritable-sessions-'),
+    );
+    tempDirs.push(stateRoot);
+    const lockedParent = join(stateRoot, 'locked');
+    await mkdir(lockedParent, { mode: 0o700 });
+    const configPath = await writeConfig(
+      [
+        `sessions: ${JSON.stringify(join(lockedParent, 'sessions'))}`,
+        sharedConfig(),
+      ].join('\n'),
+    );
+    const calls = { prepare: 0, load: 0, host: 0 };
+    await chmod(lockedParent, 0o500);
+    let out;
+    try {
+      out = await headlessHarness(['run', 'must not run'], {
+        injectSessionsDir: false,
+        userConfigPath: configPath,
+        prepareRegistryModule: async ({ from }: any) => {
+          calls.prepare += 1;
+          return from;
+        },
+        loadModule: async () => {
+          calls.load += 1;
+          return {};
+        },
+        createHostRuntime: async () => {
+          calls.host += 1;
+          throw new Error('must not construct host');
+        },
+      });
+    } finally {
+      await chmod(lockedParent, 0o700);
+    }
+
+    expect(out.result.code).toBe(1);
+    expect(out.stdout).toBe('');
+    expect(calls).toEqual({ prepare: 0, load: 0, host: 0 });
+    expect(out.stderr).toMatch(/permission denied|EACCES/);
+  });
+});
+
+describe('headless replay tee (PBCLI-74/77/79/80/84)', () => {
+  const replaySessionId = '90000000-0000-4000-8000-000000000071';
+
+  it('tees every hidden and visible record with roles across two turns', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-headless-replay-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const observed: any[] = [];
+    let traceSequence = 0;
+    let callSequence = 0;
+    const activeCalls = new Map<string, { callId: string; roleId: string }>();
+    const createHostRuntime = async (options: any) => {
+      const forward = async (record: any) => {
+        for (const observer of options.observers) {
+          await observer.onRecord(record);
+        }
+        observed.push(record);
+      };
+      const traceRecord = (
+        record: any,
+        type: 'player.call.started' | 'player.call.finished',
+        frame: { callId: string; roleId: string },
+      ) => ({
+        type: 'captain_telemetry',
+        turnId: record.turnId,
+        timestamp: record.timestamp,
+        topic: 'playbook.trace',
+        payload: {
+          schemaVersion: 4,
+          sessionId: 'headless-replay-role-session',
+          playbookId: 'headless-replay-role-playbook',
+          rootSessionId: 'headless-replay-role-session',
+          depth: 0,
+          sequence: ++traceSequence,
+          timestamp: record.timestamp,
+          type,
+          turnId: record.turnId,
+          callId: frame.callId,
+          payload: {
+            playerId: record.playerId,
+            roleId: frame.roleId,
+            resume: false,
+            ...(type === 'player.call.started'
+              ? { prompt: record.prompt }
+              : {
+                  status: 'ok',
+                  ...(typeof record.result?.finalText === 'string'
+                    ? { finalText: record.result.finalText }
+                    : {}),
+                }),
+          },
+        },
+      });
+      return createTmuxPlayRuntime({
+        ...options,
+        observers: [
+          {
+            async onRecord(record: any) {
+              if (record.type === 'player_prompt') {
+                const frame = {
+                  callId: `headless-player-${++callSequence}`,
+                  roleId:
+                    record.playerId === 'dev.reviewer' ? 'reviewer' : 'coder',
+                };
+                activeCalls.set(record.playerId, frame);
+                await forward(traceRecord(record, 'player.call.started', frame));
+              }
+              await forward(record);
+              if (record.type === 'player_finished') {
+                const frame = activeCalls.get(record.playerId);
+                if (frame !== undefined) {
+                  await forward(
+                    traceRecord(record, 'player.call.finished', frame),
+                  );
+                  activeCalls.delete(record.playerId);
+                }
+              }
+            },
+          },
+        ],
+      });
+    };
+
+    const first = await headlessHarness(['run', '/code record everything'], {
+      sessionsDir,
+      createLogicalSessionId: () => replaySessionId,
+      createHostRuntime,
+    });
+    expect(first.result.code).toBe(0);
+    expect(first.stdout).toBe('Nested CODE and REVIEW completed.\n');
+    expect(first.stderr).not.toContain('replay history');
+
+    const firstObservedCount = observed.length;
+    const firstEntries = await readReplayEntries(sessionsDir, replaySessionId);
+    expect(firstEntries.filter(({ record }: any) => !['session_context', 'continuity_reset'].includes(record.type))).toHaveLength(firstObservedCount);
+    expect(firstEntries[0]?.record.type).toBe('session_context');
+    expect(firstEntries.map(({ seq }: any) => seq)).toEqual(
+      Array.from({ length: firstEntries.length }, (_, index) => index + 1),
+    );
+
+    const second = await headlessHarness(
+      ['run', '--session', replaySessionId, 'one more turn'],
+      {
+        sessionsDir,
+        userConfigPath: first.configPath,
+        createHostRuntime,
+      },
+    );
+    expect(second.result.code).toBe(0);
+    expect(second.stdout).toBe('Captain acknowledged the message.\n');
+    expect(second.stderr).not.toContain('replay history');
+
+    const entries = await readReplayEntries(sessionsDir, replaySessionId);
+    expect(entries.length).toBeGreaterThan(firstEntries.length);
+    expect(entries.slice(0, firstEntries.length)).toEqual(firstEntries);
+    expect(entries.map(({ seq }: any) => seq)).toEqual(
+      Array.from({ length: entries.length }, (_, index) => index + 1),
+    );
+    expect(entries.filter(({ record }: any) => !['session_context', 'continuity_reset'].includes(record.type)).map(({ record: { contextSeq: _contextSeq, ...record } }: any) => record)).toEqual(
+      observed.map((record, index) => sanitizeReplayRecord(index < firstObservedCount || typeof record.turnId !== 'number' ? record : {
+        ...record, turnId: record.turnId + 1,
+        ...(record.type === 'turn_started' ? { turn: { ...record.turn, id: record.turn.id + 1 } } : {}),
+      })),
+    );
+
+    const types = new Set(entries.map(({ record }: any) => record.type));
+    for (const type of [
+      'turn_started',
+      'player_prompt',
+      'player_event',
+      'player_finished',
+      'captain_prompt',
+      'captain_event',
+      'captain_finished',
+      'captain_reply',
+      'captain_telemetry',
+      'turn_finished',
+    ]) {
+      expect(types.has(type), type).toBe(true);
+    }
+    expect(
+      entries.some(
+        ({ record }: any) =>
+          record.type === 'captain_prompt' && record.visibility === 'hidden',
+      ),
+    ).toBe(true);
+
+    const playerEntries = entries.filter(({ record }: any) =>
+      ['player_prompt', 'player_event', 'player_finished'].includes(record.type),
+    );
+    expect(playerEntries.length).toBeGreaterThan(0);
+    expect(new Set(playerEntries.map(({ role }: any) => role))).toEqual(
+      new Set(['coder', 'reviewer']),
+    );
+    for (const entry of entries) {
+      if (
+        !['player_prompt', 'player_event', 'player_finished'].includes(
+          entry.record.type,
+        )
+      ) {
+        expect(entry).not.toHaveProperty('role');
+      }
+    }
+    const serialized = JSON.stringify(entries);
+    expect(serialized).not.toContain('resumeToken');
+    expect(serialized).toContain('"resume":false');
+  });
+
+  it('refuses a new session when its required context cannot be recorded', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-headless-invalid-replay-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    await mkdir(sessionsDir, { mode: 0o700 });
+    const streamPath = join(sessionsDir, `${replaySessionId}.records.jsonl`);
+    const invalid = '{"v":1,"seq":1,"record":[]}\n';
+    await writeFile(streamPath, invalid, { mode: 0o600 });
+    let turns = 0;
+    const out = await headlessHarness(['run', 'cannot record context'], {
+      sessionsDir,
+      createLogicalSessionId: () => replaySessionId,
+      createHostRuntime: async (options: any) => {
+        const host = await createTmuxPlayRuntime(options);
+        return { runBossTurn: async (...args: Parameters<typeof host.runBossTurn>) => { turns += 1; return host.runBossTurn(...args); }, dispose: () => host.dispose() };
+      },
+    });
+    expect(out.result.code, out.stderr).toBe(1);
+    expect(out.stdout).toBe('');
+    expect(out.stderr).toContain('cannot persist session execution context');
+    expect(turns).toBe(0);
+    expect(await readFile(streamPath, 'utf8')).toBe(invalid);
+  });
+
+  it('keeps a sanitizer failure outside dispatch and swallows warning failure', async () => {
+    const run = async (failWarning: boolean) => {
+      const stateRoot = await mkdtemp(
+        join(tmpdir(), 'playbook-headless-replay-warning-'),
+      );
+      tempDirs.push(stateRoot);
+      const sessionsDir = join(stateRoot, 'sessions');
+      const baseStore = createCaptainSessionStore({ sessionsDir });
+      const sessionStore = {
+        ...baseStore,
+        async acquire(sessionId: string) {
+          const lease = await baseStore.acquire(sessionId);
+          let first = true;
+          return {
+            ...lease,
+            async append(record: any, role?: string) {
+              if (!first) return lease.append(record, role);
+              first = false;
+              return lease.append(new Date('2026-08-31T00:00:00.000Z'));
+            },
+          };
+        },
+      };
+      const warning = headlessReplayWarning(replaySessionId);
+      const stderrChunks: string[] = [];
+      let warningAttempts = 0;
+      let hostTurnActive = false;
+      let warningDuringHostTurn = false;
+      const out = await headlessHarness(['run', 'survive replay failure'], {
+        sessionsDir,
+        sessionStore,
+        createLogicalSessionId: () => replaySessionId,
+        stderr: {
+          write(chunk: string) {
+            const text = String(chunk);
+            if (text === warning) {
+              warningAttempts += 1;
+              warningDuringHostTurn ||= hostTurnActive;
+              if (failWarning) throw new Error('synthetic warning sink failure');
+            }
+            stderrChunks.push(text);
+            return true;
+          },
+        },
+        createHostRuntime: async (options: any) => {
+          const host = await createTmuxPlayRuntime(options);
+          return {
+            async runBossTurn(input: string) {
+              hostTurnActive = true;
+              try {
+                return await host.runBossTurn(input);
+              } finally {
+                hostTurnActive = false;
+              }
+            },
+            dispose: () => host.dispose(),
+          };
+        },
+      });
+      return {
+        out,
+        warning,
+        warningAttempts,
+        warningDuringHostTurn,
+        stderr: stderrChunks.join(''),
+      };
+    };
+
+    const writable = await run(false);
+    expect(writable.out.result.code).toBe(0);
+    expect(writable.out.stdout).toBe('Captain acknowledged the message.\n');
+    expect(writable.warningAttempts).toBe(1);
+    expect(writable.warningDuringHostTurn).toBe(false);
+    expect(writable.stderr).toBe(writable.warning);
+
+    const failed = await run(true);
+    expect(failed.out.result.code).toBe(0);
+    expect(failed.out.stdout).toBe('Captain acknowledged the message.\n');
+    expect(failed.warningAttempts).toBe(1);
+    expect(failed.warningDuringHostTurn).toBe(false);
+    expect(failed.stderr).toBe('');
+  });
+
+  it.each([
+    'initialization',
+    'sanitization',
+    'append',
+    'first-publication directory sync',
+    'torn-tail repair',
+    'settlement checkpoint',
+    'release checkpoint',
+  ] as const)(
+    'adds only the native warning for a %s failure',
+    async (boundary) => {
+      const stateRoot = await mkdtemp(
+        join(tmpdir(), 'playbook-headless-replay-boundary-'),
+      );
+      tempDirs.push(stateRoot);
+      const sessionsDir = join(stateRoot, 'sessions');
+      const baseStore = createCaptainSessionStore({ sessionsDir });
+      const sessionStore = {
+        ...baseStore,
+        async acquire(sessionId: string) {
+          const owned = await baseStore.acquire(sessionId);
+          let sourceFailurePending = [
+            'sanitization',
+            'append',
+            'first-publication directory sync',
+          ].includes(boundary);
+          let liveStatus = owned.streamStatus();
+          if (
+            boundary === 'initialization' ||
+            boundary === 'torn-tail repair'
+          ) {
+            liveStatus = { ...liveStatus, incomplete: true };
+          }
+          const latch = () => {
+            liveStatus = { ...liveStatus, incomplete: true };
+          };
+          const adopt = (status: typeof liveStatus) => {
+            if (!liveStatus.incomplete) liveStatus = status;
+            return liveStatus;
+          };
+          return {
+            ...owned,
+            async append(record: any, role?: string) {
+              if (liveStatus.incomplete) return;
+              if (sourceFailurePending) {
+                sourceFailurePending = false;
+                if (boundary === 'sanitization') {
+                  try {
+                    await owned.append(
+                      new Date('2026-08-31T00:00:00.000Z'),
+                    );
+                  } catch (error) {
+                    liveStatus = owned.streamStatus();
+                    throw error;
+                  }
+                }
+                if (boundary === 'first-publication directory sync') {
+                  await owned.append(record, role);
+                  liveStatus = owned.streamStatus();
+                }
+                latch();
+                throw new Error(`synthetic replay ${boundary} failure`);
+              }
+              await owned.append(record, role);
+              adopt(owned.streamStatus());
+            },
+            streamStatus: () => liveStatus,
+            async settle(value: any) {
+              const record = await owned.settle(value);
+              adopt(owned.streamStatus());
+              if (boundary === 'settlement checkpoint') latch();
+              return record;
+            },
+            async release() {
+              adopt(await owned.release());
+              if (boundary === 'release checkpoint') latch();
+              return liveStatus;
+            },
+          };
+        },
+      };
+      const out = await headlessHarness(
+        ['run', `${boundary} still succeeds`],
+        {
+          sessionsDir,
+          sessionStore,
+          createLogicalSessionId: () => replaySessionId,
+        },
+      );
+      const warning = headlessReplayWarning(replaySessionId);
+      expect(out.result.code).toBe(0);
+      expect(out.stdout).toBe('Captain acknowledged the message.\n');
+      expect(warningCount(out.stderr, warning)).toBe(1);
+      expect(out.stderr.replace(warning, '')).toBe('');
+    },
+  );
+});
 
 describe('playbook run shared Captain host (PBCLI-48)', () => {
   it('runs configured CODE through nested REVIEW on the real headless host', async () => {
@@ -658,6 +1504,63 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
       },
     });
     expect(out.result.config).not.toHaveProperty('presentation');
+  });
+
+  it('injects current-lease capabilities into schema-3 root and nested runtimes', async () => {
+    const constructed: Array<{
+      playbookId: string;
+      options: unknown;
+      capability: any;
+    }> = [];
+    let writerLease: any;
+    const out = await headlessHarness(['run', '/code implement it'], {
+      entryTransform: (entry: any) => ({
+        ...entry,
+        artifactSchema: 3,
+        runtimeProfile: { kind: 'bespoke', artifactSchema: 3 },
+        createRuntime(options: unknown, capability: unknown) {
+          constructed.push({ playbookId: entry.id, options, capability });
+          return entry.createRuntime(options);
+        },
+      }),
+      createEffectLedgerWriteAhead: (lease: unknown) => {
+        writerLease = lease;
+        const effectLedger = emptyPlaybookEffectLedger();
+        return {
+          snapshot: () => effectLedger,
+          writeAhead: async () => effectLedger,
+        };
+      },
+    });
+
+    expect(out.result.code, out.stderr).toBe(0);
+    expect(constructed.map(({ playbookId }) => playbookId)).toEqual([
+      'code',
+      'review',
+    ]);
+    for (const construction of constructed) {
+      expect(construction.options).toEqual({});
+      expect(construction.capability.authority).toMatchObject({
+        playbookId: construction.playbookId,
+        artifactSchema: 3,
+        cwd: process.cwd(),
+        sessionId: out.result.sessionId,
+        leaseOwnerToken: writerLease.ownerToken,
+      });
+      expect(construction.capability.repository.identity).toBe(
+        construction.capability.authority.canonicalWorktree,
+      );
+      expect(construction.capability.effectLedger.writeAhead).toEqual(
+        expect.any(Function),
+      );
+    }
+    expect(JSON.stringify(out.result.config)).not.toContain(
+      writerLease.ownerToken,
+    );
+    expect(JSON.stringify(out.result.snapshot)).not.toContain(
+      writerLease.ownerToken,
+    );
+    expect(out.result.config).not.toHaveProperty('hostCapabilities');
   });
 
   it('runs configured REVIEW as a root through the same Captain', async () => {
@@ -759,6 +1662,9 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
     let probes = 0;
     const home = await mkdtemp(join(tmpdir(), 'playbook-headless-help-'));
     tempDirs.push(home);
+    const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    await mkdir(dirname(legacy), { recursive: true });
+    await writeFile(legacy, sharedConfig(), 'utf8');
     const stdout = writer();
     const stderr = writer();
     const help = await runPlaybookCli({
@@ -787,20 +1693,192 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
     expect(stdout.text()).toContain('distinct ids remain isolated');
     expect(stdout.text()).toContain('playbooks.<id>.players is rejected');
     expect(stdout.text()).toContain('not auto-migrated');
+    expect(stdout.text()).toContain(
+      'prefer this working directory, else global newest',
+    );
     expect({ reads, loads, probes }).toEqual({ reads: 0, loads: 0, probes: 0 });
-    await expect(readFile(join(home, '.config', 'playbook', 'playbook.config.yaml')))
-      .rejects.toThrow();
+    expect(await readFile(legacy, 'utf8')).toBe(sharedConfig());
+    await expect(
+      readFile(join(home, '.spex', 'config', 'playbook.config.yaml')),
+    ).rejects.toThrow();
 
     let fallbackReads = 0;
-    const empty = await headlessHarness(['run', '   '], {
+    const emptyStdout = writer();
+    const empty = await runPlaybookCli({
+      argv: ['run', '   '],
+      env: { HOME: home },
+      homeDir: home,
       readStdin: async () => {
         fallbackReads += 1;
         return 'fallback';
       },
+      stdout: emptyStdout,
+      stderr: writer(),
     });
-    expect(empty.result.code).toBe(1);
+    expect(empty.code).toBe(1);
     expect(fallbackReads).toBe(0);
-    expect(empty.stdout).toBe('');
+    expect(emptyStdout.text()).toBe('');
+    expect(await readFile(legacy, 'utf8')).toBe(sharedConfig());
+    await expect(
+      readFile(join(home, '.spex', 'config', 'playbook.config.yaml')),
+    ).rejects.toThrow();
+  });
+
+  it('relocates through default run delegation before config preparation', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'playbook-headless-relocate-'));
+    tempDirs.push(home);
+    const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = join(home, '.spex', 'config', 'playbook.config.yaml');
+    const source =
+      `# delegated run relocation\nsessions: ../../session-state\n` +
+      sharedConfig();
+    await mkdir(dirname(legacy), { recursive: true });
+    await writeFile(legacy, source, 'utf8');
+    await chmod(legacy, 0o600);
+
+    const out = await headlessHarness(['run', 'hello'], {
+      userConfigPath: undefined,
+      homeDir: home,
+      env: {
+        HOME: home,
+        ANTHROPIC_API_KEY: 'a',
+        OPENAI_API_KEY: 'o',
+      },
+    });
+
+    expect(out.result.code).toBe(0);
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect((await stat(canonical)).mode & 0o777).toBe(0o600);
+    await expect(readFile(legacy, 'utf8')).rejects.toThrow();
+    expect(out.stderr).toContain(
+      `playbook: moved config from ${legacy} to ${canonical}\n`,
+    );
+    expect(out.stderr).not.toContain('created config');
+  });
+
+  // DR-064: the root's own `playbook/` namespace became the nearer former
+  // location when `config/` took its place beside the rest of the root.
+  it('relocates the root former config, keeping a directory that holds more', async () => {
+    const home = await mkdtemp(
+      join(tmpdir(), 'playbook-headless-relocate-root-'),
+    );
+    tempDirs.push(home);
+    const former = join(home, '.spex', 'playbook', 'playbook.config.yaml');
+    const neighbour = join(home, '.spex', 'playbook', 'notes.txt');
+    const xdg = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = join(home, '.spex', 'config', 'playbook.config.yaml');
+    const overlay = join(home, 'package-overlay.yaml');
+    // A sibling move keeps both relative locators on their targets.
+    const source =
+      `# root former location\nsessions: ../../session-state\n` +
+      sharedConfig().replace('from: mod://code', 'from: ../../code.registry.mjs');
+    const xdgBytes = `# the farther former location stays put\n${sharedConfig()}`;
+    await mkdir(dirname(former), { recursive: true });
+    await writeFile(former, source, 'utf8');
+    await chmod(former, 0o600);
+    await writeFile(neighbour, 'kept beside the config\n', 'utf8');
+    await mkdir(dirname(xdg), { recursive: true });
+    await writeFile(xdg, xdgBytes, 'utf8');
+    await writeFile(
+      overlay,
+      ['playbooks:', '  code:', '    from: mod://code', ''].join('\n'),
+      'utf8',
+    );
+
+    const out = await headlessHarness(['run', '--with', overlay, 'hello'], {
+      userConfigPath: undefined,
+      homeDir: home,
+      env: {
+        HOME: home,
+        ANTHROPIC_API_KEY: 'a',
+        OPENAI_API_KEY: 'o',
+      },
+    });
+
+    expect(out.result.code).toBe(0);
+    expect(await readFile(canonical, 'utf8')).toBe(source);
+    expect((await stat(canonical)).mode & 0o777).toBe(0o600);
+    expect(resolve(dirname(canonical), '../../code.registry.mjs')).toBe(
+      resolve(dirname(former), '../../code.registry.mjs'),
+    );
+    // The former file goes; the directory stays for what else it holds.
+    await expect(readFile(former, 'utf8')).rejects.toThrow();
+    expect(await readFile(neighbour, 'utf8')).toBe('kept beside the config\n');
+    // Exactly one file moves: the farther former location is untouched.
+    expect(await readFile(xdg, 'utf8')).toBe(xdgBytes);
+    expect(out.stderr).toContain(
+      `playbook: moved config from ${former} to ${canonical}\n`,
+    );
+    expect(out.stderr).not.toContain(xdg);
+    expect(out.stderr).not.toContain('created config');
+  });
+
+  it('uses canonical and keeps legacy readable after interrupted publication', async () => {
+    const home = await mkdtemp(
+      join(tmpdir(), 'playbook-headless-relocate-interrupted-'),
+    );
+    tempDirs.push(home);
+    const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = join(home, '.spex', 'config', 'playbook.config.yaml');
+    const legacyBytes = 'unknown-legacy-key: must-not-load\n';
+    const canonicalBytes = `# already published\n${sharedConfig()}`;
+    await mkdir(dirname(legacy), { recursive: true });
+    await mkdir(dirname(canonical), { recursive: true });
+    await writeFile(legacy, legacyBytes, 'utf8');
+    await chmod(legacy, 0o600);
+    await writeFile(canonical, canonicalBytes, 'utf8');
+    await chmod(canonical, 0o644);
+
+    const out = await headlessHarness(['run', 'hello'], {
+      userConfigPath: undefined,
+      homeDir: home,
+      env: {
+        HOME: home,
+        ANTHROPIC_API_KEY: 'a',
+        OPENAI_API_KEY: 'o',
+      },
+    });
+
+    expect(out.result.code).toBe(0);
+    expect(await readFile(canonical, 'utf8')).toBe(canonicalBytes);
+    expect((await stat(canonical)).mode & 0o777).toBe(0o644);
+    expect(await readFile(legacy, 'utf8')).toBe(legacyBytes);
+    expect((await stat(legacy)).mode & 0o777).toBe(0o600);
+    expect(out.stderr).not.toMatch(/moved config|created config/);
+  });
+
+  it('relocates before migrating profiles through the headless front end', async () => {
+    const home = await mkdtemp(
+      join(tmpdir(), 'playbook-headless-relocate-profiles-'),
+    );
+    tempDirs.push(home);
+    const legacy = join(home, '.config', 'playbook', 'playbook.config.yaml');
+    const canonical = join(home, '.spex', 'config', 'playbook.config.yaml');
+    const source = `# move before content migration\n${sharedProfilesConfig()}`;
+    await mkdir(dirname(legacy), { recursive: true });
+    await writeFile(legacy, source, 'utf8');
+
+    const out = await headlessHarness(['run', 'hello'], {
+      userConfigPath: undefined,
+      homeDir: home,
+      env: {
+        HOME: home,
+        ANTHROPIC_API_KEY: 'a',
+        OPENAI_API_KEY: 'o',
+      },
+    });
+
+    expect(out.result.code).toBe(0);
+    await expect(readFile(legacy, 'utf8')).rejects.toThrow();
+    expect(await readFile(`${canonical}.bak`, 'utf8')).toBe(source);
+    expect(await readFile(canonical, 'utf8')).not.toContain('profiles:');
+    const moveNotice =
+      `playbook: moved config from ${legacy} to ${canonical}\n`;
+    expect(out.stderr).toContain(moveNotice);
+    expect(out.stderr.indexOf(moveNotice)).toBeLessThan(
+      out.stderr.indexOf(`playbook: migrated ${canonical}`),
+    );
+    expect(out.stderr).not.toContain('created config');
   });
 
   it('awaits stdout backpressure before reporting success', async () => {
@@ -869,11 +1947,12 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
       createCaptainRuntime: () =>
         createXStatePlaybookRuntime(captainMachine, {
           label: 'CAPTAIN',
-          compat: { artifactSchema: 2, runtimeAbi: 999 },
+          compat: { artifactSchema: 3, runtimeAbi: 999 },
           snapshotOptions: () => ({}),
           machineInput: () => ({ enabledPlaybooks: [] }),
           roleStates: {},
-        })({}),
+          outcomeAuthority: { governedPlayerStates: {} },
+        })({} as never),
     });
     expect(captainSkew.result.code).toBe(1);
     expect(captainSkew.stdout).toBe('');
@@ -1093,9 +2172,12 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
     );
     const stdout = writer();
     const stderr = writer();
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-invalid-run-'));
+    tempDirs.push(stateRoot);
     const result = await runPlaybookCli({
       argv: ['run', 'hello'],
       userConfigPath: configPath,
+      sessionsDir: join(stateRoot, 'sessions'),
       stdout,
       stderr,
     });
@@ -1120,9 +2202,12 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
     const calls = { prepare: 0, load: 0, host: 0 };
     const stdout = writer();
     const stderr = writer();
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-invalid-agent-'));
+    tempDirs.push(stateRoot);
     const result = await runPlaybookCli({
       argv: ['run', 'hello'],
       userConfigPath: configPath,
+      sessionsDir: join(stateRoot, 'sessions'),
       prepareRegistryModule: async ({ from }: any) => {
         calls.prepare += 1;
         return from;
@@ -1147,11 +2232,183 @@ describe('playbook run shared Captain host (PBCLI-48)', () => {
 });
 
 describe('durable Captain continuation (PBCLI-24)', () => {
+  it('retracts an unchanged fresh boundary after pre-turn setup fails', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-abandon-state-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const failed = await headlessHarness(['run', 'must not run'], {
+      sessionsDir,
+      createLogicalSessionId: () => firstId,
+      installRetainedGenerationsForLaunch: async (options: any) => {
+        await installRetainedGenerationsForLaunch(options);
+        throw new Error('synthetic post-initialization failure');
+      },
+    });
+
+    expect(failed.result.code).toBe(1);
+    expect(failed.stdout).toBe('');
+    expect(failed.inputs).toEqual([]);
+    expect(failed.stderr).toContain('synthetic post-initialization failure');
+    expect(failed.stderr).not.toContain('The latest work is saved.');
+    await expect(
+      stat(join(sessionsDir, `${firstId}.json`)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const retried = await headlessHarness(['run', 'now run'], {
+      sessionsDir,
+      createLogicalSessionId: () => firstId,
+    });
+    expect(retried.result.code).toBe(0);
+    expect(retried.inputs).toEqual(['now run']);
+    const refused = await headlessHarness(['run', '--session', firstId, 'never admitted'], {
+      sessionsDir,
+      createHostRuntime: async () => { throw new Error('setup refused for existing session'); },
+    });
+    expect(refused.result.code).toBe(1);
+    expect(refused.stderr).toContain('setup refused for existing session');
+    expect(refused.stderr).not.toContain('The latest work is saved.');
+  });
+
+  it('starts fresh while the newest settled predecessor lease is live', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-live-state-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const first = await headlessHarness(['run', 'first session'], {
+      sessionsDir,
+      createLogicalSessionId: () => firstId,
+    });
+    expect(first.result.code).toBe(0);
+    const sourcePath = join(sessionsDir, `${firstId}.json`);
+    const sourceBytes = await readFile(sourcePath, 'utf8');
+    const store = createCaptainSessionStore({ sessionsDir });
+    const held = await store.acquire(firstId);
+
+    const second = await headlessHarness(['run', 'unrelated work'], {
+      sessionsDir,
+      createLogicalSessionId: () => secondId,
+    });
+
+    expect(second.result.code).toBe(0);
+    expect(second.inputs).toEqual(['unrelated work']);
+    expect(await readFile(sourcePath, 'utf8')).toBe(sourceBytes);
+    await held.release();
+  });
+
+  it('skips a pre-cutover record for fresh work and explains explicit selection', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-pre-cutover-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const first = await headlessHarness(['run', 'first session'], {
+      sessionsDir,
+      createLogicalSessionId: () => firstId,
+    });
+    expect(first.result.code).toBe(0);
+    const preCutoverPath = join(sessionsDir, `${firstId}.json`);
+    const canonical = JSON.parse(await readFile(preCutoverPath, 'utf8'));
+    const preCutoverBytes = `${JSON.stringify(
+      preUnresolvedEffectsSessionRecord(canonical),
+    )}\n`;
+    await writeFile(preCutoverPath, preCutoverBytes, 'utf8');
+
+    let explicitHosts = 0;
+    const explicit = await headlessHarness(
+      ['run', '--session', firstId, 'must not run'],
+      {
+        sessionsDir,
+        createHostRuntime: async () => {
+          explicitHosts += 1;
+          throw new Error('must not construct a pre-cutover host');
+        },
+      },
+    );
+    expect(explicit.result.code).toBe(1);
+    expect(explicit.stdout).toBe('');
+    expect(explicit.inputs).toEqual([]);
+    expect(explicitHosts).toBe(0);
+    expect(explicit.stderr).toContain(
+      'schema 5 predates the canonical schema-6 unresolved-effect settlement boundary for the artifact-schema-3 effect-authority cutover',
+    );
+    expect(explicit.stderr).not.toContain(
+      'missing field "unresolvedEffects"',
+    );
+
+    const fresh = await headlessHarness(['run', 'unrelated fresh work'], {
+      sessionsDir,
+      createLogicalSessionId: () => secondId,
+    });
+    expect(fresh.result.code).toBe(0);
+    expect(fresh.result.sessionId).toBe(secondId);
+    expect(fresh.inputs).toEqual(['unrelated fresh work']);
+    expect(fresh.stderr).toContain(
+      `skipping legacy Captain session "${firstId}" at "${preCutoverPath}"`,
+    );
+    expect(fresh.stderr).toContain(
+      'schema 5 predates the canonical schema-6 unresolved-effect settlement boundary for the artifact-schema-3 effect-authority cutover and is not resumable',
+    );
+    expect(fresh.stderr).toContain(
+      'move it outside the sessions directory or remove it',
+    );
+    expect(await readFile(preCutoverPath, 'utf8')).toBe(preCutoverBytes);
+  });
+
+  it('starts fresh when the predecessor root options no longer match', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-drift-state-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const events: string[] = [];
+    const lifecycle = { inits: 0, restores: 0, adopts: 0 };
+    const code = retainedRootEntry(events, lifecycle);
+    const review = nestedEntries([]).review;
+    const loadModule = async (specifier: string) => ({
+      default: specifier === 'mod://code' ? code : review,
+    });
+    const parked = await headlessHarness(['run', '/code retain it'], {
+      sessionsDir,
+      loadModule,
+      createLogicalSessionId: () => firstId,
+      createCaptainRuntime: undefined,
+    });
+    expect(parked.result.code).toBe(0);
+    const sourcePath = join(sessionsDir, `${firstId}.json`);
+    const sourceBytes = await readFile(sourcePath, 'utf8');
+    const overlay = await writeConfig(
+      ['playbooks:', '  code: { changedOption: true }', ''].join('\n'),
+    );
+    const prompts: string[] = [];
+    FakeAdapter.decision = (prompt) => {
+      prompts.push(prompt);
+      return { action: 'respond', text: 'Started unrelated fresh work.' };
+    };
+
+    const fresh = await headlessHarness(
+      ['run', '--with', overlay, 'unrelated work'],
+      {
+        sessionsDir,
+        userConfigPath: parked.configPath,
+        loadModule,
+        createLogicalSessionId: () => secondId,
+        createCaptainRuntime: undefined,
+      },
+    );
+
+    expect(fresh.result.code).toBe(0);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Retained resumptions: none.');
+    expect(lifecycle.adopts).toBe(0);
+    expect(await readFile(sourcePath, 'utf8')).toBe(sourceBytes);
+    expect(
+      JSON.parse(
+        await readFile(join(sessionsDir, `${secondId}.json`), 'utf8'),
+      ).retainedGenerations,
+    ).toEqual({});
+  });
+
   const firstId = '90000000-0000-4000-8000-000000000011';
   const secondId = '90000000-0000-4000-8000-000000000012';
   const thirdId = '90000000-0000-4000-8000-000000000013';
+  const fourthId = '90000000-0000-4000-8000-000000000014';
 
-  it('persists a closed v3 record before stdout without semantic disposal', async () => {
+  it('persists a closed v7 record before stdout without semantic disposal', async () => {
     const order: string[] = [];
     let disposals = 0;
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-order-state-'));
@@ -1210,12 +2467,12 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       'stdout:Captain acknowledged the message.\n',
     ]);
     expect(record).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 7,
       kind: 'captain-session',
       state: 'settled',
       sessionId: firstId,
       createdAt: '2026-08-11T20:00:00.000Z',
-      updatedAt: '2026-08-11T20:00:00.001Z',
+      updatedAt: '2026-08-11T20:00:00.003Z',
       cwd: process.cwd(),
       structuralProjection: {
         schemaVersion: 1,
@@ -1229,7 +2486,13 @@ describe('durable Captain continuation (PBCLI-24)', () => {
           code: { manifestCommand: 'code', command: 'code' },
         },
       },
-      snapshot: { schemaVersion: 3, mode: 'chat' },
+      snapshot: {
+        schemaVersion: 4,
+        mode: 'chat',
+        effectLedger: emptyPlaybookEffectLedger(),
+      },
+      effectLedger: emptyPlaybookEffectLedger(),
+      retainedGenerations: {},
     });
     expect((await stat(out.sessionsDir)).mode & 0o777).toBe(0o700);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
@@ -1257,15 +2520,17 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(collision.stdout).toBe('');
     expect(collision.inputs).toEqual([]);
     expect(collision.stderr).toContain(
-      'fresh Captain session record already exists',
+      `Captain session "${firstId}" already exists`,
     );
     expect(await readFile(path, 'utf8')).toBe(before);
   });
 
   it('restores an explicit session instead of init and preserves cwd and timestamps', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-continue-'));
-    const frozenCwd = await mkdtemp(join(tmpdir(), 'playbook-frozen-cwd-'));
-    tempDirs.push(stateRoot, frozenCwd);
+    const frozenCwd = await initHeadlessTestRepository(
+      'playbook-frozen-cwd-',
+    );
+    tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
     const lifecycle = { init: 0, restore: 0 };
     const seen: string[] = [];
@@ -1342,7 +2607,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       await readFile(join(sessionsDir, `${firstId}.json`), 'utf8'),
     );
     expect(record.createdAt).toBe('2026-08-11T20:10:00.000Z');
-    expect(record.updatedAt).toBe('2026-08-11T20:10:00.003Z');
+    expect(record.updatedAt).toBe('2026-08-11T20:10:00.005Z');
     expect(record.cwd).toBe(frozenCwd);
     expect(record.snapshot.sequences.turn).toBe(2);
     expect(record.lastAppliedExecutionProjection.captain.model).toEqual({
@@ -1488,8 +2753,37 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       reviewInits: 0,
       reviewRestores: 0,
     };
-    const entries = nestedParkedEntries(events, lifecycle);
-    entries.review.validateOptions = () => ({ normalizedByRegistry: true });
+    const schema2Entries = nestedParkedEntries(events, lifecycle);
+    schema2Entries.review.validateOptions = () => ({
+      normalizedByRegistry: true,
+    });
+    const constructions: Array<{
+      playbookId: string;
+      options: unknown;
+      capability: any;
+    }> = [];
+    const promoteEntry = (entry: any) => ({
+      ...entry,
+      artifactSchema: 3,
+      runtimeProfile: { kind: 'bespoke', artifactSchema: 3 },
+      createRuntime(options: unknown, capability: unknown) {
+        constructions.push({ playbookId: entry.id, options, capability });
+        return entry.createRuntime(options);
+      },
+    });
+    const entries = {
+      code: promoteEntry(schema2Entries.code),
+      review: promoteEntry(schema2Entries.review),
+    };
+    const writerLeases: any[] = [];
+    const createEffectLedgerWriteAhead = (lease: unknown) => {
+      writerLeases.push(lease);
+      const effectLedger = emptyPlaybookEffectLedger();
+      return {
+        snapshot: () => effectLedger,
+        writeAhead: async () => effectLedger,
+      };
+    };
     const captainRuntime = scriptedCaptainRuntime([], { action: 'deliver' });
     const loadModule = async (specifier: string) => ({
       default: specifier === 'mod://code' ? entries.code : entries.review,
@@ -1500,6 +2794,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       loadModule,
       createCaptainRuntime: captainRuntime,
       createLogicalSessionId: () => firstId,
+      createEffectLedgerWriteAhead,
     });
     expect(first.result.code).toBe(0);
     const parked = JSON.parse(
@@ -1516,8 +2811,31 @@ describe('durable Captain continuation (PBCLI-24)', () => {
         },
       ],
     });
+    expect(parked.retainedGenerations.code).toMatchObject({
+      frames: [
+        {
+          playbookId: 'code',
+          runtime: {
+            suspendedCall: { callId: 'code:review:durable' },
+          },
+        },
+        {
+          playbookId: 'review',
+          parentCallId: 'code:review:durable',
+          options: { normalizedByRegistry: true },
+        },
+      ],
+    });
     expect(parked.structuralProjection.catalog.review.options).toEqual({});
     expect(lifecycle.childCalls).toBe(1);
+    const parkedProjection = JSON.stringify(parked);
+    for (const key of [
+      'hostCapabilities',
+      'leaseOwnerToken',
+    ]) {
+      expect(parkedProjection).not.toContain(`"${key}"`);
+    }
+    expect(parked.effectLedger).toEqual(emptyPlaybookEffectLedger());
 
     const exactReply = '  exact review reply\nwith context\n';
     const second = await headlessHarness(
@@ -1527,6 +2845,8 @@ describe('durable Captain continuation (PBCLI-24)', () => {
         loadModule,
         createCaptainRuntime: captainRuntime,
         readStdin: async () => exactReply,
+        cwd: '/must/not/replace/stored/schema-3/cwd',
+        createEffectLedgerWriteAhead,
       },
     );
     expect(second.result.code).toBe(0);
@@ -1545,14 +2865,380 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       reviewInits: 1,
       reviewRestores: 1,
     });
+    expect(writerLeases).toHaveLength(2);
+    expect(writerLeases[0].ownerToken).not.toBe(writerLeases[1].ownerToken);
+    expect(constructions.map(({ playbookId }) => playbookId)).toEqual([
+      'code',
+      'review',
+      'code',
+      'review',
+    ]);
+    for (const [index, construction] of constructions.entries()) {
+      const lease = writerLeases[index < 2 ? 0 : 1];
+      expect(construction.capability.authority).toMatchObject({
+        playbookId: construction.playbookId,
+        sessionId: firstId,
+        leaseOwnerToken: lease.ownerToken,
+        cwd: process.cwd(),
+      });
+      expect(construction.capability.authority.canonicalWorktree.worktree).toBe(
+        process.cwd(),
+      );
+    }
     expect(second.stderr).not.toContain('/review called by /code');
     const settled = JSON.parse(
       await readFile(join(sessionsDir, `${firstId}.json`), 'utf8'),
     );
+    const settledProjection = JSON.stringify(settled);
+    for (const key of [
+      'hostCapabilities',
+      'leaseOwnerToken',
+    ]) {
+      expect(settledProjection).not.toContain(`"${key}"`);
+    }
+    for (const lease of writerLeases) {
+      expect(settledProjection).not.toContain(lease.ownerToken);
+    }
     expect(settled.snapshot.mode).toBe('chat');
+    expect(settled.effectLedger).toEqual(emptyPlaybookEffectLedger());
+    expect(settled.retainedGenerations).toEqual({});
   });
 
-  it('selects the newest valid session by updatedAt for --continue', async () => {
+  it('lets explicit start beat an offer before bare --continue adopts it (PBCLI-56)', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-resume-state-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const events: string[] = [];
+    const lifecycle = { inits: 0, restores: 0, adopts: 0 };
+    const code = retainedRootEntry(events, lifecycle);
+    const review = nestedEntries([]).review;
+    const createCaptainSessionId = uuidSequence();
+    const loadModule = async (specifier: string) => ({
+      default: specifier === 'mod://code' ? code : review,
+    });
+
+    const parked = await headlessHarness(['run', '/code retain it'], {
+      sessionsDir,
+      loadModule,
+      createLogicalSessionId: () => firstId,
+      createCaptainSessionId,
+      createCaptainRuntime: undefined,
+    });
+    expect(parked.result.code).toBe(0);
+
+    FakeAdapter.decision = () => ({ action: 'dismiss' });
+    const dismissed = await headlessHarness(
+      ['run', '--session', firstId, 'leave it for later'],
+      {
+        sessionsDir,
+        loadModule,
+        createCaptainSessionId,
+        createCaptainRuntime: undefined,
+      },
+    );
+    expect(dismissed.result.code).toBe(0);
+    expect(dismissed.result.snapshot).toMatchObject({
+      mode: 'chat',
+      lastAction: 'dismiss',
+    });
+    const retained = JSON.parse(
+      await readFile(join(sessionsDir, `${firstId}.json`), 'utf8'),
+    );
+    expect(retained).toMatchObject({
+      state: 'settled',
+      snapshot: { mode: 'chat' },
+      retainedGenerations: { code: { frames: [{ playbookId: 'code' }] } },
+    });
+
+    FakeAdapter.decision = () => {
+      throw new Error('explicit fresh start must bypass Captain arbitration');
+    };
+    const restarted = await headlessHarness(
+      ['run', '--session', firstId, '/code fresh replacement'],
+      {
+        sessionsDir,
+        loadModule,
+        createCaptainSessionId,
+        createCaptainRuntime: undefined,
+      },
+    );
+    expect(restarted.result.code).toBe(0);
+    expect(events).toEqual([
+      'code:park:retain it',
+      'code:park:fresh replacement',
+    ]);
+    expect(restarted.result.snapshot).toMatchObject({
+      mode: 'engaged.parked',
+      lastAction: 'start',
+    });
+    expect(lifecycle).toMatchObject({
+      inits: 2,
+      restores: 1,
+      adopts: 0,
+    });
+
+    FakeAdapter.decision = () => ({ action: 'dismiss' });
+    const redismissed = await headlessHarness(
+      ['run', '--session', firstId, 'leave the replacement for later'],
+      {
+        sessionsDir,
+        loadModule,
+        createCaptainSessionId,
+        createCaptainRuntime: undefined,
+      },
+    );
+    expect(redismissed.result.code).toBe(0);
+
+    const degradedPrompts: string[] = [];
+    FakeAdapter.decision = (prompt) => {
+      degradedPrompts.push(prompt);
+      return {
+        action: 'respond',
+        text: 'The retained offer is temporarily unavailable.',
+      };
+    };
+    const degradedInstall = await headlessHarness(
+      ['run', '--session', firstId, 'continue later'],
+      {
+        sessionsDir,
+        createCaptainSessionId,
+        createCaptainRuntime: undefined,
+        loadModule: async (specifier: string) => ({
+          default:
+            specifier === 'mod://code'
+              ? {
+                  ...code,
+                  createRuntime() {
+                    throw new Error('retained probe construction failed');
+                  },
+                }
+              : review,
+        }),
+      },
+    );
+    expect(degradedInstall.result.code).toBe(0);
+    expect(degradedInstall.stderr).not.toContain(
+      'retained probe construction failed',
+    );
+    expect(degradedPrompts).toHaveLength(1);
+    expect(degradedPrompts[0]).toContain('Retained resumptions: none.');
+    expect(degradedInstall.result.snapshot).toMatchObject({
+      mode: 'chat',
+      lastAction: 'respond',
+    });
+    expect(
+      JSON.parse(
+        await readFile(join(sessionsDir, `${firstId}.json`), 'utf8'),
+      ).retainedGenerations,
+    ).toHaveProperty('code');
+
+    const resumePrompts: string[] = [];
+    FakeAdapter.decision = (prompt) => {
+      resumePrompts.push(prompt);
+      return { action: 'resume', playbookId: 'code' };
+    };
+    const resumed = await headlessHarness(
+      ['run', '--continue', 'continue'],
+      {
+        sessionsDir,
+        loadModule,
+        createCaptainSessionId,
+        createCaptainRuntime: undefined,
+      },
+    );
+    expect(resumed.result.code).toBe(0);
+    expect(resumed.result.sessionId).toBe(firstId);
+    expect(resumePrompts).toHaveLength(1);
+    expect(resumePrompts[0]).toContain('[Boss message]\ncontinue');
+    expect(resumePrompts[0]).toContain(
+      'Retained resumptions:\n- code (/code):',
+    );
+    expect(lifecycle).toMatchObject({
+      inits: 2,
+      restores: 2,
+      adopts: 1,
+    });
+    expect(events).toEqual([
+      'code:park:retain it',
+      'code:park:fresh replacement',
+    ]);
+    expect(resumed.result.snapshot).toMatchObject({
+      mode: 'engaged.parked',
+      lastAction: 'resume',
+      frames: [{ playbookId: 'code' }],
+    });
+
+    FakeAdapter.decision = () => ({ action: 'dismiss' });
+    const pausedForRetry = await headlessHarness(
+      ['run', '--session', firstId, 'pause before retry'],
+      {
+        sessionsDir,
+        loadModule,
+        createCaptainSessionId,
+        createCaptainRuntime: undefined,
+      },
+    );
+    expect(pausedForRetry.result.snapshot).toMatchObject({
+      mode: 'chat',
+      lastAction: 'dismiss',
+    });
+    const retryStore = createCaptainSessionStore({ sessionsDir });
+    const retryLease = await retryStore.acquire(firstId);
+    const retryBoundary = await retryLease.read();
+    await retryLease.beginTurn({
+      input: 'continue',
+      attemptId: thirdId,
+      attemptedExecutionProjection:
+        retryBoundary.lastAppliedExecutionProjection,
+    });
+    await retryLease.release();
+    expect(await retryStore.read(firstId)).toMatchObject({
+      state: 'uncertain',
+      retainedGenerations: { code: { frames: [{ playbookId: 'code' }] } },
+    });
+
+    const retryPrompts: string[] = [];
+    FakeAdapter.decision = (prompt) => {
+      retryPrompts.push(prompt);
+      return { action: 'resume', playbookId: 'code' };
+    };
+    const retried = await headlessHarness(
+      ['run', '--session', firstId, '--retry-uncertain'],
+      {
+        sessionsDir,
+        loadModule,
+        createCaptainSessionId,
+        createAttemptId: () => fourthId,
+        createCaptainRuntime: undefined,
+      },
+    );
+    expect(retried.result.code).toBe(0);
+    expect(retryPrompts).toHaveLength(0);
+    expect(retried.result.snapshot).toMatchObject({ mode: 'chat', lastAction: 'respond' });
+    expect(lifecycle.adopts).toBe(1);
+
+    const adoptionPrompts: string[] = [];
+    FakeAdapter.decision = (prompt) => {
+      adoptionPrompts.push(prompt);
+      return { action: 'resume', playbookId: 'code' };
+    };
+    const adopted = await headlessHarness(['run', 'continue'], {
+      sessionsDir,
+      loadModule,
+      createLogicalSessionId: () => secondId,
+      createCaptainSessionId,
+      createCaptainRuntime: undefined,
+    });
+    expect(adopted.result.code).toBe(0);
+    expect(adopted.result.sessionId).toBe(secondId);
+    expect(adoptionPrompts).toHaveLength(1);
+    expect(adoptionPrompts[0]).toContain('[Boss message]\ncontinue');
+    expect(adoptionPrompts[0]).toContain(
+      'Retained resumptions:\n- code (/code):',
+    );
+    expect(lifecycle.adopts).toBe(2);
+    expect(adopted.result.snapshot).toMatchObject({
+      mode: 'engaged.parked',
+      lastAction: 'resume',
+      frames: [{ playbookId: 'code' }],
+    });
+    expect(
+      JSON.parse(
+        await readFile(join(sessionsDir, `${firstId}.json`), 'utf8'),
+      ).retainedGenerations,
+    ).toEqual({});
+    expect(
+      JSON.parse(
+        await readFile(join(sessionsDir, `${secondId}.json`), 'utf8'),
+      ).retainedGenerations,
+    ).toHaveProperty('code');
+  });
+
+  it('prefers same-cwd continuation, reports global fallback, and honors explicit selection', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-cwd-select-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const localCwd = join(stateRoot, 'local');
+    const foreignCwd = join(stateRoot, 'foreign');
+    const unmatchedCwd = join(stateRoot, 'unmatched');
+    await Promise.all(
+      [localCwd, foreignCwd, unmatchedCwd].map((path) =>
+        mkdir(path, { recursive: true }),
+      ),
+    );
+    await Promise.all(
+      [localCwd, foreignCwd, unmatchedCwd].map((path) =>
+        initializeHeadlessTestRepository(path),
+      ),
+    );
+
+    const local = await headlessHarness(['run', 'local session'], {
+      sessionsDir,
+      cwd: localCwd,
+      createLogicalSessionId: () => firstId,
+      now: () => new Date('2026-08-11T20:19:00.000Z'),
+    });
+    const foreign = await headlessHarness(['run', 'foreign session'], {
+      sessionsDir,
+      cwd: foreignCwd,
+      createLogicalSessionId: () => secondId,
+      now: () => new Date('2026-08-11T20:19:01.000Z'),
+    });
+    expect([local.result.code, foreign.result.code]).toEqual([0, 0]);
+
+    const preferred = await headlessHarness(
+      ['run', '--continue', 'local follow-up'],
+      {
+        sessionsDir,
+        cwd: localCwd,
+        now: () => new Date('2026-08-11T20:19:02.000Z'),
+      },
+    );
+    expect(preferred.result.code).toBe(0);
+    expect(preferred.result.sessionId).toBe(firstId);
+    expect(preferred.result.cwd).toBe(localCwd);
+    expect(preferred.inputs).toEqual(['local follow-up']);
+    expect(preferred.stderr).not.toContain(
+      'no same-directory Captain session exists',
+    );
+
+    const fallback = await headlessHarness(
+      ['run', '--continue', 'global follow-up'],
+      {
+        sessionsDir,
+        cwd: unmatchedCwd,
+        now: () => new Date('2026-08-11T20:19:03.000Z'),
+      },
+    );
+    expect(fallback.result.code).toBe(0);
+    expect(fallback.result.sessionId).toBe(firstId);
+    expect(fallback.result.cwd).toBe(localCwd);
+    expect(fallback.inputs).toEqual(['global follow-up']);
+    expect(fallback.stderr).toContain(
+      `no same-directory Captain session exists for invoking working directory "${unmatchedCwd}"`,
+    );
+    expect(fallback.stderr).toContain(
+      `selecting globally newest Captain session "${firstId}" with stored working directory "${localCwd}"`,
+    );
+
+    const explicit = await headlessHarness(
+      ['run', '--session', secondId, 'foreign by id'],
+      {
+        sessionsDir,
+        cwd: localCwd,
+        now: () => new Date('2026-08-11T20:19:04.000Z'),
+      },
+    );
+    expect(explicit.result.code).toBe(0);
+    expect(explicit.result.sessionId).toBe(secondId);
+    expect(explicit.result.cwd).toBe(foreignCwd);
+    expect(explicit.inputs).toEqual(['foreign by id']);
+    expect(explicit.stderr).not.toContain(
+      'no same-directory Captain session exists',
+    );
+  });
+
+  it('selects the newest resumable same-cwd session and refuses pre-effect records', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-latest-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -1568,6 +3254,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     });
     expect([first.result.code, second.result.code]).toEqual([0, 0]);
     const legacyPath = join(sessionsDir, `${thirdId}.json`);
+    const memberlessSchema3Path = join(sessionsDir, `${fourthId}.json`);
     const settledRecord = JSON.parse(
       await readFile(join(sessionsDir, `${secondId}.json`), 'utf8'),
     );
@@ -1586,6 +3273,37 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       })}\n`,
       { mode: 0o600 },
     );
+    const memberlessSchema3 = preEffectSessionRecord(
+      {
+        ...settledRecord,
+        sessionId: fourthId,
+      },
+      3,
+      false,
+    );
+    const memberlessSchema3Bytes = `${JSON.stringify(memberlessSchema3)}\n`;
+    await writeFile(memberlessSchema3Path, memberlessSchema3Bytes, {
+      mode: 0o600,
+    });
+
+    let explicitLegacyHosts = 0;
+    const explicitLegacy = await headlessHarness(
+      ['run', '--session', thirdId, 'must not run'],
+      {
+        sessionsDir,
+        createHostRuntime: async () => {
+          explicitLegacyHosts += 1;
+          throw new Error('must not construct host for schema 2');
+        },
+      },
+    );
+    expect(explicitLegacy.result.code).toBe(1);
+    expect(explicitLegacy.stdout).toBe('');
+    expect(explicitLegacy.inputs).toEqual([]);
+    expect(explicitLegacyHosts).toBe(0);
+    expect(explicitLegacy.stderr).toContain(
+      'schema 2 has incompatible root-owned player identity',
+    );
 
     const continued = await headlessHarness(
       ['run', '--continue', 'latest reply'],
@@ -1594,15 +3312,212 @@ describe('durable Captain continuation (PBCLI-24)', () => {
         now: () => new Date('2026-08-11T20:20:02.000Z'),
       },
     );
-    expect(continued.result.code).toBe(0);
+    expect(continued.result.code, continued.stderr).toBe(0);
     expect(continued.result.sessionId).toBe(secondId);
     expect(continued.inputs).toEqual(['latest reply']);
     expect(continued.stderr).toContain(
       `skipping legacy Captain session "${thirdId}" at "${legacyPath}"`,
     );
     expect(continued.stderr).toContain(
+      'schema 2 has incompatible player identity',
+    );
+    expect(continued.stderr).toContain(
+      `skipping legacy Captain session "${fourthId}" at "${memberlessSchema3Path}"`,
+    );
+    expect(continued.stderr).toContain(
+      'schema 3 predates the artifact-schema-3 effect-authority cutover and is not resumable',
+    );
+    expect(continued.stderr).toContain(
       'move it outside the sessions directory or remove it',
     );
+    expect(await readFile(memberlessSchema3Path, 'utf8')).toBe(
+      memberlessSchema3Bytes,
+    );
+
+    let explicitPreEffectHosts = 0;
+    const explicitPreEffect = await headlessHarness(
+      ['run', '--session', fourthId, 'must not run'],
+      {
+        sessionsDir,
+        now: () => new Date('2026-08-11T20:20:03.000Z'),
+        createHostRuntime: async () => {
+          explicitPreEffectHosts += 1;
+          throw new Error('must not construct host for schema 3');
+        },
+      },
+    );
+    expect(explicitPreEffect.result.code).toBe(1);
+    expect(explicitPreEffect.stdout).toBe('');
+    expect(explicitPreEffect.inputs).toEqual([]);
+    expect(explicitPreEffectHosts).toBe(0);
+    expect(explicitPreEffect.stderr).toContain(
+      'schema 3 predates the artifact-schema-3 effect-authority cutover',
+    );
+
+    const transientSchema4 = preEffectSessionRecord(
+      { ...settledRecord, sessionId: fourthId },
+      4,
+      true,
+    );
+    const transientSchema4Bytes = `${JSON.stringify(transientSchema4)}\n`;
+    await writeFile(memberlessSchema3Path, transientSchema4Bytes, 'utf8');
+    let explicitSchema4Hosts = 0;
+    const continuedSchema4 = await headlessHarness(
+      ['run', '--session', fourthId, 'must not run'],
+      {
+        sessionsDir,
+        now: () => new Date('2026-08-11T20:20:04.000Z'),
+        createHostRuntime: async () => {
+          explicitSchema4Hosts += 1;
+          throw new Error('must not construct host for schema 4');
+        },
+      },
+    );
+    expect(continuedSchema4.result.code).toBe(1);
+    expect(continuedSchema4.stdout).toBe('');
+    expect(continuedSchema4.inputs).toEqual([]);
+    expect(explicitSchema4Hosts).toBe(0);
+    expect(continuedSchema4.stderr).toContain(
+      'schema 4 predates the artifact-schema-3 effect-authority cutover',
+    );
+    expect(await readFile(memberlessSchema3Path, 'utf8')).toBe(
+      transientSchema4Bytes,
+    );
+
+    const malformedPreEffect = preEffectSessionRecord(
+      { ...settledRecord, sessionId: fourthId },
+      3,
+      false,
+    );
+    malformedPreEffect.snapshot.captain.runtime.schemaVersion = 2;
+    await writeFile(
+      memberlessSchema3Path,
+      `${JSON.stringify(malformedPreEffect)}\n`,
+      'utf8',
+    );
+    let malformedHosts = 0;
+    const malformed = await headlessHarness(
+      ['run', '--session', fourthId, 'must not run'],
+      {
+        sessionsDir,
+        createHostRuntime: async () => {
+          malformedHosts += 1;
+          throw new Error('must not construct host for malformed schema 3');
+        },
+      },
+    );
+    expect(malformed.result.code).toBe(1);
+    expect(malformed.stdout).toBe('');
+    expect(malformed.inputs).toEqual([]);
+    expect(malformedHosts).toBe(0);
+    expect(malformed.stderr).toContain(
+      'runtime schema 2 cannot migrate to schema 4',
+    );
+    expect(malformed.stderr).not.toContain(
+      'predates the artifact-schema-3 effect-authority cutover',
+    );
+  });
+
+  it.each([
+    {
+      name: 'shell schema 1',
+      mutate(record: any) {
+        record.snapshot.schemaVersion = 1;
+        delete record.snapshot.playerSessions;
+        delete record.snapshot.captain.agent;
+        const runtime = record.snapshot.captain.runtime;
+        runtime.schemaVersion = 2;
+        runtime.playerResumeTokens = runtime.roleResumeTokens;
+        delete runtime.roleResumeTokens;
+      },
+      diagnostic:
+        'Captain shell snapshot schemaVersion 1 has incompatible player identity',
+    },
+    {
+      name: 'runtime schema 1',
+      mutate(record: any) {
+        const runtime = record.snapshot.captain.runtime;
+        runtime.schemaVersion = 1;
+        runtime.playerResumeTokens = runtime.roleResumeTokens;
+        delete runtime.roleResumeTokens;
+      },
+      diagnostic:
+        'runtime snapshot schemaVersion 1 is not supported (expected 4)',
+    },
+    {
+      name: 'runtime schema 2',
+      mutate(record: any) {
+        const runtime = record.snapshot.captain.runtime;
+        runtime.schemaVersion = 2;
+        runtime.playerResumeTokens = runtime.roleResumeTokens;
+        delete runtime.roleResumeTokens;
+      },
+      diagnostic:
+        'runtime snapshot schemaVersion 2 is not supported (expected 4)',
+    },
+  ])('rejects explicit released $name before host work', async ({
+    mutate,
+    diagnostic,
+  }) => {
+    const first = await headlessHarness(['run', 'settled selection'], {
+      createLogicalSessionId: () => firstId,
+    });
+    expect(first.result.code).toBe(0);
+    const recordPath = join(first.sessionsDir, `${firstId}.json`);
+    const record = JSON.parse(await readFile(recordPath, 'utf8'));
+    mutate(record);
+    await writeFile(recordPath, `${JSON.stringify(record)}\n`, 'utf8');
+
+    let hosts = 0;
+    const rejected = await headlessHarness(
+      ['run', '--session', firstId, 'must not run'],
+      {
+        sessionsDir: first.sessionsDir,
+        createHostRuntime: async () => {
+          hosts += 1;
+          throw new Error('must not construct host for a released schema');
+        },
+      },
+    );
+
+    expect(rejected.result.code).toBe(1);
+    expect(rejected.stdout).toBe('');
+    expect(rejected.inputs).toEqual([]);
+    expect(hosts).toBe(0);
+    expect(rejected.stderr).toContain(diagnostic);
+  });
+
+  it('rejects frozen unsupported fast mode before prepare or import', async () => {
+    const first = await headlessHarness(['run', 'settled selection'], {
+      createLogicalSessionId: () => firstId,
+    });
+    expect(first.result.code).toBe(0);
+
+    for (const fastMode of [false, true]) {
+      const structural = JSON.parse(
+        JSON.stringify(first.result.record.structuralProjection),
+      );
+      const execution = JSON.parse(
+        JSON.stringify(first.result.record.lastAppliedExecutionProjection),
+      );
+      const playerId = execution.catalog.code.roles.coder.playerId;
+      structural.players.find((player: any) => player.id === playerId).adapter =
+        'gemini';
+      execution.players.find((player: any) => player.id === playerId).adapter =
+        'gemini';
+      execution.catalog.code.roles.coder.fastMode = fastMode;
+
+      const prepareRegistryModule = vi.fn();
+      const loadModule = vi.fn();
+      await expect(
+        validateFrozenExecutionConfig(structural, execution, {
+          prepareRegistryModule,
+          loadModule,
+        }),
+      ).rejects.toThrow(/fast.*gemini|gemini.*fast/i);
+      expect(prepareRegistryModule).not.toHaveBeenCalled();
+      expect(loadModule).not.toHaveBeenCalled();
+    }
   });
 
   it('rereads the selected session under its lease before deciding whether to run', async () => {
@@ -1702,7 +3617,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(rejected.result.code).toBe(1);
     expect(rejected.stdout).toBe('');
     expect(rejected.stderr).toContain(
-      'does not reproduce the stored structural projection',
+      'no longer matches its recorded manifest identity',
     );
     expect(rejected.inputs).toEqual([]);
   });
@@ -1756,7 +3671,11 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       sessionsDir,
       fsOps: {
         async rename(from: string, to: string) {
-          if (from.endsWith('.tmp') && to === recordPath) {
+          if (
+            from.endsWith('.tmp') &&
+            to === recordPath &&
+            JSON.parse(await readFile(from, 'utf8')).state === 'settled'
+          ) {
             throw new Error('synthetic settlement rename failure');
           }
           return rename(from, to);
@@ -1792,6 +3711,91 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(JSON.parse(await readFile(recordPath, 'utf8')).state).toBe(
       'uncertain',
     );
+  });
+
+  it('settles a same-turn unfinished terminal without retaining its initialized state', async () => {
+    const fixtures = nestedEntries([]);
+    const unfinished = {
+      id: 'code',
+      command: 'code',
+      intent: 'finish unsuccessfully on the first turn',
+      artifactSchema: 3 as const,
+      runtimeProfile: { kind: 'bespoke', artifactSchema: 3 } as const,
+      requiredRoleIds: ['coder'],
+      concurrentRoleSets: [] as const,
+      validateOptions: (value: unknown) => value,
+      createRuntime(): PlaybookRuntime {
+        let session: PlaybookSession | undefined;
+        let state = activeState('ready');
+        let turns = 0;
+        return {
+          retainedGenerationMetadata: {
+            unfinishedFinalStateIds: ['reportedReviewFailure'],
+          },
+          async init(next) {
+            session = next;
+          },
+          async restore(next, snapshot) {
+            session = next;
+            state = snapshot.state;
+            turns = snapshot.sequences.turn;
+          },
+          async adopt(next, snapshot) {
+            session = next;
+            state = snapshot.state;
+            turns = snapshot.sequences.turn;
+          },
+          exportSnapshot() {
+            if (session === undefined) return undefined;
+            return {
+              ...runtimeSnapshot('code', turns),
+              machine: { value: state.value, status: state.status },
+              state,
+            };
+          },
+          async handleBossInput() {
+            turns += 1;
+            state = terminalState('reportedReviewFailure');
+            return {
+              outcome: 'terminal',
+              state,
+              output: { status: 'review-failed' },
+            };
+          },
+          async resumePlaybookCall() {
+            return { outcome: 'no-action', state };
+          },
+          async dispose() {},
+        };
+      },
+    };
+    const input = '/code fail review immediately';
+    const out = await headlessHarness(['run', input], {
+      loadModule: async (specifier: string) => ({
+        default: specifier === 'mod://code' ? unfinished : fixtures.review,
+      }),
+    });
+
+    expect(out.result.code).toBe(0);
+    expect(out.stdout).toBe('Nested CODE and REVIEW completed.\n');
+    expect(out.stderr).not.toContain(
+      'Captain turn settled without an exportable session settlement',
+    );
+    const record = JSON.parse(
+      await readFile(
+        join(
+          out.sessionsDir,
+          '90000000-0000-4000-8000-000000000001.json',
+        ),
+        'utf8',
+      ),
+    );
+    expect(record).toMatchObject({
+      state: 'settled',
+      snapshot: { mode: 'chat' },
+      retainedGenerations: {},
+    });
+    expect(record).not.toHaveProperty('uncertain');
   });
 
   it('withholds output but preserves a complete settlement after post-rename sync failure', async () => {
@@ -1869,7 +3873,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(record.snapshot.sequences.turn).toBe(1);
   });
 
-  it('writes uncertainty before effects, refuses implicit replay, and retries exact stored input', async () => {
+  it('writes uncertainty before effects and reports the exact interrupted input without replay', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-uncertain-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -1899,7 +3903,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       sessionId: firstId,
       snapshot: { sequences: { turn: 0 } },
       uncertain: {
-        baseUpdatedAt: null,
+        baseUpdatedAt: expect.any(String),
         input: exactInput,
         attemptId: secondId,
         attemptNumber: 1,
@@ -1908,7 +3912,9 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(markerDuringTurn.uncertain.markedAt).toBe(
       markerDuringTurn.updatedAt,
     );
-    expect(markerDuringTurn.createdAt).toBe(markerDuringTurn.updatedAt);
+    expect(markerDuringTurn.uncertain.baseUpdatedAt).not.toBe(
+      markerDuringTurn.updatedAt,
+    );
 
     let reads = 0;
     let hosts = 0;
@@ -1927,7 +3933,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(refused.stdout).toBe('');
     expect({ reads, hosts }).toEqual({ reads: 0, hosts: 0 });
     expect(refused.stderr).toContain('will not be replayed automatically');
-    expect(refused.stderr).toContain('may duplicate external effects');
+    expect(refused.stderr).toContain('restores and reports without running work');
     expect(refused.stderr).toContain(
       `playbook run --session ${firstId} --retry-uncertain`,
     );
@@ -1961,7 +3967,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       },
     );
     expect(retried.result.code).toBe(0);
-    expect(retried.inputs).toEqual([exactInput]);
+    expect(retried.inputs).toEqual([]);
     expect(reads).toBe(0);
     expect(retryMarker).toMatchObject({
       state: 'uncertain',
@@ -1991,7 +3997,576 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     );
   });
 
-  it('retries the exact attempted tuning instead of settled or current tuning', async () => {
+  it('reports an all-unchanged multi-attempt suffix without replay', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-effect-retry-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const repositoryCwd = await initHeadlessTestRepository(
+      'playbook-effect-retry-repo-',
+    );
+    const events: string[] = [];
+    const lifecycle = {
+      childCalls: 0,
+      parentResumes: 0,
+      codeInits: 0,
+      codeRestores: 0,
+      reviewInits: 0,
+      reviewRestores: 0,
+    };
+    const baseEntries = nestedParkedEntries(events, lifecycle);
+    const restoredFrameLedgers: Array<{
+      playbookId: string;
+      ledger: unknown;
+    }> = [];
+    const promoteEntry = (entry: any) => ({
+      ...entry,
+      artifactSchema: 3,
+      runtimeProfile: { kind: 'bespoke', artifactSchema: 3 },
+      createRuntime(options: unknown, capability: any) {
+        const runtime = entry.createRuntime(options);
+        return {
+          ...runtime,
+          async restore(session: unknown, snapshot: any) {
+            restoredFrameLedgers.push({
+              playbookId: entry.id,
+              ledger: snapshot.effectLedger,
+            });
+            return runtime.restore(session, snapshot);
+          },
+          exportSnapshot() {
+            return {
+              ...runtime.exportSnapshot(),
+              effectLedger: capability.effectLedger.snapshot(),
+            };
+          },
+        };
+      },
+    });
+    const entries = {
+      code: promoteEntry(baseEntries.code),
+      review: promoteEntry(baseEntries.review),
+    };
+    const loadModule = async (specifier: string) => ({
+      default: specifier === 'mod://code' ? entries.code : entries.review,
+    });
+    const captainInputs: string[] = [];
+    const captainRuntime = scriptedCaptainRuntime(captainInputs, {
+      action: 'deliver',
+    });
+    const createCaptainSessionId = uuidSequence();
+    const first = await headlessHarness(['run', '/code inspect it'], {
+      sessionsDir,
+      loadModule,
+      createCaptainRuntime: captainRuntime,
+      createCaptainSessionId,
+      createLogicalSessionId: () => firstId,
+      cwd: repositoryCwd,
+    });
+    expect(first.result.code, first.stderr).toBe(0);
+    expect(first.result.snapshot).toMatchObject({
+      mode: 'engaged.parked',
+      frames: [
+        { playbookId: 'code' },
+        { playbookId: 'review' },
+      ],
+    });
+
+    const store = createCaptainSessionStore({ sessionsDir });
+    const lease = await store.acquire(firstId);
+    const settled = await lease.read();
+    const checkpoint = settled.snapshot.effectLedger;
+    await lease.beginTurn({
+      input: 'finish recovered review',
+      attemptId: secondId,
+      attemptedExecutionProjection:
+        settled.lastAppliedExecutionProjection,
+    });
+    let mirror = (await lease.read()).effectLedger;
+    const capabilities = await createRepositoryEffectCapabilities({
+      cwd: settled.cwd,
+      catalog: settled.structuralProjection.catalog,
+      sessionId: firstId,
+      sessionLease: lease,
+      createWriteAhead: () => ({
+        snapshot: () => mirror,
+        async writeAhead(authority: unknown, commands: unknown[]) {
+          mirror = await lease.writeEffectLedger(authority, commands);
+          return mirror;
+        },
+      }),
+    });
+    const appendUnchanged = async (boundaryId: string, turnId: number) => {
+      await capabilities.code.repository.runExclusive({
+        effectBoundary: {
+          boundaryId,
+          runtimeSessionId:
+            '40000000-0000-4000-8000-000000000004',
+          turnId,
+          callId: `coder:${turnId}`,
+          roleId: 'coder',
+          sourceStateId: 'implementing',
+          sourceOutcomeSchema: { type: 'object' },
+          dispositions: ['unchanged'],
+          correctionBudget: { limit: 1, spent: false },
+        },
+        operation: async () => undefined,
+      });
+    };
+    await appendUnchanged(
+      '30000000-0000-4000-8000-000000000003',
+      1,
+    );
+    await lease.beginRetry({
+      expectedAttemptId: secondId,
+      nextAttemptId: thirdId,
+    });
+    await appendUnchanged(
+      '30000000-0000-4000-8000-000000000005',
+      2,
+    );
+    const beforeRetry = await lease.read();
+    expect(beforeRetry.snapshot.effectLedger).toEqual(checkpoint);
+    expect(
+      beforeRetry.effectLedger.boundaries.map(
+        (boundary: any) => boundary.physicalReceipt.classification,
+      ),
+    ).toEqual(['unchanged', 'unchanged']);
+    expect(
+      beforeRetry.effectLedger.boundaries.map(
+        (boundary: any) => boundary.attemptNumber,
+      ),
+    ).toEqual([1, 2]);
+    await lease.release();
+
+    const retried = await headlessHarness(
+      ['run', '--session', firstId, '--retry-uncertain'],
+      {
+        sessionsDir,
+        loadModule,
+        createCaptainRuntime: captainRuntime,
+        createCaptainSessionId,
+        createAttemptId: () => fourthId,
+      },
+    );
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainInputs).toEqual(['/code inspect it']);
+    expect(restoredFrameLedgers).toEqual([]);
+    expect(retried.result.snapshot.mode).toBe('chat');
+    expect(retried.result.snapshot.captain.runtime.effectLedger).toEqual(
+      emptyPlaybookEffectLedger(),
+    );
+    expect(retried.result.record.effectLedger.boundaries).toHaveLength(2);
+    expect(retried.result.snapshot.effectLedger).toEqual(
+      retried.result.record.effectLedger,
+    );
+    for (const frame of retried.result.snapshot.frames ?? []) {
+      expect(frame.runtime.effectLedger).toEqual(
+        retried.result.record.effectLedger,
+      );
+    }
+  });
+
+  it('settles earlier non-unchanged evidence without replay', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-effect-park-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const repositoryCwd = await initHeadlessTestRepository(
+      'playbook-effect-park-repo-',
+    );
+    const promoteEntry = (entry: any) => ({
+      ...entry,
+      artifactSchema: 3,
+      runtimeProfile: { kind: 'bespoke', artifactSchema: 3 },
+    });
+    const first = await headlessHarness(['run', 'settle baseline'], {
+      sessionsDir,
+      entryTransform: promoteEntry,
+      createLogicalSessionId: () => firstId,
+      cwd: repositoryCwd,
+    });
+    expect(first.result.code, first.stderr).toBe(0);
+
+    const store = createCaptainSessionStore({ sessionsDir });
+    const lease = await store.acquire(firstId);
+    const settled = await lease.read();
+    await lease.beginTurn({
+      input: 'must remain parked',
+      attemptId: secondId,
+      attemptedExecutionProjection:
+        settled.lastAppliedExecutionProjection,
+    });
+    let mirror = (await lease.read()).effectLedger;
+    const capabilities = await createRepositoryEffectCapabilities({
+      cwd: settled.cwd,
+      catalog: settled.structuralProjection.catalog,
+      sessionId: firstId,
+      sessionLease: lease,
+      createWriteAhead: () => ({
+        snapshot: () => mirror,
+        async writeAhead(authority: unknown, commands: unknown[]) {
+          mirror = await lease.writeEffectLedger(authority, commands);
+          return mirror;
+        },
+      }),
+    });
+    const ambiguousBoundaryId =
+      '30000000-0000-4000-8000-000000000013';
+    const baseline = await capabilities.code.repository.observe();
+    await capabilities.code.effectLedger.writeAhead([
+      {
+        kind: 'start-boundaries',
+        boundaries: [
+          {
+            boundaryId: ambiguousBoundaryId,
+            playbookId: 'code',
+            runtimeSessionId:
+              '40000000-0000-4000-8000-000000000014',
+            turnId: 1,
+            callId: 'coder:ambiguous',
+            roleId: 'coder',
+            sourceStateId: 'implementing',
+            sourceOutcomeSchema: { type: 'object' },
+            dispositions: ['unchanged'],
+            canonicalWorktree:
+              capabilities.code.authority.canonicalWorktree,
+            baseline,
+            correctionBudget: { limit: 1, spent: false },
+          },
+        ],
+      },
+    ]);
+    const started = capabilities.code.effectLedger
+      .snapshot()
+      .boundaries.at(-1);
+    await capabilities.code.effectLedger.writeAhead([
+      {
+        kind: 'replace-boundaries',
+        replacements: [
+          {
+            expected: started,
+            next: {
+              ...started,
+              physicalReceipt: {
+                classification: 'observation-ambiguous',
+                baseline,
+              },
+            },
+          },
+        ],
+      },
+    ]);
+    await lease.beginRetry({
+      expectedAttemptId: secondId,
+      nextAttemptId: thirdId,
+    });
+    await capabilities.code.repository.runExclusive({
+      effectBoundary: {
+        boundaryId: '30000000-0000-4000-8000-000000000015',
+        runtimeSessionId:
+          '40000000-0000-4000-8000-000000000016',
+        turnId: 2,
+        callId: 'coder:unchanged',
+        roleId: 'coder',
+        sourceStateId: 'implementing',
+        sourceOutcomeSchema: { type: 'object' },
+        dispositions: ['unchanged'],
+        correctionBudget: { limit: 1, spent: false },
+      },
+      operation: async () => undefined,
+    });
+    const beforeRetry = await lease.read();
+    await lease.release();
+    const beforeBytes = await readFile(
+      join(sessionsDir, `${firstId}.json`),
+      'utf8',
+    );
+
+    const captainFactory = vi.fn(scriptedCaptainRuntime([], { action: 'recover' }));
+    const retried = await headlessHarness(
+      ['run', '--session', firstId, '--retry-uncertain'],
+      {
+        sessionsDir,
+        userConfigPath: first.configPath,
+        entryTransform: promoteEntry,
+        createAttemptId: () => fourthId,
+        createCaptainRuntime: captainFactory,
+      },
+    );
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainFactory).toHaveBeenCalledOnce();
+    expect(retried.events).toEqual([]);
+    const recovered = await store.read(firstId);
+    expect(recovered.state).toBe('settled');
+    expect(recovered.snapshot.mode).toBe('chat');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
+    expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
+    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
+    expect(recovered.effectLedger).toEqual(beforeRetry.effectLedger);
+    expect(recovered.unresolvedEffects[0].classification).toBe('observation-ambiguous');
+  });
+
+  it('settles logical-only progress without reusing the stored Boss turn', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-logical-park-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const repositoryCwd = await initHeadlessTestRepository(
+      'playbook-logical-park-repo-',
+    );
+    const promoteEntry = (entry: any) => ({
+      ...entry,
+      artifactSchema: 3,
+      runtimeProfile: { kind: 'bespoke', artifactSchema: 3 },
+    });
+    const first = await headlessHarness(['run', 'settle baseline'], {
+      sessionsDir,
+      entryTransform: promoteEntry,
+      createLogicalSessionId: () => firstId,
+      cwd: repositoryCwd,
+    });
+    expect(first.result.code, first.stderr).toBe(0);
+
+    const store = createCaptainSessionStore({ sessionsDir });
+    const lease = await store.acquire(firstId);
+    const settled = await lease.read();
+    await lease.beginTurn({
+      input: 'bind a question',
+      attemptId: secondId,
+      attemptedExecutionProjection:
+        settled.lastAppliedExecutionProjection,
+    });
+    let mirror = (await lease.read()).effectLedger;
+    const capabilities = await createRepositoryEffectCapabilities({
+      cwd: settled.cwd,
+      catalog: settled.structuralProjection.catalog,
+      sessionId: firstId,
+      sessionLease: lease,
+      createWriteAhead: () => ({
+        snapshot: () => mirror,
+        async writeAhead(authority: unknown, commands: unknown[]) {
+          mirror = await lease.writeEffectLedger(authority, commands);
+          return mirror;
+        },
+      }),
+    });
+    const operationId = '50000000-0000-4000-8000-000000000021';
+    await capabilities.code.repository.runExclusive({
+      effectBoundary: {
+        boundaryId: '30000000-0000-4000-8000-000000000023',
+        runtimeSessionId:
+          '40000000-0000-4000-8000-000000000024',
+        turnId: 1,
+        callId: 'coder:question',
+        roleId: 'coder',
+        sourceStateId: 'implementing',
+        sourceOutcomeSchema: { type: 'object' },
+        dispositions: ['unchanged', 'deferred'],
+        correctionBudget: { limit: 1, spent: false },
+      },
+      operation: async () => undefined,
+      completeEffectBoundary: async () => ({
+        finalText: 'May I continue?',
+        deferred: {
+          operationId,
+          pendingQuestion: {
+            questionId: 'question-1',
+            asker: { kind: 'role', roleId: 'coder' },
+            question: 'May I continue?',
+          },
+          playerContinuation: { v: 1, playerId: 'dev.coder' },
+        },
+      }),
+    });
+    const checkpointRecord = await lease.settle({
+      attemptId: secondId,
+      unresolvedEffects: [],
+      snapshot: {
+        ...settled.snapshot,
+        effectLedger: mirror,
+      },
+    });
+    await lease.beginTurn({
+      input: 'yes, but from the wrong checkpoint',
+      attemptId: thirdId,
+      attemptedExecutionProjection:
+        checkpointRecord.lastAppliedExecutionProjection,
+    });
+    const expectedOperation = mirror.logicalOperations[0];
+    await capabilities.code.effectLedger.writeAhead([
+      {
+        kind: 'replace-logical-operations',
+        replacements: [
+          {
+            expected: expectedOperation,
+            next: {
+              ...expectedOperation,
+              checkpointRestorationEligible: true,
+            },
+          },
+        ],
+      },
+    ]);
+    const beforeRetry = await lease.read();
+    expect(beforeRetry.effectLedger.boundaries).toEqual(
+      beforeRetry.snapshot.effectLedger.boundaries,
+    );
+    expect(beforeRetry.effectLedger.logicalOperations).not.toEqual(
+      beforeRetry.snapshot.effectLedger.logicalOperations,
+    );
+    await lease.release();
+    const beforeBytes = await readFile(
+      join(sessionsDir, `${firstId}.json`),
+      'utf8',
+    );
+
+    const captainFactory = vi.fn(scriptedCaptainRuntime([], { action: 'recover' }));
+    const retried = await headlessHarness(
+      ['run', '--session', firstId, '--retry-uncertain'],
+      {
+        sessionsDir,
+        userConfigPath: first.configPath,
+        entryTransform: promoteEntry,
+        createAttemptId: () => fourthId,
+        createCaptainRuntime: captainFactory,
+      },
+    );
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainFactory).toHaveBeenCalledOnce();
+    expect(retried.events).toEqual([]);
+    const recovered = await store.read(firstId);
+    expect(recovered.state).toBe('settled');
+    expect(recovered.snapshot.mode).toBe('chat');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
+    expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
+    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
+  });
+
+  it('settles changed evidence inside the old checkpoint without replay', async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-prefix-park-'));
+    tempDirs.push(stateRoot);
+    const sessionsDir = join(stateRoot, 'sessions');
+    const repositoryCwd = await initHeadlessTestRepository(
+      'playbook-prefix-park-repo-',
+    );
+    const promoteEntry = (entry: any) => ({
+      ...entry,
+      artifactSchema: 3,
+      runtimeProfile: { kind: 'bespoke', artifactSchema: 3 },
+    });
+    const first = await headlessHarness(['run', 'settle baseline'], {
+      sessionsDir,
+      entryTransform: promoteEntry,
+      createLogicalSessionId: () => firstId,
+      cwd: repositoryCwd,
+    });
+    expect(first.result.code, first.stderr).toBe(0);
+
+    const store = createCaptainSessionStore({ sessionsDir });
+    const lease = await store.acquire(firstId);
+    const settled = await lease.read();
+    await lease.beginTurn({
+      input: 'establish incomplete checkpoint',
+      attemptId: secondId,
+      attemptedExecutionProjection:
+        settled.lastAppliedExecutionProjection,
+    });
+    let mirror = (await lease.read()).effectLedger;
+    const capabilities = await createRepositoryEffectCapabilities({
+      cwd: settled.cwd,
+      catalog: settled.structuralProjection.catalog,
+      sessionId: firstId,
+      sessionLease: lease,
+      createWriteAhead: () => ({
+        snapshot: () => mirror,
+        async writeAhead(authority: unknown, commands: unknown[]) {
+          mirror = await lease.writeEffectLedger(authority, commands);
+          return mirror;
+        },
+      }),
+    });
+    const baseline = await capabilities.code.repository.observe();
+    await capabilities.code.effectLedger.writeAhead([
+      {
+        kind: 'start-boundaries',
+        boundaries: [
+          {
+            boundaryId: '30000000-0000-4000-8000-000000000033',
+            playbookId: 'code',
+            runtimeSessionId:
+              '40000000-0000-4000-8000-000000000034',
+            turnId: 1,
+            callId: 'coder:checkpoint',
+            roleId: 'coder',
+            sourceStateId: 'implementing',
+            sourceOutcomeSchema: { type: 'object' },
+            dispositions: ['unchanged'],
+            canonicalWorktree:
+              capabilities.code.authority.canonicalWorktree,
+            baseline,
+            correctionBudget: { limit: 1, spent: false },
+          },
+        ],
+      },
+    ]);
+    const checkpointRecord = await lease.settle({
+      attemptId: secondId,
+      unresolvedEffects: [],
+      snapshot: { ...settled.snapshot, effectLedger: mirror },
+    });
+    await lease.beginTurn({
+      input: 'must not replay changed checkpoint',
+      attemptId: thirdId,
+      attemptedExecutionProjection:
+        checkpointRecord.lastAppliedExecutionProjection,
+    });
+    const incomplete = mirror.boundaries[0];
+    await capabilities.code.effectLedger.writeAhead([
+      {
+        kind: 'replace-boundaries',
+        replacements: [
+          {
+            expected: incomplete,
+            next: {
+              ...incomplete,
+              after: baseline,
+              physicalReceipt: {
+                classification: 'unchanged',
+                baseline,
+                after: baseline,
+              },
+            },
+          },
+        ],
+      },
+    ]);
+    await lease.release();
+    const beforeBytes = await readFile(
+      join(sessionsDir, `${firstId}.json`),
+      'utf8',
+    );
+
+    const captainFactory = vi.fn(scriptedCaptainRuntime([], { action: 'recover' }));
+    const retried = await headlessHarness(
+      ['run', '--session', firstId, '--retry-uncertain'],
+      {
+        sessionsDir,
+        userConfigPath: first.configPath,
+        entryTransform: promoteEntry,
+        createAttemptId: () => fourthId,
+        createCaptainRuntime: captainFactory,
+      },
+    );
+    expect(retried.result.code, retried.stderr).toBe(0);
+    expect(captainFactory).toHaveBeenCalledOnce();
+    expect(retried.events).toEqual([]);
+    const recovered = await store.read(firstId);
+    expect(recovered.state).toBe('settled');
+    expect(recovered.snapshot.mode).toBe('chat');
+    expect(recovered.snapshot.lastSettlementStatus).toBe('ok');
+    expect(JSON.stringify(recovered.snapshot.journal)).toContain('exact stopping point was not saved');
+    expect(await readFile(join(sessionsDir, `${firstId}.json`), 'utf8')).not.toBe(beforeBytes);
+  });
+
+  it('restores the attempted tuning without rerunning its input', async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), 'playbook-retuned-retry-'));
     tempDirs.push(stateRoot);
     const sessionsDir = join(stateRoot, 'sessions');
@@ -2003,10 +4578,14 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     const baselineA = first.result.record.lastAppliedExecutionProjection;
     const overlayB = await writeConfig(
       [
-        'captain: { model: captain-B }',
+        'captain: { model: captain-B, fastMode: true }',
         'players:',
-        '  dev.coder: { model: coder-B }',
-        '  dev.reviewer: { model: reviewer-B }',
+        '  dev.coder: { model: coder-B, fastMode: false }',
+        '  dev.reviewer: { model: reviewer-B, fastMode: true }',
+        'playbooks:',
+        '  code:',
+        '    roles:',
+        '      coder: { player: dev.coder, fastMode: true }',
         '',
       ].join('\n'),
     );
@@ -2046,10 +4625,10 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(failed.result.code).toBe(2);
     expect(failed.stdout).toBe('');
     expect(hostB).toMatchObject({
-      captainConfig: { model: 'captain-B' },
+      captainConfig: { model: 'captain-B', fastMode: true },
       players: [
-        { id: 'dev.coder', model: 'coder-B' },
-        { id: 'dev.reviewer', model: 'reviewer-B' },
+        { id: 'dev.coder', model: 'coder-B', fastMode: false },
+        { id: 'dev.reviewer', model: 'reviewer-B', fastMode: true },
       ],
     });
     expect(markerB.lastAppliedExecutionProjection).toEqual(baselineA);
@@ -2058,17 +4637,25 @@ describe('durable Captain continuation (PBCLI-24)', () => {
       attemptId: secondId,
       attemptNumber: 1,
       attemptedExecutionProjection: {
-        captain: { model: { kind: 'value', value: 'captain-B' } },
+        captain: {
+          model: { kind: 'value', value: 'captain-B' },
+          fastMode: true,
+        },
         players: [
           {
             id: 'dev.coder',
             model: { kind: 'value', value: 'coder-B' },
+            fastMode: false,
           },
           {
             id: 'dev.reviewer',
             model: { kind: 'value', value: 'reviewer-B' },
+            fastMode: true,
           },
         ],
+        catalog: {
+          code: { roles: { coder: { fastMode: true } } },
+        },
       },
     });
     const attemptedB = markerB.uncertain.attemptedExecutionProjection;
@@ -2076,9 +4663,13 @@ describe('durable Captain continuation (PBCLI-24)', () => {
 
     const configC = await writeConfig(
       sharedConfig()
-        .replace('captain-model', 'captain-C')
-        .replace('coder-model', 'coder-C')
-        .replace('reviewer-model', 'reviewer-C'),
+        .replace('captain-model }', 'captain-C, fastMode: false }')
+        .replace('coder-model }', 'coder-C, fastMode: true }')
+        .replace('reviewer-model }', 'reviewer-C, fastMode: false }')
+        .replace(
+          'roles: { coder: dev.coder }',
+          'roles: { coder: { player: dev.coder, fastMode: false } }',
+        ),
     );
     let retryHost: any;
     const retried = await headlessHarness(
@@ -2095,12 +4686,12 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     );
 
     expect(retried.result.code).toBe(0);
-    expect(retried.inputs).toEqual([attemptedInput]);
+    expect(retried.inputs).toEqual([]);
     expect(retryHost).toMatchObject({
-      captainConfig: { model: 'captain-B' },
+      captainConfig: { model: 'captain-B', fastMode: true },
       players: [
-        { id: 'dev.coder', model: 'coder-B' },
-        { id: 'dev.reviewer', model: 'reviewer-B' },
+        { id: 'dev.coder', model: 'coder-B', fastMode: false },
+        { id: 'dev.reviewer', model: 'reviewer-B', fastMode: true },
       ],
     });
     expect(retried.result.config).toEqual(attemptedB);
@@ -2231,7 +4822,7 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(calls).toEqual({ stdin: 0, load: 0, probe: 0, host: 0 });
     expect(await readFile(path, 'utf8')).toBe(settledBytes);
 
-    const freshFailed = await headlessHarness(['run', 'never settled'], {
+    const freshFailed = await headlessHarness(['run', 'fresh turn-zero crash'], {
       sessionsDir,
       createLogicalSessionId: () => secondId,
       createAttemptId: () => thirdId,
@@ -2272,9 +4863,74 @@ describe('durable Captain continuation (PBCLI-24)', () => {
     expect(freshDiscarded.result.code).toBe(0);
     expect(freshDiscarded.stdout).toBe('');
     expect(freshCalls).toEqual({ stdin: 0, load: 0, probe: 0, host: 0 });
-    await expect(
-      readFile(join(sessionsDir, `${secondId}.json`), 'utf8'),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(
+      JSON.parse(
+        await readFile(join(sessionsDir, `${secondId}.json`), 'utf8'),
+      ),
+    ).toMatchObject({
+      state: 'settled',
+      snapshot: { sequences: { turn: 0 } },
+      retainedGenerations: {},
+    });
+
+    const settledTurnZero = JSON.parse(
+      await readFile(join(sessionsDir, `${secondId}.json`), 'utf8'),
+    );
+    const {
+      retainedGenerations: _retainedGenerations,
+      ...legacyNeverSettled
+    } = settledTurnZero;
+    const legacyMarkedAt = '2026-08-11T20:59:00.000Z';
+    const legacyPath = join(sessionsDir, `${fourthId}.json`);
+    await writeFile(
+      legacyPath,
+      `${JSON.stringify({
+        ...legacyNeverSettled,
+        state: 'uncertain',
+        sessionId: fourthId,
+        createdAt: legacyMarkedAt,
+        updatedAt: legacyMarkedAt,
+        uncertain: {
+          baseUpdatedAt: null,
+          input: 'legacy never-settled turn',
+          attemptId: thirdId,
+          attemptNumber: 1,
+          markedAt: legacyMarkedAt,
+          attemptedExecutionProjection:
+            settledTurnZero.lastAppliedExecutionProjection,
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const legacyCalls = { stdin: 0, load: 0, probe: 0, host: 0 };
+    const legacyDiscarded = await headlessHarness(
+      ['run', '--session', fourthId, '--discard-uncertain'],
+      {
+        sessionsDir,
+        readStdin: async () => {
+          legacyCalls.stdin += 1;
+          return 'must not read';
+        },
+        loadModule: async () => {
+          legacyCalls.load += 1;
+          throw new Error('must not import');
+        },
+        probeAdapterSdk: async () => {
+          legacyCalls.probe += 1;
+          return false;
+        },
+        createHostRuntime: async () => {
+          legacyCalls.host += 1;
+          throw new Error('must not host');
+        },
+      },
+    );
+    expect(legacyDiscarded.result.code).toBe(0);
+    expect(legacyDiscarded.stdout).toBe('');
+    expect(legacyCalls).toEqual({ stdin: 0, load: 0, probe: 0, host: 0 });
+    await expect(readFile(legacyPath, 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('rejects a concurrent writer while the first turn owns the session lease', async () => {
@@ -2618,7 +5274,8 @@ const active = {
 };
 export default {
   id: 'fixture', command: 'fixture', intent: 'filesystem fixture',
-  artifactSchema: 2,
+  artifactSchema: 3,
+  runtimeProfile: { kind: 'bespoke', artifactSchema: 3 },
   requiredRoleIds: [], validateOptions(value) { return value; },
   concurrentRoleSets: [],
   createRuntime() {
@@ -2696,28 +5353,53 @@ describe('configured engine provisioning parity (PBCLI-38/48)', () => {
       queueMicrotask(() => child.emit('exit', 0, null));
       return child;
     };
+    const interactiveStateRoot = await mkdtemp(
+      join(tmpdir(), 'playbook-engine-interactive-state-'),
+    );
+    tempDirs.push(interactiveStateRoot);
     const launched = await runPlaybookCli({
       argv: [],
       userConfigPath: interactive.configPath,
       env: { ANTHROPIC_API_KEY: 'a' },
       hostRoots: roots,
+      sessionsDir: join(interactiveStateRoot, 'sessions'),
       probeAdapterSdk: async () => true,
       tmuxPlayBin: '/tmp/tmux-play.js',
       spawn,
       createLogicalSessionId: () =>
         '90000000-0000-4000-8000-000000000001',
-      launchManagedTmuxPlay: async ({ sessionId }: { sessionId: string }) => {
+      launchManagedTmuxPlay: async (options: any) => {
         spawnCalls.push(true);
+        const workDir = await mkdtemp(
+          join(tmpdir(), 'playbook-engine-managed-work-'),
+        );
+        const coordinationDir = await mkdtemp(
+          join(tmpdir(), 'playbook-engine-managed-coordination-'),
+        );
+        tempDirs.push(workDir, coordinationDir);
+        await options.createSessionCommand({
+          sessionId: options.sessionId,
+          cwd: options.cwd,
+          workDir,
+          workDirOwnedByLauncher: true,
+          readinessPath: join(coordinationDir, 'status.json'),
+          inputGatePath: join(coordinationDir, 'input-ready'),
+          inputActivePath: join(coordinationDir, 'input-active'),
+          shutdownRequestPath: join(coordinationDir, 'shutdown-request'),
+          shutdownCompletePath: join(coordinationDir, 'shutdown-complete'),
+        });
         return {
-          sessionId,
+          sessionId: options.sessionId,
+          workDir,
           async attach() {},
           async cancel() {},
         };
       },
+      publishManagedReadinessWitness: async () => {},
       stdout: writer(),
       stderr: interactiveErr,
     });
-    expect(launched.code).toBe(0);
+    expect(launched.code, interactiveErr.text()).toBe(0);
     expect(spawnCalls).toHaveLength(1);
     expect(interactiveErr.text()).toContain('playbook: provisioned');
 
@@ -2753,5 +5435,374 @@ describe('configured engine provisioning parity (PBCLI-38/48)', () => {
         ),
       ).toBe(roots['@sublang/playbook']);
     }
+  });
+});
+
+
+describe('portable CLI provider hints', () => {
+  it.each(['missing', 'rejected', 'ambiguous'] as const)(
+    'continues a saved Captain with a %s local hint safely', async (mode) => {
+      const root = await mkdtemp(join(tmpdir(), 'playbook-cli-hints-'));
+      tempDirs.push(root);
+      const sessionsDir = join(root, 'sessions');
+      const id = '95000000-0000-4000-8000-000000000011';
+      const initial = await headlessHarness(['run', 'remember the original task'], {
+        sessionsDir, createLogicalSessionId: () => id, createCaptainRuntime: undefined,
+      });
+      expect(initial.result.code, initial.stderr).toBe(0);
+      const hintPath = join(sessionsDir, `${id}.hints.json`);
+      const hints = JSON.parse(await readFile(hintPath, 'utf8'));
+      expect(hints.captain.kind).toBe('pinned');
+      const priorRecords = await readReplayEntries(sessionsDir, id);
+      if (mode === 'missing') await rm(hintPath);
+      else FakeAdapter.failure = mode;
+      const callOffset = FakeAdapter.calls.length;
+      const continued = await headlessHarness(['run', '--session', id, 'continue safely'], {
+        sessionsDir, userConfigPath: initial.configPath, createCaptainRuntime: undefined,
+      });
+      expect(continued.result.code, continued.stderr).toBe(0);
+      const calls = FakeAdapter.calls.slice(callOffset);
+      expect(calls.map(({ resume }) => resume)).toEqual(
+        mode === 'missing' ? [undefined] : mode === 'rejected' ? [hints.captain.token, undefined] : [hints.captain.token],
+      );
+      if (mode !== 'ambiguous') expect(calls.at(-1)?.prompt).toContain('remember the original task');
+      const manifest = JSON.parse(await readFile(join(sessionsDir, `${id}.json`), 'utf8'));
+      expect(manifest.schemaVersion).toBe(7);
+      expect(manifest.snapshot.captain.conversation).toEqual({ kind: 'needsSeeding' });
+      expect(JSON.stringify(manifest)).not.toContain(hints.captain.token);
+      const resets = (await readReplayEntries(sessionsDir, id)).slice(priorRecords.length)
+        .filter(({ record }: any) => record.type === 'continuity_reset').map(({ record }: any) => ({ participantId: record.participantId, reason: record.reason }));
+      expect(resets).toEqual(mode === 'ambiguous' ? [] : [{ participantId: 'captain', reason: `${mode}_hint` }]);
+    },
+  );
+});
+
+// DR-062: the Boss's own uncommitted work is context for the call that runs on
+// it. One real repository, the real CODE artifact, and a scripted Coder that
+// commits the Boss's modified file together with its own new one.
+class CarriedChangesAdapter implements AgentAdapter {
+  static repositoryCwd = '';
+  static calls: string[] = [];
+  static commits = 0;
+  readonly agent = 'claude-code';
+
+  async *run(
+    prompt: string,
+    options?: AgentOptions,
+  ): AsyncGenerator<AgentEvent, void, void> {
+    CarriedChangesAdapter.calls.push(prompt);
+    let result: string;
+    if (prompt.includes('This is hidden control work.')) {
+      result = JSON.stringify({ guard: 'directCommit' });
+    } else if (prompt.includes('compose closing reply')) {
+      result = 'The coding phase is committed.';
+    } else if (prompt.includes('compose conversational reply')) {
+      result = 'Captain acknowledged the message.';
+    } else {
+      const cwd = CarriedChangesAdapter.repositoryCwd;
+      await writeFile(join(cwd, 'feature.txt'), 'new work\n', 'utf8');
+      await execFileAsync('git', ['add', '--all'], { cwd });
+      await execFileAsync(
+        'git',
+        [
+          '-c',
+          'commit.gpgsign=false',
+          'commit',
+          '--quiet',
+          '-m',
+          'carry the Boss dirt with the new work',
+        ],
+        { cwd },
+      );
+      CarriedChangesAdapter.commits += 1;
+      result = 'Committed the change, including tracked.txt.';
+    }
+    yield createEvent(
+      'done',
+      this.agent,
+      {
+        status: 'success',
+        result,
+        resumeToken: `token:${CarriedChangesAdapter.calls.length}`,
+        usage: { toolUses: 0 },
+        durationMs: 1,
+      },
+      `transport:${CarriedChangesAdapter.calls.length}`,
+    );
+  }
+
+  async isAvailable() {
+    return true;
+  }
+}
+
+function approvingReviewEntry() {
+  return {
+    id: 'review',
+    command: 'review',
+    intent: 'approve the phase without findings',
+    artifactSchema: 3 as const,
+    runtimeProfile: { kind: 'bespoke', artifactSchema: 3 } as const,
+    requiredRoleIds: ['coder', 'reviewer'],
+    concurrentRoleSets: [] as const,
+    validateOptions: (value: unknown) => value,
+    createRuntime(): PlaybookRuntime {
+      let state = activeState();
+      let turns = 0;
+      return {
+        retainedGenerationMetadata: { unfinishedFinalStateIds: [] },
+        async init() {},
+        async restore(_session, snapshot) {
+          state = snapshot.state;
+          turns = snapshot.sequences.turn;
+        },
+        exportSnapshot() {
+          return {
+            schemaVersion: 4,
+            playbookId: 'review',
+            machine: { value: state.value, status: state.status },
+            roleResumeTokens: {},
+            sequences: {
+              trace: 0,
+              turn: turns,
+              judgeCall: 0,
+              playerCall: 0,
+              playbookCall: 0,
+              captainCall: 0,
+            },
+            state,
+            pendingBossQuestions: [],
+            effectLedger: emptyPlaybookEffectLedger(),
+          } as PlaybookRuntimeSnapshot;
+        },
+        async handleBossInput() {
+          turns += 1;
+          state = terminalState();
+          return {
+            outcome: 'terminal' as const,
+            state,
+            output: {
+              noUnsettledFindings: true,
+              evaluatedRevision: 'review-rev',
+            },
+          };
+        },
+        async resumePlaybookCall() {
+          return { outcome: 'no-action' as const, state };
+        },
+        async dispose() {},
+      };
+    },
+  };
+}
+
+describe('pre-existing changes carried by a real commit (DR-062)', () => {
+  it('tells the Coder about the Boss dirt and reports what the commit carried', async () => {
+    const repositoryCwd = await initHeadlessTestRepository(
+      'playbook-carried-pre-existing-',
+    );
+    // The Boss's own uncommitted edit, present before the run begins.
+    await writeFile(
+      join(repositoryCwd, 'tracked.txt'),
+      'baseline\nboss edit\n',
+      'utf8',
+    );
+    CarriedChangesAdapter.repositoryCwd = repositoryCwd;
+    CarriedChangesAdapter.calls = [];
+    CarriedChangesAdapter.commits = 0;
+    const codePlaybookRegistryEntry = (
+      await import(new URL('./code.registry.js', import.meta.url).href)
+    ).default;
+    const reviewEntry = approvingReviewEntry();
+    const inputs: string[] = [];
+
+    const out = await headlessHarness(['run', '/code carry the boss dirt'], {
+      cwd: repositoryCwd,
+      loadModule: async (specifier: string) => {
+        if (specifier === 'mod://code') {
+          return { default: codePlaybookRegistryEntry };
+        }
+        if (specifier === 'mod://review') return { default: reviewEntry };
+        throw new Error(`no module ${specifier}`);
+      },
+      adapterImports: Object.fromEntries(
+        ['claude', 'codex', 'gemini', 'kimi', 'opencode'].map((adapter) => [
+          adapter,
+          async () => CarriedChangesAdapter,
+        ]),
+      ) as any,
+      createCaptainRuntime: scriptedCaptainRuntime(inputs, {
+        action: 'start',
+        playbookId: 'code',
+      }),
+    });
+
+    expect(out.result.code, out.stderr).toBe(0);
+    expect(CarriedChangesAdapter.commits).toBe(1);
+    const commitOid = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], {
+        cwd: repositoryCwd,
+        encoding: 'utf8',
+      })
+    ).stdout.trim();
+
+    // The call ran on the Boss's tree and settled, with nothing unresolved.
+    const receipts = out.result.record.effectLedger.boundaries.map(
+      (boundary: any) => boundary.physicalReceipt,
+    );
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      classification: 'one-descendant-commit',
+      commitOid,
+      preExisting: { absorbed: ['tracked.txt'], altered: [], lost: [] },
+    });
+    expect(out.result.record.unresolvedEffects).toEqual([]);
+    expect(out.result.snapshot.mode).not.toContain('parked');
+
+    // The Coder was told about the Boss's change before it decided anything.
+    const coderPrompt = CarriedChangesAdapter.calls.find(
+      (prompt) =>
+        !prompt.includes('This is hidden control work.') &&
+        !prompt.includes('compose closing reply') &&
+        !prompt.includes('compose conversational reply'),
+    );
+    expect(coderPrompt).toBeDefined();
+    expect(coderPrompt).toContain(
+      '> Uncommitted changes present before this call, belonging to the Boss:',
+    );
+    expect(coderPrompt).toContain('> - modified: tracked.txt');
+    expect(coderPrompt).not.toContain('feature.txt');
+    expect(coderPrompt!.trimEnd().endsWith(
+      "> Leave them exactly as they are unless the task or the Boss's request requires building on them; never revert or delete them; when you commit any of them, name them in your final report.",
+    )).toBe(true);
+
+    // The Boss reads the provenance from this turn's own reply.
+    expect(out.stdout).toContain(
+      `Pre-existing changes carried by commit ${commitOid}:`,
+    );
+    expect(out.stdout).toContain('- absorbed as found: tracked.txt');
+    expect(out.stdout).toContain(
+      'These changes were uncommitted before the step.',
+    );
+    expect(out.stdout).not.toContain('feature.txt');
+  });
+});
+
+// DR-063: one real repository, the real CODE artifact, and a scripted Coder
+// that commits its work and leaves a stray file beside it. The receipt proves
+// the residue, so the run parks and explains itself without a model composing
+// the explanation.
+class ResidualCommitAdapter implements AgentAdapter {
+  static repositoryCwd = '';
+  static calls: string[] = [];
+  readonly agent = 'claude-code';
+
+  async *run(
+    prompt: string,
+    _options?: AgentOptions,
+  ): AsyncGenerator<AgentEvent, void, void> {
+    ResidualCommitAdapter.calls.push(prompt);
+    let result: string;
+    if (prompt.includes('This is hidden control work.')) {
+      result = JSON.stringify({ guard: 'directCommit' });
+    } else if (prompt.includes('compose closing reply')) {
+      result = 'The coding phase is done.';
+    } else if (prompt.includes('compose conversational reply')) {
+      result = 'Captain acknowledged the message.';
+    } else {
+      const cwd = ResidualCommitAdapter.repositoryCwd;
+      await writeFile(join(cwd, 'feature.txt'), 'new work\n', 'utf8');
+      await execFileAsync('git', ['add', 'feature.txt'], { cwd });
+      await execFileAsync(
+        'git',
+        [
+          '-c',
+          'commit.gpgsign=false',
+          'commit',
+          '--quiet',
+          '-m',
+          'commit the feature',
+        ],
+        { cwd },
+      );
+      // The residue: written after the commit and never carried by it.
+      await writeFile(join(cwd, 'stray.txt'), 'left behind\n', 'utf8');
+      result = 'Committed the change.';
+    }
+    yield createEvent(
+      'done',
+      this.agent,
+      {
+        status: 'success',
+        result,
+        resumeToken: `token:${ResidualCommitAdapter.calls.length}`,
+        usage: { toolUses: 0 },
+        durationMs: 1,
+      },
+      `transport:${ResidualCommitAdapter.calls.length}`,
+    );
+  }
+
+  async isAvailable() {
+    return true;
+  }
+}
+
+describe('a parked failure explains itself (DR-063)', () => {
+  it('names the residual commit and marks reconciliation a no-op', async () => {
+    const repositoryCwd = await initHeadlessTestRepository(
+      'playbook-residual-commit-',
+    );
+    ResidualCommitAdapter.repositoryCwd = repositoryCwd;
+    ResidualCommitAdapter.calls = [];
+    const codePlaybookRegistryEntry = (
+      await import(new URL('./code.registry.js', import.meta.url).href)
+    ).default;
+    const reviewEntry = approvingReviewEntry();
+    const inputs: string[] = [];
+
+    const out = await headlessHarness(['run', '/code leave a stray file'], {
+      cwd: repositoryCwd,
+      loadModule: async (specifier: string) => {
+        if (specifier === 'mod://code') {
+          return { default: codePlaybookRegistryEntry };
+        }
+        if (specifier === 'mod://review') return { default: reviewEntry };
+        throw new Error(`no module ${specifier}`);
+      },
+      adapterImports: Object.fromEntries(
+        ['claude', 'codex', 'gemini', 'kimi', 'opencode'].map((adapter) => [
+          adapter,
+          async () => ResidualCommitAdapter,
+        ]),
+      ) as any,
+      createCaptainRuntime: scriptedCaptainRuntime(inputs, {
+        action: 'start',
+        playbookId: 'code',
+      }),
+    });
+
+    expect(out.result.code, out.stderr).toBe(0);
+    const receipts = out.result.record.effectLedger.boundaries.map(
+      (boundary: any) => boundary.physicalReceipt,
+    );
+    expect(receipts[0]).toMatchObject({
+      classification: 'observation-ambiguous',
+    });
+    expect(out.result.record.unresolvedEffects).not.toEqual([]);
+
+    // The cause names the path the commit left behind, and every advertised
+    // control says what running it would do.
+    expect(out.stdout).toContain(
+      "Failure: the step's commit left changes uncommitted: stray.txt.",
+    );
+    expect(out.stdout).toContain('Controls:');
+    expect(out.stdout).toContain(
+      '- Retry unresolved effect reconciliation (no-op: nothing has changed since it failed)',
+    );
+    expect(out.stdout).toContain(
+      '- Abandon unresolved workflow attempt (ready)',
+    );
+    expect(out.stdout).toContain('- Stop /code (ready)');
   });
 });

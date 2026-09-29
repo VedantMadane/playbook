@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { codingMachine, type CodingContext } from './code.fsm.js';
+import { codeMachine, type CodeContext } from './code.fsm.js';
 import {
   enumerateAwaitBossReply,
   enumerateNestedPlaybookStates,
@@ -11,21 +11,21 @@ import {
   enumerateRootEvents,
 } from './code.fsm.introspect.js';
 
-const CONTEXT: CodingContext = {
+const CONTEXT: CodeContext = {
   runResults: 'unit tests passed',
   callerInput: 'Implement the intent.',
-  coderOutput: 'Committed.\nCommit: abc123',
-  latestCommit: 'abc123',
+  coderOutput: 'Committed the requested change.',
+  codeCommit: 'abc123',
   irNumber: '040',
   irTask: 'Implement task 1.',
 };
 
 describe('CODE FSM introspection', () => {
   it('enumerates the two Coder states with exact GEARS identity', () => {
-    const states = enumeratePlayerStates(codingMachine);
+    const states = enumeratePlayerStates(codeMachine);
     expect(states.map(({ stateId, sourceItem }) => ({ stateId, sourceItem }))).toEqual([
-      { stateId: 'runFirstPhase', sourceItem: 'CODE-1' },
-      { stateId: 'runIrTask', sourceItem: 'CODE-3' },
+      { stateId: 'firstPhase', sourceItem: 'CODE-1' },
+      { stateId: 'irTaskPhase', sourceItem: 'CODE-3' },
     ]);
     expect(states.map((state) => state.getInput(CONTEXT).role)).toEqual([
       'coder',
@@ -34,39 +34,43 @@ describe('CODE FSM introspection', () => {
   });
 
   it('enumerates both literal REVIEW calls and their exact inputs', () => {
-    const states = enumerateNestedPlaybookStates(codingMachine);
+    const states = enumerateNestedPlaybookStates(codeMachine);
     expect(states.map(({ stateId, sourceItem }) => ({ stateId, sourceItem }))).toEqual([
-      { stateId: 'reviewFirstCommit', sourceItem: 'CODE-2' },
-      { stateId: 'reviewIrTask', sourceItem: 'CODE-4' },
+      { stateId: 'reviewNewIntentPhase', sourceItem: 'CODE-2' },
+      { stateId: 'reviewIrTaskPhase', sourceItem: 'CODE-4' },
     ]);
     expect(states.map((state) => state.getInput(CONTEXT))).toEqual([
       {
-        stateId: 'reviewFirstCommit',
+        stateId: 'reviewNewIntentPhase',
         sourceItem: 'CODE-2',
         playbookId: 'review',
         text:
-          '> Initial intent: Implement the intent.\n' +
-          '> Coder output: Committed.\n> Commit: abc123',
+          '> Original intent: Implement the intent.\n' +
+          '> Review scope: the commit abc123 from this coding phase and its resulting repository state.\n' +
+          '> Coder output: Committed the requested change.',
       },
       {
-        stateId: 'reviewIrTask',
+        stateId: 'reviewIrTaskPhase',
         sourceItem: 'CODE-4',
         playbookId: 'review',
         text:
-          '> IR task: Implement task 1.\n' +
-          '> Coder output: Committed.\n> Commit: abc123',
+          '> Original intent: Implement the intent.\n' +
+          '> Review scope: the commit abc123 from this coding phase and its resulting repository state.\n' +
+          '> Coder output: Committed the requested change.\n' +
+          '\n' +
+          '> Current IR task: Implement task 1.',
       },
     ]);
   });
 
   it('exposes one entry, empty-reply failure, and two resume arms', () => {
-    expect(enumerateRootEvents(codingMachine)).toEqual({
-      startCode: { target: 'runFirstPhase' },
+    expect(enumerateRootEvents(codeMachine)).toEqual({
+      startCode: { target: 'firstPhase' },
     });
     expect(
-      enumerateAwaitBossReply(codingMachine).bossReplyTransitions.map(
+      enumerateAwaitBossReply(codeMachine).bossReplyTransitions.map(
         ({ target }) => target,
       ),
-    ).toEqual(['failed', 'runFirstPhase', 'runIrTask']);
+    ).toEqual(['failed', 'firstPhase', 'irTaskPhase']);
   });
 });

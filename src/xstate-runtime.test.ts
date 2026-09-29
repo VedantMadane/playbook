@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
+import { createHash } from 'node:crypto';
 import { createActor, createMachine, setup, toPromise } from 'xstate';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -15,13 +16,18 @@ import type {
 } from './runtime.js';
 import {
   activePlaybookStateMetadata,
+  assertPlaybookEffectLedger,
   assertPlaybookRuntimeSnapshot,
   assertJsonSafe,
   combineAbortSignals,
   createNestedPlaybookBridge,
+  emptyPlaybookEffectLedger,
+  isPlaybookEffectLedgerMonotonicExtension,
   NestedPlaybookCallError,
   normalizeError,
   normalizePlaybookSnapshot,
+  PlaybookSemanticCandidateStructureError,
+  reconcilePlaybookSemanticEvidence,
   registerPlaybookAbortCleanup,
   snapshotJsonValue,
   snapshotPlaybookSession,
@@ -49,6 +55,48 @@ const RESTORED_CALL: PlaybookSuspendedCall = {
   turnId: 3,
 };
 
+const EFFECT_BASELINE = {
+  worktree: '/repo',
+  gitDir: '/repo/.git',
+  head: '1'.repeat(40),
+  projection: {},
+  projectionDigest:
+    'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+};
+
+function effectObservation(
+  projection: Record<string, JsonValue>,
+  head = '1'.repeat(40),
+) {
+  return {
+    worktree: '/repo',
+    gitDir: '/repo/.git',
+    head,
+    projection,
+    projectionDigest: `sha256:${createHash('sha256')
+      .update(JSON.stringify(projection))
+      .digest('hex')}`,
+  };
+}
+
+const EFFECT_BOUNDARY = {
+  sequence: 1,
+  boundaryId: '10000000-0000-4000-8000-000000000001',
+  attemptId: '10000000-0000-4000-8000-000000000002',
+  attemptNumber: 1,
+  playbookId: 'code',
+  runtimeSessionId: '10000000-0000-4000-8000-000000000003',
+  turnId: 1,
+  callId: 'player-1',
+  roleId: 'coder',
+  sourceStateId: 'run-coder',
+  sourceOutcomeSchema: { type: 'object' },
+  dispositions: ['unchanged'],
+  canonicalWorktree: { worktree: '/repo', gitDir: '/repo/.git' },
+  baseline: EFFECT_BASELINE,
+  correctionBudget: { limit: 1, spent: false },
+};
+
 function runtimeSnapshot(
   suspendedCall?: PlaybookSuspendedCall,
 ): PlaybookRuntimeSnapshot {
@@ -73,9 +121,10 @@ function runtimeSnapshot(
       stateId,
     },
     pendingBossQuestions: [],
+    effectLedger: emptyPlaybookEffectLedger(),
   };
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     ...fields,
     ...(suspendedCall === undefined
       ? {}
@@ -296,31 +345,161 @@ describe('public XState snapshot normalization', () => {
 });
 
 describe('runtime snapshot schema validation', () => {
-  it('accepts schema 3 and rejects released legacy schemas', () => {
-    const source = runtimeSnapshot(RESTORED_CALL);
+  it('accepts schema 4 and rejects released legacy schemas', () => {
+    const source = runtimeSnapshot({
+      ...RESTORED_CALL,
+      effectBoundaryPrefixSequence: 0,
+    });
     const restored = assertPlaybookRuntimeSnapshot(source, 'parent', {
       allowSuspendedCall: true,
     });
     expect(restored).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       suspendedCall: RESTORED_CALL,
     });
     expect(Object.isFrozen(restored)).toBe(true);
     expect(Object.isFrozen(restored.suspendedCall)).toBe(true);
+    expect(restored.suspendedCall?.effectBoundaryPrefixSequence).toBe(0);
 
     (source.sequences as { turn: number }).turn = 99;
     (source.suspendedCall as { text: string }).text = 'mutated';
     expect(restored.sequences.turn).toBe(3);
     expect(restored.suspendedCall?.text).toBe(INPUT.text);
 
-    for (const schemaVersion of [1, 2]) {
+    for (const schemaVersion of [1, 2, 3]) {
       expect(() =>
         assertPlaybookRuntimeSnapshot(
           { ...runtimeSnapshot(), schemaVersion },
           'parent',
         ),
-      ).toThrow('expected 3');
+      ).toThrow('expected 4');
     }
+  });
+
+  it('validates detached retained-effect lineage and reconciliation evidence', () => {
+    const checkpoint = {
+      schemaVersion: 1 as const,
+      revision: 0,
+      boundaries: [],
+      logicalOperations: [],
+    };
+    const effectLedger = {
+      schemaVersion: 1 as const,
+      revision: 1,
+      boundaries: [EFFECT_BOUNDARY],
+      logicalOperations: [],
+    };
+    const source = {
+      ...runtimeSnapshot(),
+      effectLedger,
+      retainedEffectSourceSessionId: EFFECT_BOUNDARY.runtimeSessionId,
+      retainedEffectReconciliation: {
+        sourceSessionId: EFFECT_BOUNDARY.runtimeSessionId,
+        checkpoint,
+      },
+    };
+
+    const restored = assertPlaybookRuntimeSnapshot(source, 'parent');
+    expect(restored.retainedEffectSourceSessionId).toBe(
+      EFFECT_BOUNDARY.runtimeSessionId,
+    );
+    expect(restored.retainedEffectReconciliation).toEqual({
+      sourceSessionId: EFFECT_BOUNDARY.runtimeSessionId,
+      checkpoint,
+    });
+    expect(Object.isFrozen(restored.retainedEffectReconciliation)).toBe(true);
+    expect(
+      Object.isFrozen(restored.retainedEffectReconciliation?.checkpoint),
+    ).toBe(true);
+
+    (source.retainedEffectReconciliation.checkpoint as { revision: number })
+      .revision = 99;
+    expect(restored.retainedEffectReconciliation?.checkpoint.revision).toBe(0);
+    (source.retainedEffectReconciliation.checkpoint as { revision: number })
+      .revision = 0;
+
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...runtimeSnapshot(),
+          retainedEffectSourceSessionId: EFFECT_BOUNDARY.runtimeSessionId,
+        },
+        'parent',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...runtimeSnapshot(),
+          effectLedger,
+          retainedEffectReconciliation: {
+            sourceSessionId: EFFECT_BOUNDARY.runtimeSessionId,
+            checkpoint,
+          },
+        },
+        'parent',
+      ),
+    ).toThrow('must equal retainedEffectSourceSessionId');
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...source,
+          retainedEffectSourceSessionId:
+            '20000000-0000-4000-8000-000000000001',
+        },
+        'parent',
+      ),
+    ).toThrow('must equal retainedEffectSourceSessionId');
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...source,
+          retainedEffectReconciliation: {
+            ...source.retainedEffectReconciliation,
+            checkpoint: {
+              ...effectLedger,
+              boundaries: [
+                {
+                  ...EFFECT_BOUNDARY,
+                  boundaryId: '20000000-0000-4000-8000-000000000001',
+                  after: EFFECT_BASELINE,
+                  physicalReceipt: {
+                    classification: 'unchanged',
+                    baseline: EFFECT_BASELINE,
+                    after: EFFECT_BASELINE,
+                  },
+                },
+              ],
+            },
+          },
+        },
+        'parent',
+      ),
+    ).toThrow('is not a monotonic prefix');
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...source,
+          retainedEffectReconciliation: {
+            ...source.retainedEffectReconciliation,
+            checkpoint: effectLedger,
+          },
+        },
+        'parent',
+      ),
+    ).toThrow('contains an incomplete physical boundary');
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...source,
+          retainedEffectReconciliation: {
+            ...source.retainedEffectReconciliation,
+            internal: true,
+          },
+        },
+        'parent',
+      ),
+    ).toThrow('internal is not a declared property');
   });
 
   it('fails closed unless suspended-call restoration is explicit', () => {
@@ -335,6 +514,11 @@ describe('runtime snapshot schema validation', () => {
 
   it.each([
     ['zero turn owner', { ...RESTORED_CALL, turnId: 0 }, 'positive integer'],
+    [
+      'negative effect prefix',
+      { ...RESTORED_CALL, effectBoundaryPrefixSequence: -1 },
+      'integer greater than or equal to 0',
+    ],
     [
       'future turn owner',
       { ...RESTORED_CALL, turnId: 4 },
@@ -363,6 +547,27 @@ describe('runtime snapshot schema validation', () => {
         allowSuspendedCall: true,
       }),
     ).toThrow('sequences.playbookCall greater than zero');
+
+    const futureEffectPrefix = runtimeSnapshot({
+      ...RESTORED_CALL,
+      effectBoundaryPrefixSequence: 1,
+    });
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(futureEffectPrefix, 'parent', {
+        allowSuspendedCall: true,
+      }),
+    ).toThrow('effectBoundaryPrefixSequence exceeds the effect ledger');
+
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        runtimeSnapshot({
+          ...RESTORED_CALL,
+          effectBoundaryPrefixSequence: null,
+        }),
+        'parent',
+        { allowSuspendedCall: true },
+      ),
+    ).not.toThrow();
 
     const wrongState = runtimeSnapshot(RESTORED_CALL);
     (wrongState.state.tags as string[])[0] = 'playbook.parked';
@@ -412,6 +617,12 @@ describe('runtime snapshot schema validation', () => {
       ),
     ).toThrow('runtime snapshot.internal is not a declared property');
 
+    const { effectLedger: _effectLedger, ...withoutEffectLedger } =
+      runtimeSnapshot();
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(withoutEffectLedger, 'parent'),
+    ).toThrow('runtime snapshot effectLedger');
+
     const sequenceExtra = runtimeSnapshot();
     (sequenceExtra.sequences as Record<string, unknown>).internal = true;
     expect(() =>
@@ -439,11 +650,1417 @@ describe('runtime snapshot schema validation', () => {
       'runtime snapshot pendingBossQuestions[0].internal is not a declared property',
     );
   });
+
+  it('binds a failed replay attempt to its exact effect-ledger suffix', () => {
+    const effectLedger = {
+      schemaVersion: 1 as const,
+      revision: 1,
+      boundaries: [EFFECT_BOUNDARY],
+      logicalOperations: [],
+    };
+    const failedSnapshot = {
+      ...runtimeSnapshot(),
+      machine: { status: 'active', value: 'failed' },
+      state: {
+        value: 'failed',
+        activeStateIds: ['failed'],
+        tags: ['playbook.parked'],
+        status: 'active' as const,
+        quiescent: true,
+        stateId: 'failed',
+      },
+      effectLedger,
+      failedEffectAttempt: {
+        boundaryPrefix: 0,
+        attemptId: EFFECT_BOUNDARY.attemptId,
+      },
+    };
+
+    const restored = assertPlaybookRuntimeSnapshot(failedSnapshot, 'parent');
+    expect(restored.failedEffectAttempt).toEqual({
+      boundaryPrefix: 0,
+      attemptId: EFFECT_BOUNDARY.attemptId,
+    });
+    expect(Object.isFrozen(restored.failedEffectAttempt)).toBe(true);
+
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...failedSnapshot,
+          failedEffectAttempt: { boundaryPrefix: 1, attemptId: null },
+        },
+        'parent',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...failedSnapshot,
+          failedEffectAttempt: { boundaryPrefix: 0, attemptId: null },
+        },
+        'parent',
+      ),
+    ).toThrow('null attemptId requires an empty causal suffix');
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...failedSnapshot,
+          failedEffectAttempt: {
+            boundaryPrefix: 0,
+            attemptId: '20000000-0000-4000-8000-000000000001',
+          },
+        },
+        'parent',
+      ),
+    ).toThrow('does not match its causal ledger suffix');
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...failedSnapshot,
+          state: runtimeSnapshot().state,
+        },
+        'parent',
+      ),
+    ).toThrow('requires the failed state');
+    expect(() =>
+      assertPlaybookRuntimeSnapshot(
+        {
+          ...failedSnapshot,
+          failedEffectAttempt: {
+            boundaryPrefix: 0,
+            attemptId: EFFECT_BOUNDARY.attemptId,
+            internal: true,
+          },
+        },
+        'parent',
+      ),
+    ).toThrow('internal is not a declared property');
+  });
 });
 
-describe('DR-032 schema-3 runtime boundaries', () => {
-  const schema3Snapshot = () => ({
-    schemaVersion: 3,
+describe('effect-ledger schema validation', () => {
+  it('detaches and freezes an exact ledger with ordered cross-references', () => {
+    const operationId = '10000000-0000-4000-8000-000000000004';
+    const source = {
+      schemaVersion: 1,
+      revision: 2,
+      boundaries: [{ ...EFFECT_BOUNDARY, logicalOperationId: operationId }],
+      logicalOperations: [
+        {
+          sequence: 1,
+          operationId,
+          playbookId: 'code',
+          runtimeSessionId: EFFECT_BOUNDARY.runtimeSessionId,
+          boundaryIds: [EFFECT_BOUNDARY.boundaryId],
+          originalBaseline: EFFECT_BASELINE,
+          checkpointRestorationEligible: false,
+        },
+      ],
+    };
+
+    const ledger = assertPlaybookEffectLedger(source);
+
+    expect(ledger).toEqual(source);
+    expect(Object.isFrozen(ledger)).toBe(true);
+    expect(Object.isFrozen(ledger.boundaries[0])).toBe(true);
+    expect(Object.isFrozen(ledger.logicalOperations[0])).toBe(true);
+    source.boundaries[0]!.callId = 'mutated';
+    expect(ledger.boundaries[0]!.callId).toBe('player-1');
+  });
+
+  it('rejects malformed identities, dangling references, and unknown data', () => {
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [],
+        logicalOperations: [],
+      }),
+    ).toThrow('revision must be zero');
+
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 0,
+        boundaries: [EFFECT_BOUNDARY],
+        logicalOperations: [],
+      }),
+    ).toThrow('revision must be zero');
+
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            boundaryId: 'not-a-uuid',
+          },
+        ],
+        logicalOperations: [],
+      }),
+    ).toThrow('must be a canonical UUID');
+
+    const missingOutcomeSchema = { ...EFFECT_BOUNDARY } as Record<
+      string,
+      unknown
+    >;
+    delete missingOutcomeSchema.sourceOutcomeSchema;
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [missingOutcomeSchema],
+        logicalOperations: [],
+      }),
+    ).toThrow('sourceOutcomeSchema is required');
+
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            baseline: {
+              ...EFFECT_BASELINE,
+              projectionDigest: `sha256:${'0'.repeat(64)}`,
+            },
+          },
+        ],
+        logicalOperations: [],
+      }),
+    ).toThrow('projectionDigest does not match its projection');
+
+    const commitAfter = {
+      ...EFFECT_BASELINE,
+      head: '2'.repeat(40),
+    };
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            after: commitAfter,
+            physicalReceipt: {
+              classification: 'one-descendant-commit',
+              baseline: EFFECT_BASELINE,
+              after: commitAfter,
+              commitOid: commitAfter.head,
+            },
+          },
+        ],
+        logicalOperations: [],
+      }),
+    ).toThrow('classification is incompatible with its boundary dispositions');
+
+    const reorderedBaseline = effectObservation({ a: 1, b: 2 });
+    const reorderedAfter = effectObservation({ b: 2, a: 1 }, '2'.repeat(40));
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            dispositions: ['one-descendant-commit'],
+            baseline: reorderedBaseline,
+            after: reorderedAfter,
+            physicalReceipt: {
+              classification: 'one-descendant-commit',
+              baseline: reorderedBaseline,
+              after: reorderedAfter,
+              commitOid: reorderedAfter.head,
+            },
+          },
+        ],
+        logicalOperations: [],
+      }),
+    ).toThrow('must change HEAD and account for its complete baseline projection');
+
+    const dirtyBaseline = effectObservation({
+      'dirty.txt': { kind: 'tracked', identity: 'before' },
+    });
+    const dirtyAfter = effectObservation({
+      'dirty.txt': { kind: 'tracked', identity: 'after' },
+    });
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            dispositions: ['one-descendant-commit'],
+            baseline: dirtyBaseline,
+            after: dirtyAfter,
+            physicalReceipt: {
+              classification: 'worktree-only-change',
+              baseline: dirtyBaseline,
+              after: dirtyAfter,
+            },
+          },
+        ],
+        logicalOperations: [],
+      }),
+    ).toThrow(
+      'must preserve HEAD, change the projection, and account for every altered baseline entry',
+    );
+
+    const orderedDirtyBaseline = effectObservation({
+      'dirty.txt': { kind: 'tracked', mode: '100644' },
+    });
+    const reorderedDirtyAfter = effectObservation({
+      'dirty.txt': { mode: '100644', kind: 'tracked' },
+      'new.txt': { kind: 'untracked' },
+    });
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            dispositions: ['one-descendant-commit'],
+            baseline: orderedDirtyBaseline,
+            after: reorderedDirtyAfter,
+            physicalReceipt: {
+              classification: 'worktree-only-change',
+              baseline: orderedDirtyBaseline,
+              after: reorderedDirtyAfter,
+            },
+          },
+        ],
+        logicalOperations: [],
+      }),
+    ).toThrow(
+      'must preserve HEAD, change the projection, and account for every altered baseline entry',
+    );
+
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            after: EFFECT_BASELINE,
+            physicalReceipt: {
+              classification: 'concurrent-or-foreign-change',
+              baseline: EFFECT_BASELINE,
+              after: EFFECT_BASELINE,
+            },
+          },
+        ],
+        logicalOperations: [],
+      }),
+    ).toThrow('classification is incompatible with its boundary dispositions');
+
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            after: EFFECT_BASELINE,
+            physicalReceipt: {
+              classification: 'observation-ambiguous',
+              baseline: EFFECT_BASELINE,
+              after: EFFECT_BASELINE,
+            },
+          },
+        ],
+        logicalOperations: [],
+      }),
+    ).toThrow('requires an absent or changed after observation');
+
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            logicalOperationId: '10000000-0000-4000-8000-000000000004',
+          },
+        ],
+        logicalOperations: [],
+      }),
+    ).toThrow('logicalOperationId is dangling');
+
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            logicalOperationId: '10000000-0000-4000-8000-000000000004',
+          },
+          {
+            ...EFFECT_BOUNDARY,
+            sequence: 2,
+            boundaryId: '10000000-0000-4000-8000-000000000005',
+            attemptId: '10000000-0000-4000-8000-000000000006',
+            logicalOperationId: '10000000-0000-4000-8000-000000000004',
+          },
+        ],
+        logicalOperations: [
+          {
+            sequence: 1,
+            operationId: '10000000-0000-4000-8000-000000000004',
+            playbookId: 'code',
+            runtimeSessionId: EFFECT_BOUNDARY.runtimeSessionId,
+            boundaryIds: ['10000000-0000-4000-8000-000000000005'],
+            originalBaseline: EFFECT_BASELINE,
+            checkpointRestorationEligible: false,
+          },
+        ],
+      }),
+    ).toThrow('has no reciprocal operation reference');
+
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [{ ...EFFECT_BOUNDARY, after: EFFECT_BASELINE }],
+        logicalOperations: [],
+      }),
+    ).toThrow('after requires an atomic physicalReceipt');
+
+    const operationId = '10000000-0000-4000-8000-000000000004';
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 1,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            after: EFFECT_BASELINE,
+            physicalReceipt: {
+              classification: 'unchanged',
+              baseline: EFFECT_BASELINE,
+              after: EFFECT_BASELINE,
+            },
+            logicalOperationId: operationId,
+          },
+        ],
+        logicalOperations: [
+          {
+            sequence: 1,
+            operationId,
+            playbookId: 'code',
+            runtimeSessionId: EFFECT_BOUNDARY.runtimeSessionId,
+            boundaryIds: [EFFECT_BOUNDARY.boundaryId],
+            originalBaseline: EFFECT_BASELINE,
+            checkpoint: EFFECT_BASELINE,
+            checkpointRestorationEligible: false,
+          },
+        ],
+      }),
+    ).toThrow('must be all present or all absent');
+
+    expect(() =>
+      assertPlaybookEffectLedger({
+        schemaVersion: 1,
+        revision: 0,
+        boundaries: [],
+        logicalOperations: [],
+        internal: true,
+      }),
+    ).toThrow('internal is not a declared property');
+  });
+
+  it('admits the pre-existing accounting only where it is lawful (DR-062)', () => {
+    const dirtyBaseline = effectObservation({
+      'boss.txt': { kind: 'untracked' },
+      'kept.txt': { kind: 'untracked' },
+    });
+    const commitAfter = effectObservation(
+      { 'kept.txt': { kind: 'untracked' } },
+      '2'.repeat(40),
+    );
+    const alteredAfter = effectObservation({
+      'boss.txt': { kind: 'untracked', identity: 'later' },
+      'kept.txt': { kind: 'untracked' },
+      'new.txt': { kind: 'untracked' },
+    });
+    const ledger = (physicalReceipt: JsonValue, after: JsonValue) => ({
+      schemaVersion: 1,
+      revision: 1,
+      boundaries: [
+        {
+          ...EFFECT_BOUNDARY,
+          dispositions: ['one-descendant-commit'],
+          baseline: dirtyBaseline,
+          after,
+          physicalReceipt,
+        },
+      ],
+      logicalOperations: [],
+    });
+    const commitReceipt = (preExisting?: JsonValue) => ({
+      classification: 'one-descendant-commit',
+      baseline: dirtyBaseline,
+      after: commitAfter,
+      commitOid: commitAfter.head,
+      ...(preExisting === undefined ? {} : { preExisting }),
+    });
+    const worktreeReceipt = (preExisting?: JsonValue) => ({
+      classification: 'worktree-only-change',
+      baseline: dirtyBaseline,
+      after: alteredAfter,
+      ...(preExisting === undefined ? {} : { preExisting }),
+    });
+
+    // An absorbed baseline entry proves the commit that carried it.
+    expect(
+      assertPlaybookEffectLedger(
+        ledger(
+          commitReceipt({ absorbed: ['boss.txt'], altered: [], lost: [] }),
+          commitAfter,
+        ),
+      ).boundaries[0]!.physicalReceipt!.preExisting,
+    ).toEqual({ absorbed: ['boss.txt'], altered: [], lost: [] });
+    expect(
+      assertPlaybookEffectLedger(
+        ledger(
+          commitReceipt({ absorbed: [], altered: ['boss.txt'], lost: [] }),
+          commitAfter,
+        ),
+      ).boundaries[0]!.physicalReceipt!.preExisting,
+    ).toEqual({ absorbed: [], altered: ['boss.txt'], lost: [] });
+    expect(
+      assertPlaybookEffectLedger(
+        ledger(
+          worktreeReceipt({ absorbed: [], altered: ['boss.txt'], lost: [] }),
+          alteredAfter,
+        ),
+      ).boundaries[0]!.physicalReceipt!.preExisting,
+    ).toEqual({ absorbed: [], altered: ['boss.txt'], lost: [] });
+    expect(
+      assertPlaybookEffectLedger(
+        ledger(
+          {
+            classification: 'observation-ambiguous',
+            baseline: dirtyBaseline,
+            after: alteredAfter,
+            preExisting: { absorbed: [], altered: [], lost: ['boss.txt'] },
+          },
+          alteredAfter,
+        ),
+      ).boundaries[0]!.physicalReceipt!.preExisting,
+    ).toEqual({ absorbed: [], altered: [], lost: ['boss.txt'] });
+
+    // A receipt stored before DR-062 carries no member and still validates.
+    const legacyAfter = effectObservation(
+      {
+        'boss.txt': { kind: 'untracked' },
+        'kept.txt': { kind: 'untracked' },
+        'new.txt': { kind: 'untracked' },
+      },
+      dirtyBaseline.head,
+    );
+    expect(
+      assertPlaybookEffectLedger(
+        ledger(
+          {
+            classification: 'worktree-only-change',
+            baseline: dirtyBaseline,
+            after: legacyAfter,
+          },
+          legacyAfter,
+        ),
+      ).boundaries[0]!.physicalReceipt,
+    ).not.toHaveProperty('preExisting');
+
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          {
+            classification: 'unchanged',
+            baseline: dirtyBaseline,
+            after: dirtyBaseline,
+            preExisting: { absorbed: [], altered: [], lost: ['boss.txt'] },
+          },
+          dirtyBaseline,
+        ),
+      ),
+    ).toThrow('preExisting is not permitted for unchanged');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          commitReceipt({ absorbed: [], altered: [], lost: [] }),
+          commitAfter,
+        ),
+      ),
+    ).toThrow('must name at least one baseline path');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(commitReceipt({ absorbed: ['boss.txt'] }), commitAfter),
+      ),
+    ).toThrow('altered must be an array of baseline paths');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          commitReceipt({
+            absorbed: ['boss.txt'],
+            altered: [],
+            lost: [],
+            carried: [],
+          }),
+          commitAfter,
+        ),
+      ),
+    ).toThrow('carried is not a declared property');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          worktreeReceipt({
+            absorbed: [],
+            altered: ['kept.txt', 'boss.txt'],
+            lost: [],
+          }),
+          alteredAfter,
+        ),
+      ),
+    ).toThrow('altered must be sorted and unique');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          worktreeReceipt({
+            absorbed: [],
+            altered: ['boss.txt', 'boss.txt'],
+            lost: [],
+          }),
+          alteredAfter,
+        ),
+      ),
+    ).toThrow('altered must be sorted and unique');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          commitReceipt({
+            absorbed: ['boss.txt'],
+            altered: ['boss.txt'],
+            lost: [],
+          }),
+          commitAfter,
+        ),
+      ),
+    ).toThrow('lists "boss.txt" twice');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          commitReceipt({ absorbed: ['absent.txt'], altered: [], lost: [] }),
+          commitAfter,
+        ),
+      ),
+    ).toThrow('names a path outside the baseline projection');
+
+    // The accounting and the two observations must agree exactly.
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          commitReceipt({ absorbed: [], altered: [], lost: ['boss.txt'] }),
+          commitAfter,
+        ),
+      ),
+    ).toThrow('must change HEAD and account for its complete baseline projection');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          commitReceipt({ absorbed: ['kept.txt'], altered: [], lost: [] }),
+          commitAfter,
+        ),
+      ),
+    ).toThrow('must change HEAD and account for its complete baseline projection');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(commitReceipt(), commitAfter),
+      ),
+    ).toThrow('must change HEAD and account for its complete baseline projection');
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          worktreeReceipt({ absorbed: ['boss.txt'], altered: [], lost: [] }),
+          alteredAfter,
+        ),
+      ),
+    ).toThrow(
+      'must preserve HEAD, change the projection, and account for every altered baseline entry',
+    );
+    expect(() =>
+      assertPlaybookEffectLedger(
+        ledger(
+          worktreeReceipt({ absorbed: [], altered: ['kept.txt'], lost: [] }),
+          alteredAfter,
+        ),
+      ),
+    ).toThrow(
+      'must preserve HEAD, change the projection, and account for every altered baseline entry',
+    );
+  });
+
+  it('admits only append-and-evidence monotonic extensions', () => {
+    const baseline = {
+      schemaVersion: 1,
+      revision: 1,
+      boundaries: [EFFECT_BOUNDARY],
+      logicalOperations: [],
+    };
+    const operationId = '10000000-0000-4000-8000-000000000004';
+    const current = {
+      schemaVersion: 1,
+      revision: 2,
+      boundaries: [
+        {
+          ...EFFECT_BOUNDARY,
+          finalText: 'Done.',
+          correctionBudget: { limit: 1, spent: true },
+          logicalOperationId: operationId,
+        },
+      ],
+      logicalOperations: [
+        {
+          sequence: 1,
+          operationId,
+          playbookId: 'code',
+          runtimeSessionId: EFFECT_BOUNDARY.runtimeSessionId,
+          boundaryIds: [EFFECT_BOUNDARY.boundaryId],
+          originalBaseline: EFFECT_BASELINE,
+          checkpointRestorationEligible: false,
+        },
+      ],
+    };
+
+    expect(isPlaybookEffectLedgerMonotonicExtension(baseline, current)).toBe(
+      true,
+    );
+    expect(isPlaybookEffectLedgerMonotonicExtension(current, baseline)).toBe(
+      false,
+    );
+    const bound = {
+      ...current,
+      revision: 3,
+      boundaries: [
+        {
+          ...current.boundaries[0],
+          after: EFFECT_BASELINE,
+          physicalReceipt: {
+            classification: 'unchanged',
+            baseline: EFFECT_BASELINE,
+            after: EFFECT_BASELINE,
+          },
+        },
+      ],
+      logicalOperations: [
+        {
+          ...current.logicalOperations[0],
+          checkpoint: EFFECT_BASELINE,
+          pendingQuestion: {
+            questionId: 'runFirstPhase',
+            asker: { kind: 'role', roleId: 'coder' },
+            question: 'Which target?',
+            sourceItem: 'CODE-1',
+          },
+          playerContinuation: { resumeToken: 'thread-1' },
+          checkpointRestorationEligible: true,
+        },
+      ],
+    };
+    const consumed = {
+      ...bound,
+      revision: 4,
+      logicalOperations: [current.logicalOperations[0]],
+    };
+    expect(isPlaybookEffectLedgerMonotonicExtension(current, bound)).toBe(true);
+    expect(isPlaybookEffectLedgerMonotonicExtension(bound, consumed)).toBe(
+      true,
+    );
+    expect(
+      isPlaybookEffectLedgerMonotonicExtension(current, {
+        ...current,
+        revision: 3,
+        boundaries: [
+          {
+            ...current.boundaries[0],
+            correctionBudget: { limit: 1, spent: false },
+          },
+        ],
+      }),
+    ).toBe(false);
+
+    const firstCandidate = { guard: 'complete' };
+    const correctedCandidate = { guard: 'complete', irNumber: '048' };
+    const spentCandidateLedger = {
+      ...baseline,
+      revision: 2,
+      boundaries: [
+        {
+          ...EFFECT_BOUNDARY,
+          semanticCandidate: firstCandidate,
+          correctionBudget: { limit: 1, spent: true },
+        },
+      ],
+    };
+    const unspentCandidateLedger = {
+      ...spentCandidateLedger,
+      boundaries: [
+        {
+          ...spentCandidateLedger.boundaries[0],
+          correctionBudget: { limit: 1, spent: false },
+        },
+      ],
+    };
+    const correctedCandidateLedger = {
+      ...spentCandidateLedger,
+      revision: 3,
+      boundaries: [
+        {
+          ...spentCandidateLedger.boundaries[0],
+          semanticCandidate: correctedCandidate,
+          initialSemanticCandidate: firstCandidate,
+        },
+      ],
+    };
+    expect(
+      isPlaybookEffectLedgerMonotonicExtension(
+        spentCandidateLedger,
+        correctedCandidateLedger,
+      ),
+    ).toBe(true);
+    expect(
+      isPlaybookEffectLedgerMonotonicExtension(
+        correctedCandidateLedger,
+        {
+          ...correctedCandidateLedger,
+          revision: 4,
+          boundaries: [
+            {
+              ...correctedCandidateLedger.boundaries[0],
+              semanticCandidate: { guard: 'complete', irNumber: '049' },
+            },
+          ],
+        },
+      ),
+    ).toBe(false);
+    expect(
+      isPlaybookEffectLedgerMonotonicExtension(spentCandidateLedger, {
+        ...correctedCandidateLedger,
+        boundaries: [
+          {
+            ...correctedCandidateLedger.boundaries[0],
+            initialSemanticCandidate: { guard: 'other' },
+          },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      isPlaybookEffectLedgerMonotonicExtension(baseline, {
+        ...baseline,
+        revision: 2,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            semanticCandidate: correctedCandidate,
+            initialSemanticCandidate: firstCandidate,
+            correctionBudget: { limit: 1, spent: true },
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isPlaybookEffectLedgerMonotonicExtension(
+        unspentCandidateLedger,
+        correctedCandidateLedger,
+      ),
+    ).toBe(true);
+    expect(
+      isPlaybookEffectLedgerMonotonicExtension(
+        {
+          ...baseline,
+          boundaries: [
+            {
+              ...EFFECT_BOUNDARY,
+              correctionBudget: { limit: 1, spent: true },
+            },
+          ],
+        },
+        correctedCandidateLedger,
+      ),
+    ).toBe(false);
+    expect(
+      isPlaybookEffectLedgerMonotonicExtension(spentCandidateLedger, {
+        ...spentCandidateLedger,
+        revision: 3,
+        boundaries: [
+          {
+            ...spentCandidateLedger.boundaries[0],
+            initialSemanticCandidate: { guard: 'other' },
+          },
+        ],
+      }),
+    ).toBe(false);
+    expect(() =>
+      assertPlaybookEffectLedger({
+        ...baseline,
+        revision: 2,
+        boundaries: [
+          {
+            ...EFFECT_BOUNDARY,
+            semanticCandidate: firstCandidate,
+            initialSemanticCandidate: { guard: 'other' },
+          },
+        ],
+      }),
+    ).toThrow('initialSemanticCandidate requires a spent budget');
+  });
+});
+
+describe('semantic outcome reconciliation', () => {
+  const outcomes = {
+    complete: {
+      fields: {
+        summary: 'presentation',
+        irNumber: 'semantic',
+        settledBy: 'runtime',
+      },
+      repositoryDisposition: 'unchanged',
+    },
+    committed: {
+      fields: { irTask: 'semantic', latestCommit: 'effect' },
+      repositoryDisposition: 'one-descendant-commit',
+    },
+    needsBossReply: {
+      fields: { question: 'presentation' },
+      repositoryDisposition: 'deferred',
+    },
+  } as const;
+
+  const unchangedReceipt = {
+    classification: 'unchanged',
+    baseline: EFFECT_BASELINE,
+    after: EFFECT_BASELINE,
+  } as const;
+
+  // An exclusively `unchanged` boundary: the only shape a
+  // `concurrent-or-foreign-change` receipt is admissible against (DR-040 §2).
+  const unchangedOnlyOutcomes = {
+    reviewed: {
+      fields: { verdict: 'semantic' },
+      repositoryDisposition: 'unchanged',
+    },
+  } as const;
+
+  it('assembles exact detached output without interpreting presentation prose', () => {
+    const semanticCandidate = { guard: 'complete', irNumber: '048' };
+    const runtimeFields = { settledBy: 'runtime-transition' };
+    const result = reconcilePlaybookSemanticEvidence({
+      outcomes,
+      semanticCandidate,
+      finalText: `  Completed at ${'f'.repeat(40)}.  `,
+      receipt: unchangedReceipt,
+      runtimeFields,
+    });
+
+    expect(result).toEqual({
+      status: 'resolved',
+      output: {
+        guard: 'complete',
+        summary: `Completed at ${'f'.repeat(40)}.`,
+        irNumber: '048',
+        settledBy: 'runtime-transition',
+      },
+      evidence: {
+        finalText: `  Completed at ${'f'.repeat(40)}.  `,
+        semanticCandidate: { guard: 'complete', irNumber: '048' },
+      },
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    if (result.status === 'unresolved') throw new Error('expected resolution');
+    expect(Object.isFrozen(result.output)).toBe(true);
+    expect(Object.isFrozen(result.evidence.semanticCandidate)).toBe(true);
+
+    semanticCandidate.irNumber = 'mutated';
+    runtimeFields.settledBy = 'mutated';
+    expect(result.output.irNumber).toBe('048');
+    expect(result.output.settledBy).toBe('runtime-transition');
+  });
+
+  it('takes commit identity only from a matching one-descendant receipt', () => {
+    const commit = '2'.repeat(40);
+    const result = reconcilePlaybookSemanticEvidence({
+      outcomes,
+      semanticCandidate: { guard: 'committed', irTask: 'task 9' },
+      finalText: `I claim ${'9'.repeat(40)}.`,
+      receipt: {
+        classification: 'one-descendant-commit',
+        baseline: EFFECT_BASELINE,
+        after: { ...EFFECT_BASELINE, head: commit },
+        commitOid: commit,
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: 'resolved',
+      output: {
+        guard: 'committed',
+        irTask: 'task 9',
+        latestCommit: commit,
+      },
+    });
+  });
+
+  it.each([
+    ['unchanged', unchangedReceipt],
+    [
+      'worktree-only-change',
+      {
+        classification: 'worktree-only-change',
+        baseline: EFFECT_BASELINE,
+        after: effectObservation({
+          'question.txt': { kind: 'untracked', identity: 'sha256:question' },
+        }),
+      },
+    ],
+  ] as const)(
+    'admits deferred output from a complete same-HEAD %s receipt',
+    (_classification, receipt) => {
+      const result = reconcilePlaybookSemanticEvidence({
+        outcomes,
+        semanticCandidate: { guard: 'needsBossReply' },
+        finalText: '  Which target should I update?  ',
+        receipt,
+      });
+
+      expect(result).toMatchObject({
+        status: 'deferred',
+        output: {
+          guard: 'needsBossReply',
+          question: 'Which target should I update?',
+        },
+      });
+    },
+  );
+
+  // DR-063 §1: an unresolved reconciliation carries a structured cause read
+  // from the disposition the accepted arm required and the receipt the host
+  // proved. Nothing here infers a repository fact; the receipt states it.
+  it.each([
+    [
+      'commit-missing',
+      'committed',
+      {
+        classification: 'worktree-only-change',
+        baseline: EFFECT_BASELINE,
+        after: effectObservation({
+          'src/b.ts': { kind: 'modified', identity: 'sha256:b' },
+          'src/a.ts': { kind: 'untracked', identity: 'sha256:a' },
+        }),
+      },
+      {
+        code: 'commit-missing',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'worktree-only-change',
+          baselineHead: '1'.repeat(40),
+          afterHead: '1'.repeat(40),
+          paths: { uncommitted: ['src/a.ts', 'src/b.ts'] },
+        },
+      },
+    ],
+    [
+      'commit-residual',
+      'committed',
+      {
+        classification: 'observation-ambiguous',
+        baseline: effectObservation({
+          'notes.md': { kind: 'modified', identity: 'sha256:notes' },
+        }),
+        after: effectObservation(
+          { 'stray.txt': { kind: 'untracked', identity: 'sha256:stray' } },
+          '2'.repeat(40),
+        ),
+        preExisting: { absorbed: [], altered: ['notes.md'], lost: [] },
+      },
+      {
+        code: 'commit-residual',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'observation-ambiguous',
+          baselineHead: '1'.repeat(40),
+          afterHead: '2'.repeat(40),
+          paths: { uncommitted: ['stray.txt'], altered: ['notes.md'] },
+        },
+      },
+    ],
+    [
+      'pre-existing-lost',
+      'committed',
+      {
+        classification: 'observation-ambiguous',
+        baseline: effectObservation({
+          'notes.md': { kind: 'modified', identity: 'sha256:notes' },
+        }),
+        after: effectObservation({}, '2'.repeat(40)),
+        preExisting: { absorbed: [], altered: [], lost: ['notes.md'] },
+      },
+      {
+        code: 'pre-existing-lost',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'observation-ambiguous',
+          baselineHead: '1'.repeat(40),
+          afterHead: '2'.repeat(40),
+          paths: { lost: ['notes.md'] },
+        },
+      },
+    ],
+    [
+      'commits-more-than-one',
+      'committed',
+      {
+        classification: 'multiple-commits',
+        baseline: EFFECT_BASELINE,
+        after: effectObservation({}, '3'.repeat(40)),
+      },
+      {
+        code: 'commits-more-than-one',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'multiple-commits',
+          baselineHead: '1'.repeat(40),
+          afterHead: '3'.repeat(40),
+        },
+      },
+    ],
+    [
+      'history-rewritten',
+      'committed',
+      {
+        classification: 'rewritten-or-non-descendant',
+        baseline: EFFECT_BASELINE,
+        after: effectObservation({}, '4'.repeat(40)),
+      },
+      {
+        code: 'history-rewritten',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'rewritten-or-non-descendant',
+          baselineHead: '1'.repeat(40),
+          afterHead: '4'.repeat(40),
+        },
+      },
+    ],
+    [
+      'foreign-change',
+      'unchanged-only',
+      {
+        classification: 'concurrent-or-foreign-change',
+        baseline: effectObservation({
+          'kept.ts': { kind: 'modified', identity: 'sha256:kept' },
+          'gone.ts': { kind: 'modified', identity: 'sha256:gone' },
+        }),
+        after: effectObservation({
+          'kept.ts': { kind: 'modified', identity: 'sha256:kept' },
+          'new.ts': { kind: 'untracked', identity: 'sha256:new' },
+        }),
+      },
+      {
+        code: 'foreign-change',
+        evidence: {
+          required: 'unchanged',
+          observed: 'concurrent-or-foreign-change',
+          baselineHead: '1'.repeat(40),
+          afterHead: '1'.repeat(40),
+          paths: { changed: ['gone.ts', 'new.ts'] },
+        },
+      },
+    ],
+    [
+      'observation-unstable',
+      'committed',
+      {
+        classification: 'observation-ambiguous',
+        baseline: EFFECT_BASELINE,
+      },
+      {
+        code: 'observation-unstable',
+        evidence: {
+          required: 'one-descendant-commit',
+          observed: 'observation-ambiguous',
+          baselineHead: '1'.repeat(40),
+        },
+      },
+    ],
+    [
+      'attribution-ambiguous',
+      'complete',
+      {
+        classification: 'observation-ambiguous',
+        baseline: EFFECT_BASELINE,
+        after: effectObservation({}, '5'.repeat(40)),
+      },
+      {
+        code: 'attribution-ambiguous',
+        evidence: {
+          required: 'unchanged',
+          observed: 'observation-ambiguous',
+          baselineHead: '1'.repeat(40),
+          afterHead: '5'.repeat(40),
+        },
+      },
+    ],
+  ] as const)(
+    'reads %s from the required disposition and the proved receipt',
+    (_code, guard, receipt, cause) => {
+      // A `concurrent-or-foreign-change` receipt is only admissible where every
+      // declared arm is `unchanged`, so that row carries its own outcome set.
+      const result = reconcilePlaybookSemanticEvidence({
+        outcomes: guard === 'unchanged-only' ? unchangedOnlyOutcomes : outcomes,
+        semanticCandidate:
+          guard === 'committed'
+            ? { guard: 'committed', irTask: 'task 9' }
+            : guard === 'unchanged-only'
+              ? { guard: 'reviewed', verdict: 'approved' }
+              : { guard: 'complete', irNumber: '048' },
+        finalText: 'Done.',
+        receipt,
+        ...(guard === 'complete'
+          ? { runtimeFields: { settledBy: 'runtime-transition' } }
+          : {}),
+      });
+      expect(result).toMatchObject({
+        status: 'unresolved',
+        reason: 'repository-disposition-mismatch',
+        cause,
+      });
+    },
+  );
+
+  it('bounds every cause path list to thirty-two and counts the rest', () => {
+    const projection = Object.fromEntries(
+      Array.from({ length: 40 }, (_, index) => [
+        `f${String(index).padStart(3, '0')}.ts`,
+        { kind: 'untracked', identity: `sha256:${index}` },
+      ]),
+    );
+    const result = reconcilePlaybookSemanticEvidence({
+      outcomes,
+      semanticCandidate: { guard: 'committed', irTask: 'task 9' },
+      finalText: 'Done.',
+      receipt: {
+        classification: 'worktree-only-change',
+        baseline: EFFECT_BASELINE,
+        after: effectObservation(projection),
+      },
+    });
+    if (result.status !== 'unresolved') throw new Error('expected unresolved');
+    expect(result.cause.code).toBe('commit-missing');
+    expect(result.cause.evidence.paths?.uncommitted).toHaveLength(32);
+    expect(result.cause.evidence.paths?.truncated).toBe(8);
+  });
+
+  // DR-063 §1: every other unresolved reason is a runtime defect carrying that
+  // reason, so a host never reads an unexplained failure.
+  it('names every non-repository reason a runtime defect', () => {
+    const base = {
+      outcomes,
+      semanticCandidate: { guard: 'complete', irNumber: '048' } as const,
+      finalText: 'Complete.',
+      receipt: unchangedReceipt,
+      runtimeFields: { settledBy: 'runtime-transition' },
+    };
+    for (const [input, reason] of [
+      [{ ...base, finalText: undefined }, 'missing-presentation-evidence'],
+      [{ ...base, receipt: undefined }, 'missing-repository-receipt'],
+      [
+        { ...base, receipt: { classification: 'unchanged' } },
+        'invalid-repository-receipt',
+      ],
+      [{ ...base, runtimeFields: undefined }, 'missing-runtime-evidence'],
+      [
+        {
+          ...base,
+          runtimeFields: {
+            settledBy: 'runtime-transition',
+            latestCommit: 'not effect evidence',
+          },
+        },
+        'inconsistent-runtime-evidence',
+      ],
+    ] as const) {
+      expect(reconcilePlaybookSemanticEvidence(input)).toMatchObject({
+        status: 'unresolved',
+        reason,
+        cause: { code: 'runtime-defect', evidence: { reason } },
+      });
+    }
+  });
+
+  it('parks missing, malformed, or disposition-inconsistent evidence', () => {
+    const candidate = { guard: 'complete', irNumber: '048' };
+    const base = {
+      outcomes,
+      semanticCandidate: candidate,
+      finalText: 'Complete.',
+      receipt: unchangedReceipt,
+      runtimeFields: { settledBy: 'runtime-transition' },
+    };
+    expect(
+      reconcilePlaybookSemanticEvidence({ ...base, finalText: undefined }),
+    ).toMatchObject({
+      status: 'unresolved',
+      reason: 'missing-presentation-evidence',
+    });
+    expect(
+      reconcilePlaybookSemanticEvidence({ ...base, receipt: undefined }),
+    ).toMatchObject({
+      status: 'unresolved',
+      reason: 'missing-repository-receipt',
+    });
+    expect(
+      reconcilePlaybookSemanticEvidence({
+        ...base,
+        receipt: { classification: 'unchanged' },
+      }),
+    ).toMatchObject({
+      status: 'unresolved',
+      reason: 'invalid-repository-receipt',
+    });
+    expect(
+      reconcilePlaybookSemanticEvidence({
+        ...base,
+        semanticCandidate: { guard: 'committed', irTask: 'task 9' },
+      }),
+    ).toMatchObject({
+      status: 'unresolved',
+      reason: 'repository-disposition-mismatch',
+    });
+    expect(
+      reconcilePlaybookSemanticEvidence({
+        ...base,
+        semanticCandidate: { guard: 'needsBossReply' },
+        receipt: {
+          classification: 'one-descendant-commit',
+          baseline: EFFECT_BASELINE,
+          after: { ...EFFECT_BASELINE, head: '2'.repeat(40) },
+          commitOid: '2'.repeat(40),
+        },
+      }),
+    ).toMatchObject({
+      status: 'unresolved',
+      reason: 'repository-disposition-mismatch',
+    });
+    expect(
+      reconcilePlaybookSemanticEvidence({ ...base, runtimeFields: undefined }),
+    ).toMatchObject({
+      status: 'unresolved',
+      reason: 'missing-runtime-evidence',
+    });
+    expect(
+      reconcilePlaybookSemanticEvidence({
+        ...base,
+        runtimeFields: {
+          settledBy: 'runtime-transition',
+          latestCommit: 'not effect evidence',
+        },
+      }),
+    ).toMatchObject({
+      status: 'unresolved',
+      reason: 'inconsistent-runtime-evidence',
+    });
+  });
+
+  it.each([
+    ['a non-object', 'complete'],
+    ['an unknown guard', { guard: 'unknown' }],
+    ['a missing semantic field', { guard: 'complete' }],
+    [
+      'a presentation-owned field',
+      { guard: 'needsBossReply', question: 'Injected by the judge.' },
+    ],
+    [
+      'an effect-owned field',
+      {
+        guard: 'committed',
+        irTask: 'task 9',
+        latestCommit: '2'.repeat(40),
+      },
+    ],
+    [
+      'a runtime-owned field',
+      {
+        guard: 'complete',
+        irNumber: '048',
+        settledBy: 'candidate',
+      },
+    ],
+    ['a non-string semantic field', { guard: 'complete', irNumber: 48 }],
+  ])('rejects %s as a structurally invalid candidate', (_label, candidate) => {
+    expect(() =>
+      reconcilePlaybookSemanticEvidence({
+        outcomes,
+        semanticCandidate: candidate,
+        finalText: 'Complete.',
+        receipt: unchangedReceipt,
+      }),
+    ).toThrow(PlaybookSemanticCandidateStructureError);
+  });
+
+  it('rejects accessor-backed semantic evidence before reading its value', () => {
+    const getter = vi.fn(() => '048');
+    const candidate = { guard: 'complete' } as Record<string, unknown>;
+    Object.defineProperty(candidate, 'irNumber', {
+      enumerable: true,
+      get: getter,
+    });
+
+    expect(() =>
+      reconcilePlaybookSemanticEvidence({
+        outcomes,
+        semanticCandidate: candidate,
+        finalText: 'Complete.',
+        receipt: unchangedReceipt,
+      }),
+    ).toThrow(PlaybookSemanticCandidateStructureError);
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it('rejects accessor-backed effect evidence before reading its value', () => {
+    const getter = vi.fn(() => '2'.repeat(40));
+    const receipt: Record<string, unknown> = {
+      classification: 'one-descendant-commit',
+      baseline: EFFECT_BASELINE,
+      after: { ...EFFECT_BASELINE, head: '2'.repeat(40) },
+    };
+    Object.defineProperty(receipt, 'commitOid', {
+      enumerable: true,
+      get: getter,
+    });
+
+    expect(
+      reconcilePlaybookSemanticEvidence({
+        outcomes,
+        semanticCandidate: { guard: 'committed', irTask: 'task 9' },
+        finalText: 'Committed.',
+        receipt,
+      }),
+    ).toMatchObject({
+      status: 'unresolved',
+      reason: 'invalid-repository-receipt',
+    });
+    expect(getter).not.toHaveBeenCalled();
+  });
+});
+
+describe('DR-032 schema-4 runtime boundaries', () => {
+  const schema4Snapshot = () => ({
+    schemaVersion: 4,
     playbookId: 'parent',
     machine: { status: 'active', value: 'await-boss' },
     roleResumeTokens: { coder: 'thread-1' },
@@ -470,13 +2087,14 @@ describe('DR-032 schema-3 runtime boundaries', () => {
         sourceItem: 'CODE-1',
       },
     ],
+    effectLedger: emptyPlaybookEffectLedger(),
   });
 
-  it('accepts only detached schema 3 with role tokens and discriminated askers', () => {
-    const source = schema3Snapshot();
+  it('accepts only detached schema 4 with role tokens and discriminated askers', () => {
+    const source = schema4Snapshot();
     const snapshot = assertPlaybookRuntimeSnapshot(source, 'parent');
     expect(snapshot).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       roleResumeTokens: { coder: 'thread-1' },
       pendingBossQuestions: [
         { asker: { kind: 'role', roleId: 'coder' } },
@@ -492,18 +2110,18 @@ describe('DR-032 schema-3 runtime boundaries', () => {
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot.pendingBossQuestions[0].asker)).toBe(true);
 
-    for (const schemaVersion of [1, 2]) {
+    for (const schemaVersion of [1, 2, 3]) {
       expect(() =>
         assertPlaybookRuntimeSnapshot(
-          { ...schema3Snapshot(), schemaVersion },
+          { ...schema4Snapshot(), schemaVersion },
           'parent',
         ),
-      ).toThrow('expected 3');
+      ).toThrow('expected 4');
     }
     expect(() =>
       assertPlaybookRuntimeSnapshot(
         {
-          ...schema3Snapshot(),
+          ...schema4Snapshot(),
           pendingBossQuestions: [
             {
               questionId: 'question-1',
@@ -615,6 +2233,7 @@ describe('abort signal composition', () => {
       'must be an AbortSignal',
     );
   });
+
 });
 
 describe('nested XState playbook call bridge', () => {
@@ -825,6 +2444,34 @@ describe('nested XState playbook call bridge', () => {
     // restore attempt may claim the authoritative child.
     expect(() => bridge.prepareRestore(RESTORED_CALL)).not.toThrow();
     await bridge.abortPending();
+    await bridge.dispose();
+  });
+
+  it('preserves null as an uncommitted restore abort reason', async () => {
+    const events: string[] = [];
+    const boundary = new AbortController();
+    const options = bridgeOptions(events, async () => ({
+      state: 'suspended',
+      childSessionId: 'must-not-open',
+    }));
+    options.getBoundarySignal = () => boundary.signal;
+    const bridge = createNestedPlaybookBridge(options);
+    bridge.prepareRestore(RESTORED_CALL);
+    const actor = createActor(bridge.actorLogic, { input: INPUT });
+    const completion = toPromise(actor).catch((error: unknown) => error);
+    actor.start();
+
+    boundary.abort(null);
+    expect(await completion).toBeNull();
+    let confirmationFailure: unknown = Symbol('no failure');
+    try {
+      bridge.confirmRestore();
+    } catch (error) {
+      confirmationFailure = error;
+    }
+    expect(confirmationFailure).toBeNull();
+    expect(events).toEqual([]);
+    expect(bridge.getPendingCall()).toBeUndefined();
     await bridge.dispose();
   });
 
@@ -1356,6 +3003,200 @@ describe('nested XState playbook call bridge', () => {
     ]);
   });
 
+  it('preserves null as an exact pre-aborted resume reason', async () => {
+    const events: string[] = [];
+    const bridge = createNestedPlaybookBridge(
+      bridgeOptions(events, async () => ({
+        state: 'suspended',
+        childSessionId: 'child-1',
+      })),
+    );
+    const actor = createActor(bridge.actorLogic, { input: INPUT });
+    const completion = toPromise(actor);
+    actor.start();
+    await pendingCall(bridge);
+
+    const cancelled = new AbortController();
+    cancelled.abort(null);
+    let resumeFailure: unknown = Symbol('no failure');
+    try {
+      await bridge.resume({
+        callId: 'call-1',
+        result: {
+          status: 'ok',
+          playbookId: 'review',
+          childSessionId: 'child-1',
+        },
+        signal: cancelled.signal,
+      });
+    } catch (error) {
+      resumeFailure = error;
+    }
+    expect(resumeFailure).toBeNull();
+    expect(bridge.getPendingCall()?.callId).toBe('call-1');
+
+    await bridge.resume({
+      callId: 'call-1',
+      result: {
+        status: 'ok',
+        playbookId: 'review',
+        childSessionId: 'child-1',
+        output: 'resumed',
+      },
+      signal: new AbortController().signal,
+    });
+    await expect(completion).resolves.toBe('resumed');
+    await bridge.dispose();
+  });
+
+  it('preserves null when aborting a suspended invocation', async () => {
+    const events: string[] = [];
+    let finished: PlaybookCallResult | undefined;
+    const options = bridgeOptions(events, async () => ({
+      state: 'suspended',
+      childSessionId: 'child-1',
+    }));
+    options.emitFinished = async (event) => {
+      finished = event.result;
+      events.push(`finished:${event.callId}:${event.result.status}`);
+    };
+    const bridge = createNestedPlaybookBridge(options);
+    const actor = createActor(bridge.actorLogic, { input: INPUT });
+    const completion = toPromise(actor);
+    actor.start();
+    await pendingCall(bridge);
+
+    await bridge.abortPending(null);
+    await expect(completion).rejects.toBeInstanceOf(NestedPlaybookCallError);
+    expect(finished).toMatchObject({
+      status: 'aborted',
+      error: { name: 'Error', message: 'null' },
+    });
+    expect(events.slice(-2)).toEqual(['finished:call-1:aborted', 'drain']);
+    await bridge.dispose();
+  });
+
+  it('retains invocation abort provenance while a fresh resume settles', async () => {
+    const events: string[] = [];
+    const invocation = new AbortController();
+    const resume = new AbortController();
+    const invocationReason = new Error('invocation cancelled');
+    const controlErrors: unknown[] = [];
+    const backgroundErrors: unknown[] = [];
+    let finishAborts:
+      | Parameters<NonNullable<NestedPlaybookBridgeOptions['emitFinished']>>[1]
+      | undefined;
+    const options = bridgeOptions(events, async () => ({
+      state: 'suspended',
+      childSessionId: 'child-1',
+    }));
+    options.getBoundarySignal = () => invocation.signal;
+    options.emitFinished = async (event, aborts) => {
+      events.push(`finished:${event.callId}:${event.result.status}`);
+      finishAborts = aborts;
+      invocation.abort(invocationReason);
+      throw invocationReason;
+    };
+    options.onControlPlaneError = (error) => controlErrors.push(error);
+    options.onBackgroundError = (error) => backgroundErrors.push(error);
+    const bridge = createNestedPlaybookBridge(options);
+    const actor = createActor(bridge.actorLogic, { input: INPUT });
+    const completion = toPromise(actor);
+    actor.start();
+    await pendingCall(bridge);
+
+    await expect(
+      bridge.resume({
+        callId: 'call-1',
+        result: {
+          status: 'ok',
+          playbookId: 'review',
+          childSessionId: 'child-1',
+        },
+        signal: resume.signal,
+      }),
+    ).rejects.toBe(invocationReason);
+    await expect(completion).rejects.toBe(invocationReason);
+
+    expect(
+      events.filter((event) => event.startsWith('finished:')),
+    ).toEqual(['finished:call-1:ok']);
+    expect(Object.isFrozen(finishAborts)).toBe(true);
+    expect(finishAborts?.isAbortReason(invocationReason)).toBe(true);
+    expect(finishAborts?.isAbortReason(new Error('invocation cancelled'))).toBe(
+      false,
+    );
+    expect(controlErrors).toEqual([]);
+    expect(backgroundErrors).toEqual([]);
+    await expect(bridge.dispose()).resolves.toBeUndefined();
+  });
+
+  it('does not carry a background abort rejection into the next call', async () => {
+    const events: string[] = [];
+    let boundary = new AbortController();
+    const firstReason = new Error('first invocation cancelled');
+    const backgroundErrors: unknown[] = [];
+    let actorSettlementAborts:
+      | Parameters<
+          NonNullable<NestedPlaybookBridgeOptions['bindActorSettlement']>
+        >[0]
+      | undefined;
+    const options = bridgeOptions(events, async (request) => ({
+      state: 'suspended',
+      childSessionId:
+        request.callId === 'call-1' ? 'child-1' : 'child-2',
+    }));
+    options.getBoundarySignal = () => boundary.signal;
+    options.bindActorSettlement = (aborts) => {
+      actorSettlementAborts = aborts;
+    };
+    options.emitFinished = async (event, aborts) => {
+      events.push(`finished:${event.callId}:${event.result.status}`);
+      if (event.callId === 'call-1') {
+        expect(aborts?.isAbortReason(firstReason)).toBe(true);
+        throw firstReason;
+      }
+    };
+    options.onBackgroundError = (error) => backgroundErrors.push(error);
+    const bridge = createNestedPlaybookBridge(options);
+    const first = createActor(bridge.actorLogic, { input: INPUT });
+    const firstCompletion = toPromise(first);
+    first.start();
+    await pendingCall(bridge);
+
+    boundary.abort(firstReason);
+    await expect(firstCompletion).rejects.toBe(firstReason);
+    await vi.waitFor(() => expect(bridge.getPendingCall()).toBeUndefined());
+    // The outer runtime consumes this one-shot provenance on the root
+    // transition driven by the rejected child promise actor.
+    expect(actorSettlementAborts?.isAbortReason(firstReason)).toBe(true);
+    actorSettlementAborts = undefined;
+
+    boundary = new AbortController();
+    const second = createActor(bridge.actorLogic, { input: INPUT });
+    const secondCompletion = toPromise(second);
+    second.start();
+    await pendingCall(bridge);
+    await bridge.resume({
+      callId: 'call-2',
+      result: {
+        status: 'ok',
+        playbookId: 'review',
+        childSessionId: 'child-2',
+        output: { clean: true },
+      },
+      signal: boundary.signal,
+    });
+    await expect(secondCompletion).resolves.toEqual({ clean: true });
+    expect(actorSettlementAborts?.isAbortReason(firstReason)).toBe(false);
+    expect(backgroundErrors).toEqual([]);
+    expect(events.filter((event) => event.startsWith('finished:'))).toEqual([
+      'finished:call-1:aborted',
+      'finished:call-2:ok',
+    ]);
+    await expect(bridge.dispose()).resolves.toBeUndefined();
+  });
+
   it('treats a resume that races invocation abort as aborted', async () => {
     const events: string[] = [];
     let bridge!: ReturnType<typeof createNestedPlaybookBridge>;
@@ -1580,6 +3421,76 @@ describe('nested XState playbook call bridge', () => {
     expect(events.slice(-2)).toEqual(['finished:call-1:error', 'drain']);
     expect(bridge.getPendingCall()).toBeUndefined();
   });
+
+  it.each([
+    ['all exact reasons', 'all-exact'],
+    ['one exact and one distinct reason', 'mixed'],
+    ['two distinct reasons', 'all-distinct'],
+  ] as const)(
+    'filters abort cleanup failures before aggregation: %s',
+    async (_label, mode) => {
+      const events: string[] = [];
+      const boundary = new AbortController();
+      const abortReason = new Error('Boss boundary cancelled');
+      const distinctA = new Error('first cleanup failed independently');
+      const distinctB = new Error('second cleanup failed independently');
+      const controlErrors: unknown[] = [];
+      const options = bridgeOptions(events, async (_request, signal) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            registerPlaybookAbortCleanup(
+              signal,
+              Promise.reject(
+                mode === 'all-distinct' ? distinctA : signal.reason,
+              ),
+            );
+            registerPlaybookAbortCleanup(
+              signal,
+              Promise.reject(
+                mode === 'all-exact' ? signal.reason : distinctB,
+              ),
+            );
+          },
+          { once: true },
+        );
+        return { state: 'suspended', childSessionId: 'child-1' };
+      });
+      options.getBoundarySignal = () => boundary.signal;
+      options.onControlPlaneError = (error) => controlErrors.push(error);
+      const bridge = createNestedPlaybookBridge(options);
+      const actor = createActor(bridge.actorLogic, { input: INPUT });
+      const completion = toPromise(actor);
+      actor.start();
+      await pendingCall(bridge);
+
+      boundary.abort(abortReason);
+      if (mode === 'mixed') {
+        await expect(completion).rejects.toBe(distinctB);
+        expect(controlErrors).toEqual([distinctB]);
+        expect(events.slice(-2)).toEqual(['finished:call-1:error', 'drain']);
+      } else if (mode === 'all-distinct') {
+        const failure = await completion.catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(AggregateError);
+        expect((failure as AggregateError).errors).toEqual([
+          distinctA,
+          distinctB,
+        ]);
+        expect(controlErrors).toEqual([failure]);
+        expect(events.slice(-2)).toEqual(['finished:call-1:error', 'drain']);
+      } else {
+        await expect(completion).rejects.toBeInstanceOf(
+          NestedPlaybookCallError,
+        );
+        expect(controlErrors).toEqual([]);
+        expect(events.slice(-2)).toEqual([
+          'finished:call-1:aborted',
+          'drain',
+        ]);
+      }
+      await expect(bridge.dispose()).resolves.toBeUndefined();
+    },
+  );
 
   it('aborts and drains disposal while the child is still opening', async () => {
     const events: string[] = [];

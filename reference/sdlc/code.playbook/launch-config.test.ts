@@ -24,12 +24,15 @@ function entry(
   requiredRoleIds: string[],
   command = id,
   concurrentRoleSets: string[][] = [],
+  artifactSchema = 3,
+  runtimeProfile: unknown = { kind: 'bespoke', artifactSchema },
 ) {
   return {
     id,
     command,
     intent: `${id} intent`,
-    artifactSchema: 2,
+    artifactSchema,
+    runtimeProfile,
     requiredRoleIds,
     concurrentRoleSets,
     validateOptions: () => ({}),
@@ -53,6 +56,16 @@ function oneRoleConfig() {
       code: { from: 'mod://code', roles: { coder: 'dev.coder' } },
     },
   };
+}
+
+async function writeSessionsConfig(configPath: string, sessions?: string) {
+  await mkdir(dirname(configPath), { recursive: true });
+  const source =
+    sessions === undefined
+      ? '{}\n'
+      : `sessions: ${JSON.stringify(sessions)}\n`;
+  await writeFile(configPath, source, 'utf8');
+  return source;
 }
 
 function structuralProjection(plan: any) {
@@ -93,6 +106,192 @@ function structuralProjection(plan: any) {
     ),
   };
 }
+
+describe('sessions locator bootstrap (PBCLI-78)', () => {
+  it('keeps the unset locator under Spex home', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'playbook-sessions-default-'));
+    tempDirs.push(root);
+    const configPath = join(root, 'config', 'playbook.config.yaml');
+    await writeSessionsConfig(configPath);
+
+    expect(
+      await launchConfig.resolveLaunchSessionsDir({
+        userConfigPath: configPath,
+        env: { SPEX_HOME: join(root, 'spex-home') },
+        homeDir: join(root, 'home'),
+      }),
+    ).toBe(join(root, 'spex-home', 'sessions'));
+    expect(
+      await launchConfig.resolveLaunchSessionsDir({
+        userConfigPath: configPath,
+        env: {},
+        homeDir: join(root, 'home'),
+      }),
+    ).toBe(
+      join(root, 'home', '.spex', 'sessions'),
+    );
+  });
+
+  it('expands only the current-user tilde forms', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'playbook-sessions-tilde-'));
+    tempDirs.push(root);
+    const configPath = join(root, 'config', 'playbook.config.yaml');
+    const homeDir = join(root, 'home');
+
+    await writeSessionsConfig(configPath, '~');
+    expect(
+      await launchConfig.resolveLaunchSessionsDir({
+        userConfigPath: configPath,
+        homeDir,
+      }),
+    ).toBe(homeDir);
+
+    await writeSessionsConfig(configPath, '~/shared/sessions');
+    expect(
+      await launchConfig.resolveLaunchSessionsDir({
+        userConfigPath: configPath,
+        homeDir,
+      }),
+    ).toBe(join(homeDir, 'shared', 'sessions'));
+
+    await writeSessionsConfig(configPath, '~//shared/sessions');
+    expect(
+      await launchConfig.resolveLaunchSessionsDir({
+        userConfigPath: configPath,
+        homeDir,
+      }),
+    ).toBe(join(homeDir, 'shared', 'sessions'));
+
+    for (const sessions of ['~peer', '~peer/sessions']) {
+      await writeSessionsConfig(configPath, sessions);
+      await expect(
+        Promise.resolve().then(() =>
+          launchConfig.resolveLaunchSessionsDir({
+            userConfigPath: configPath,
+            homeDir,
+          }),
+        ),
+      ).rejects.toThrow();
+    }
+  });
+
+  it(
+    'preserves absolute spelling and anchors every relative form to the primary config',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'playbook-sessions-paths-'));
+      tempDirs.push(root);
+      const configPath = join(root, 'config', 'playbook.config.yaml');
+      const primaryDir = dirname(configPath);
+      const absolute = `${root}/absolute/../sessions`;
+
+      await writeSessionsConfig(configPath, absolute);
+      expect(
+        await launchConfig.resolveLaunchSessionsDir({
+          userConfigPath: configPath,
+        }),
+      ).toBe(absolute);
+
+      for (const sessions of ['./dot-relative', 'bare-relative']) {
+        await writeSessionsConfig(configPath, sessions);
+        expect(
+          await launchConfig.resolveLaunchSessionsDir({
+            userConfigPath: configPath,
+          }),
+        ).toBe(join(primaryDir, sessions));
+      }
+    },
+  );
+
+  it(
+    'applies overlays in order from the primary anchor without rewriting inputs',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'playbook-sessions-overlay-'));
+      tempDirs.push(root);
+      const configPath = join(root, 'config', 'playbook.config.yaml');
+      const firstOverlayPath = join(root, 'overlays', 'first.yaml');
+      const lastOverlayPath = join(root, 'elsewhere', 'last.yaml');
+      const primary = await writeSessionsConfig(configPath, 'primary');
+      const firstOverlay = 'sessions: "first"\n';
+      const lastOverlay = 'sessions: "../last"\n';
+      await mkdir(dirname(firstOverlayPath), { recursive: true });
+      await mkdir(dirname(lastOverlayPath), { recursive: true });
+      await writeFile(firstOverlayPath, firstOverlay, 'utf8');
+      await writeFile(lastOverlayPath, lastOverlay, 'utf8');
+
+      expect(
+        await launchConfig.resolveLaunchSessionsDir({
+          userConfigPath: configPath,
+          overlayPaths: [firstOverlayPath, lastOverlayPath],
+        }),
+      ).toBe(join(root, 'last'));
+      expect(await readFile(configPath, 'utf8')).toBe(primary);
+      expect(await readFile(firstOverlayPath, 'utf8')).toBe(firstOverlay);
+      expect(await readFile(lastOverlayPath, 'utf8')).toBe(lastOverlay);
+    },
+  );
+
+  it('lets an injected directory precede an invalid configured locator', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'playbook-sessions-injected-'));
+    tempDirs.push(root);
+    const configPath = join(root, 'config', 'playbook.config.yaml');
+    const sessionsDir = join(root, 'injected');
+    await writeSessionsConfig(configPath, '~peer');
+
+    expect(
+      await launchConfig.resolveLaunchSessionsDir({
+        userConfigPath: configPath,
+        sessionsDir,
+      }),
+    ).toBe(sessionsDir);
+  });
+
+  it(
+    'does not prepare or traverse unrelated roots for selected bootstrap',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'playbook-sessions-selected-'));
+      tempDirs.push(root);
+      const configPath = join(root, 'config', 'playbook.config.yaml');
+      await mkdir(dirname(configPath), { recursive: true });
+      const source = [
+        'sessions: selected-sessions',
+        'playbooks:',
+        '  poisoned: { players: { retired: missing-profile } }',
+        '',
+      ].join('\n');
+      await writeFile(configPath, source, 'utf8');
+      const onNotice = vi.fn();
+
+      expect(
+        await launchConfig.resolveLaunchSessionsDir({
+          userConfigPath: configPath,
+          preparePrimary: false,
+          onNotice,
+        }),
+      ).toBe(join(dirname(configPath), 'selected-sessions'));
+      expect(onNotice).not.toHaveBeenCalled();
+      expect(await readFile(configPath, 'utf8')).toBe(source);
+      await expect(access(`${configPath}.bak`)).rejects.toThrow();
+    },
+  );
+
+  it('keeps sessions out of normalized and host projections', async () => {
+    const plan = await launchConfig.normalizeLaunchPlan(
+      { ...oneRoleConfig(), sessions: './shared-sessions' },
+      {
+        loadModule: moduleLoader({
+          'mod://code': entry('code', ['coder']),
+        }),
+      },
+    );
+    const structural = structuralProjection(plan);
+    const tmux = launchConfig.projectTmuxConfig(plan);
+
+    expect(plan).not.toHaveProperty('sessions');
+    expect(structural).not.toHaveProperty('sessions');
+    expect(tmux).not.toHaveProperty('sessions');
+    expect(tmux.captain.options).not.toHaveProperty('sessions');
+  });
+});
 
 describe('shared launch-config plan (PBCLI-47)', () => {
   it('builds detached tagged session agents and an exact tmux projection', async () => {
@@ -162,7 +361,7 @@ describe('shared launch-config plan (PBCLI-47)', () => {
           from: 'mod://code',
           manifestCommand: 'code',
           command: 'code',
-          artifactSchema: 2,
+          artifactSchema: 3,
           requiredRoleIds: ['coder', 'reviewer'],
           concurrentRoleSets: [],
           roles: {
@@ -252,6 +451,81 @@ describe('shared launch-config plan (PBCLI-47)', () => {
     tmux.captain.options.sessionAgents.players['dev.coder'].adapter = 'claude';
     expect(plan.catalog.code.roles.coder.playerId).toBe('dev.coder');
     expect(plan.players[0].agent.adapter).toBe('codex');
+  });
+
+  it('accepts and projects a schema-3 registry advertisement', async () => {
+    const plan = await launchConfig.normalizeLaunchPlan(oneRoleConfig(), {
+      loadModule: moduleLoader({
+        'mod://code': entry('code', ['coder'], 'code', [], 3, {
+          kind: 'shared-factory',
+          compat: { artifactSchema: 3, runtimeAbi: 17 },
+        }),
+      }),
+    });
+
+    const structural = structuralProjection(plan);
+    expect(plan.catalog.code.artifactSchema).toBe(3);
+    expect(structural.catalog.code.artifactSchema).toBe(3);
+    await expect(
+      launchConfig.normalizeSelectedLaunchPlanDataOnly(oneRoleConfig(), {
+        configPath: '/tmp/playbook.config.yaml',
+        stored: structural,
+      }),
+    ).resolves.toMatchObject({
+      catalog: { code: { artifactSchema: 3 } },
+    });
+  });
+
+  it('snapshots every consumed registry member once before validation and projection', async () => {
+    const consumed = [
+      'id',
+      'command',
+      'intent',
+      'artifactSchema',
+      'runtimeProfile',
+      'requiredRoleIds',
+      'concurrentRoleSets',
+      'validateOptions',
+      'createRuntime',
+    ] as const;
+    const reads = Object.fromEntries(consumed.map((key) => [key, 0]));
+    const manifest = new Proxy(entry('code', ['coder']), {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && key in reads) {
+          reads[key] += 1;
+          if (key === 'artifactSchema' && reads[key] > 1) return 3;
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+
+    const plan = await launchConfig.normalizeLaunchPlan(oneRoleConfig(), {
+      loadModule: async () => ({ default: manifest }),
+    });
+
+    expect(reads).toEqual(
+      Object.fromEntries(consumed.map((key) => [key, 1])),
+    );
+    expect(plan.catalog.code.artifactSchema).toBe(3);
+  });
+
+  it('rejects host capabilities from a stored structural projection', async () => {
+    const plan = await launchConfig.normalizeLaunchPlan(oneRoleConfig(), {
+      loadModule: moduleLoader({
+        'mod://code': entry('code', ['coder']),
+      }),
+    });
+    const structural = structuralProjection(plan);
+    structural.catalog.code.options = { hostCapabilities: {} };
+
+    await expect(
+      launchConfig.normalizeSelectedLaunchPlanDataOnly(oneRoleConfig(), {
+        configPath: '/tmp/playbook.config.yaml',
+        stored: structural,
+      }),
+    ).rejects.toThrow(
+      'stored structural catalog.code.options.hostCapabilities is host-owned and cannot be configured',
+    );
   });
 
   it('shares exact referenced ids and excludes unused players from roster and readiness', async () => {
@@ -410,6 +684,105 @@ describe('shared launch-config plan (PBCLI-47)', () => {
         { prepareRegistryModule, loadModule },
       ),
     ).rejects.toThrow(/effort/);
+    expect(prepareRegistryModule).not.toHaveBeenCalled();
+    expect(loadModule).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'rejects unsupported role fastMode=%s before registry work',
+    async (fastMode) => {
+      const prepareRegistryModule = vi.fn();
+      const loadModule = vi.fn();
+      await expect(
+        launchConfig.normalizeLaunchPlan(
+          {
+            captain: 'claude',
+            players: { 'dev.coder': 'gemini' },
+            playbooks: {
+              code: {
+                from: 'mod://code',
+                roles: {
+                  coder: { player: 'dev.coder', fastMode },
+                },
+              },
+            },
+          },
+          { prepareRegistryModule, loadModule },
+        ),
+      ).rejects.toThrow(/fastMode.*not supported.*gemini/i);
+      expect(prepareRegistryModule).not.toHaveBeenCalled();
+      expect(loadModule).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'rejects unsupported selected role fastMode=%s before registry work',
+    async (fastMode) => {
+      const initial = await launchConfig.normalizeLaunchPlan(
+        {
+          captain: 'claude',
+          players: { 'dev.coder': 'gemini' },
+          playbooks: {
+            code: {
+              from: 'mod://code',
+              roles: { coder: 'dev.coder' },
+            },
+          },
+        },
+        {
+          loadModule: moduleLoader({
+            'mod://code': entry('code', ['coder']),
+          }),
+        },
+      );
+      const prepareRegistryModule = vi.fn();
+      const loadModule = vi.fn();
+      await expect(
+        launchConfig.normalizeSelectedLaunchPlanDataOnly(
+          {
+            captain: 'claude',
+            players: { 'dev.coder': 'gemini' },
+            playbooks: {
+              code: {
+                from: 'mod://code',
+                roles: {
+                  coder: { player: 'dev.coder', fastMode },
+                },
+              },
+            },
+          },
+          {
+            configPath: '/tmp/playbook.config.yaml',
+            stored: structuralProjection(initial),
+            prepareRegistryModule,
+            loadModule,
+          },
+        ),
+      ).rejects.toThrow(/fastMode.*not supported.*gemini/i);
+      expect(prepareRegistryModule).not.toHaveBeenCalled();
+      expect(loadModule).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects configured host capabilities before registry preparation', async () => {
+    const prepareRegistryModule = vi.fn();
+    const loadModule = vi.fn();
+    await expect(
+      launchConfig.normalizeLaunchPlan(
+        {
+          ...oneRoleConfig(),
+          playbooks: {
+            code: {
+              ...oneRoleConfig().playbooks.code,
+              hostCapabilities: {},
+            },
+          },
+        },
+        { prepareRegistryModule, loadModule },
+      ),
+    ).rejects.toThrow(
+      'playbooks.code.hostCapabilities is host-owned and cannot be configured',
+    );
     expect(prepareRegistryModule).not.toHaveBeenCalled();
     expect(loadModule).not.toHaveBeenCalled();
   });
@@ -1129,6 +1502,46 @@ describe('shared launch-config plan (PBCLI-47)', () => {
 
   it.each([
     ['artifact schema 1', { artifactSchema: 1 }],
+    [
+      'artifact schema 2',
+      {
+        artifactSchema: 2,
+        runtimeProfile: { kind: 'bespoke', artifactSchema: 2 },
+      },
+    ],
+    ['artifact schema 4', { artifactSchema: 4 }],
+    ['missing runtime profile', { runtimeProfile: undefined }],
+    [
+      'shared-factory schema skew',
+      {
+        runtimeProfile: {
+          kind: 'shared-factory',
+          compat: { artifactSchema: 2, runtimeAbi: 1 },
+        },
+      },
+    ],
+    [
+      'bespoke schema skew',
+      { runtimeProfile: { kind: 'bespoke', artifactSchema: 2 } },
+    ],
+    [
+      'malformed shared-factory compat',
+      {
+        runtimeProfile: {
+          kind: 'shared-factory',
+          compat: { artifactSchema: 3, runtimeAbi: 1, extra: true },
+        },
+      },
+    ],
+    [
+      'noninteger shared-factory ABI',
+      {
+        runtimeProfile: {
+          kind: 'shared-factory',
+          compat: { artifactSchema: 3, runtimeAbi: 1.5 },
+        },
+      },
+    ],
     ['missing concurrent sets', { concurrentRoleSets: undefined }],
     ['one-role concurrent set', { concurrentRoleSets: [['coder']] }],
     ['unknown concurrent role', { concurrentRoleSets: [['coder', 'other']] }],
@@ -1140,6 +1553,56 @@ describe('shared launch-config plan (PBCLI-47)', () => {
     await expect(
       launchConfig.normalizeLaunchPlan(oneRoleConfig(), {
         loadModule: async () => ({ default: malformed }),
+      }),
+    ).rejects.toThrow(/no valid registry entry/);
+  });
+
+  it('binds non-ASCII canonical local role ids and refuses noncanonical ones', async () => {
+    const loadModule = moduleLoader({
+      'mod://zh': entry('zh', ['编码者', '审查者'], 'zh'),
+    });
+    const zhConfig = () => ({
+      captain: 'claude',
+      players: { 'dev.coder': 'codex', 'dev.reviewer': 'claude' },
+      playbooks: {
+        zh: {
+          from: 'mod://zh',
+          roles: { 编码者: 'dev.coder', 审查者: 'dev.reviewer' },
+        },
+      },
+    });
+
+    const plan = await launchConfig.normalizeLaunchPlan(zhConfig(), {
+      loadModule,
+    });
+    expect(plan.catalog.zh.requiredRoleIds).toEqual(['编码者', '审查者']);
+    expect(Object.keys(plan.catalog.zh.roles)).toEqual(['编码者', '审查者']);
+    expect(plan.catalog.zh.roles.编码者.playerId).toBe('dev.coder');
+    expect(plan.catalog.zh.roles.审查者.playerId).toBe('dev.reviewer');
+    expect(plan.players.map((player: any) => player.id)).toEqual([
+      'dev.coder',
+      'dev.reviewer',
+    ]);
+
+    const refused: Array<[string, RegExp]> = [
+      ['Coder', /must be a canonical lowercase local role id/],
+      ['code r', /must be a canonical lowercase local role id/],
+      ['captain', /binds local role "captain", which is reserved/],
+    ];
+    for (const [roleKey, message] of refused) {
+      const config: any = oneRoleConfig();
+      config.playbooks.code.roles = { [roleKey]: 'dev.coder' };
+      const rejectingLoad = vi.fn();
+      await expect(
+        launchConfig.normalizeLaunchPlan(config, {
+          loadModule: rejectingLoad,
+        }),
+      ).rejects.toThrow(message);
+      expect(rejectingLoad).not.toHaveBeenCalled();
+    }
+    await expect(
+      launchConfig.normalizeLaunchPlan(oneRoleConfig(), {
+        loadModule: moduleLoader({ 'mod://code': entry('code', ['编码 者']) }),
       }),
     ).rejects.toThrow(/no valid registry entry/);
   });
@@ -1314,6 +1777,7 @@ describe('shared launch-config plan (PBCLI-47)', () => {
     expect(Object.keys(template.players)).toEqual([
       'dev.coder',
       'dev.reviewer',
+      'dev.analyst',
     ]);
     expect(template.playbooks.code.roles).toEqual({ coder: 'dev.coder' });
     expect(template.playbooks.review.roles).toEqual({
@@ -1323,6 +1787,28 @@ describe('shared launch-config plan (PBCLI-47)', () => {
     expect(template.playbooks.decide.roles).toEqual(
       template.playbooks.review.roles,
     );
+    // DR-044: the DEV planner binds a distinct seeded player, so planning
+    // context cannot bleed into the shared review conversation.
+    expect(template.playbooks.dev.roles).toEqual({ analyst: 'dev.analyst' });
+    expect(template.players['dev.analyst']).toEqual({
+      adapter: 'claude',
+      model: 'claude-opus-5-5',
+      effort: 'xhigh',
+      permissions: { mode: 'auto' },
+    });
+    // DR-050: BRANCH and PR bind Coder to the same dev.coder player as CODE
+    // and REVIEW, so one Coder names the branch, commits, and describes the
+    // pull request; no player is added.
+    expect(template.playbooks.branch.roles).toEqual({ coder: 'dev.coder' });
+    expect(template.playbooks.pr.roles).toEqual({ coder: 'dev.coder' });
+    expect(Object.keys(template.playbooks)).toEqual([
+      'code',
+      'review',
+      'decide',
+      'dev',
+      'branch',
+      'pr',
+    ]);
     for (const block of Object.values(template.playbooks)) {
       expect(block).not.toHaveProperty('players');
     }
@@ -1339,11 +1825,114 @@ describe('shared launch-config plan (PBCLI-47)', () => {
           'decide',
           [['coder', 'reviewer']],
         ),
+        '@sublang/playbook/dev/registry': entry('dev', ['analyst']),
+        '@sublang/playbook/branch/registry': entry('branch', ['coder']),
+        '@sublang/playbook/pr/registry': entry('pr', ['coder']),
       }),
     });
     expect(plan.players.map((player: { id: string }) => player.id)).toEqual([
       'dev.coder',
       'dev.reviewer',
+      'dev.analyst',
     ]);
+  });
+});
+
+describe('adapter-scoped fast mode', () => {
+  it('composes player and role fast mode, and erases it from structure', async () => {
+    const plan: any = await launchConfig.normalizeLaunchPlan(
+      {
+        captain: { adapter: 'claude', fastMode: true },
+        players: {
+          'dev.coder': { adapter: 'codex', fastMode: true },
+          'dev.reviewer': { adapter: 'claude' },
+        },
+        playbooks: {
+          code: {
+            from: 'mod://code',
+            roles: {
+              // `false` is a literal request, not an inherited omission.
+              coder: { player: 'dev.coder', fastMode: false },
+              reviewer: 'dev.reviewer',
+            },
+          },
+        },
+      },
+      {
+        loadModule: moduleLoader({
+          'mod://code': entry('code', ['coder', 'reviewer']),
+        }),
+      },
+    );
+
+    expect(plan.captain.fastMode).toBe(true);
+    const coder = plan.players.find((p: any) => p.id === 'dev.coder');
+    expect(coder.agent.fastMode).toBe(true);
+    const reviewer = plan.players.find((p: any) => p.id === 'dev.reviewer');
+    expect(reviewer.agent).not.toHaveProperty('fastMode');
+
+    // The role override beats the player default; an omitted role inherits.
+    expect(plan.catalog.code.roles.coder.fastMode).toBe(false);
+    expect(plan.catalog.code.roles.reviewer).not.toHaveProperty('fastMode');
+
+    // It reaches cligent through the host projection...
+    const tmux: any = launchConfig.projectTmuxConfig(plan);
+    expect(tmux.captain.fastMode).toBe(true);
+
+    // ...but never participates in structural identity, so toggling it
+    // cannot force a fresh Captain session.
+    expect(JSON.stringify(structuralProjection(plan))).not.toContain(
+      'fastMode',
+    );
+  });
+
+  it('inherits the player default when a role omits fast mode', async () => {
+    const plan: any = await launchConfig.normalizeLaunchPlan(
+      {
+        captain: 'claude',
+        players: { 'dev.coder': { adapter: 'codex', fastMode: true } },
+        playbooks: {
+          code: { from: 'mod://code', roles: { coder: 'dev.coder' } },
+        },
+      },
+      {
+        loadModule: moduleLoader({ 'mod://code': entry('code', ['coder']) }),
+      },
+    );
+    expect(plan.catalog.code.roles.coder.fastMode).toBe(true);
+  });
+
+  it('refuses a non-boolean fast mode on a player or a role', async () => {
+    const load = {
+      loadModule: moduleLoader({ 'mod://code': entry('code', ['coder']) }),
+    };
+    await expect(
+      launchConfig.normalizeLaunchPlan(
+        {
+          captain: 'claude',
+          players: { 'dev.coder': { adapter: 'codex', fastMode: 'yes' } },
+          playbooks: {
+            code: { from: 'mod://code', roles: { coder: 'dev.coder' } },
+          },
+        },
+        load,
+      ),
+    ).rejects.toThrow(/fastMode/);
+
+    await expect(
+      launchConfig.normalizeLaunchPlan(
+        {
+          captain: 'claude',
+          players: { 'dev.coder': 'codex' },
+          playbooks: {
+            code: {
+              from: 'mod://code',
+              roles: { coder: { player: 'dev.coder', fastMode: 'yes' } },
+            },
+          },
+        },
+        load,
+      ),
+    ).rejects.toThrow(/fastMode must be a boolean/);
   });
 });

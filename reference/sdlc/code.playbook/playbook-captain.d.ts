@@ -1,12 +1,15 @@
 import { type Captain, type CaptainSession, type TuningSelection } from '@sublang/cligent/tmux-play';
 import type { Effort, PermissionPolicy } from '@sublang/cligent';
-import type { JsonValue, PlaybookRuntime, PlaybookRuntimeSnapshot } from '@sublang/playbook/runtime';
+import type { JsonValue, PlaybookEffectLedger, PlaybookEffectLedgerCommandBatch, PlaybookControlAction, PlaybookFailureCause, PlaybookRuntime, PlaybookRuntimeSnapshot, PlaybookStepRecord } from '@sublang/playbook/runtime';
 import { type CaptainControllerPort } from '../captain.playbook/captain.playbook.js';
 import type { PlaybookSummaryPolicy } from './code.registry.js';
 interface SessionAgent {
     readonly adapter: string;
     readonly model: TuningSelection;
     readonly effort: TuningSelection<Effort>;
+    /** Adapter-scoped fast mode. Absence is the provider default; `false` is a
+     * literal request, so this carries no provider-default sentinel. */
+    readonly fastMode?: boolean;
     readonly instruction?: string;
     readonly permissions?: PermissionPolicy;
 }
@@ -19,11 +22,44 @@ interface PlayerLedgerEntry {
 type DeepReadonly<T> = T extends (...args: never[]) => unknown ? T : T extends readonly (infer Element)[] ? readonly DeepReadonly<Element>[] : T extends object ? {
     readonly [Key in keyof T]: DeepReadonly<T[Key]>;
 } : T;
-type SnapshotAgentEnvelope = DeepReadonly<Omit<SessionAgent, 'model' | 'effort'>>;
+export interface PlaybookCaptainUnresolvedEffect {
+    readonly classification: 'one-descendant-commit' | 'multiple-commits' | 'rewritten-or-non-descendant' | 'worktree-only-change' | 'concurrent-or-foreign-change' | 'observation-ambiguous' | 'incomplete';
+    readonly baselineHead: string;
+    readonly afterHead?: string;
+    readonly commitOid?: string;
+}
+interface PlaybookCaptainUnresolvedEffectSettlementInput {
+    readonly rootPlaybookId: string;
+    readonly unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[];
+}
+type SnapshotAgentEnvelope = DeepReadonly<Omit<SessionAgent, 'model' | 'effort' | 'fastMode'>>;
 type PlayerLedgerSnapshotEntry = DeepReadonly<PlayerLedgerEntry>;
+export interface ProgressChange {
+    snapshot?: PlaybookCaptainShellSnapshot | null;
+    step?: Omit<PlaybookStepRecord, 'kind'> & {
+        kind: PlaybookStepRecord['kind'] | 'preparation' | 'completion' | 'answer';
+        runtimeSessionId: string;
+        playbookId: string;
+    };
+}
+export interface InterruptedReport {
+    text: string;
+    effects: readonly PlaybookCaptainUnresolvedEffect[];
+    retentionUpdates?: readonly PlaybookCaptainRetentionUpdate[];
+    unresolvedEffects?: readonly PlaybookCaptainUnresolvedEffect[];
+}
 export interface PlaybookCaptainDeps {
+    /** Stop the host's active turn, including admitted tool calls, on preparation expiry or a required save failure. */
+    abortPreparation?: (reason?: string) => void;
+    recordProgress?: (change: ProgressChange) => Promise<void>;
+    continuity?: {
+        beforeCall(participantId: string): Promise<void>;
+        acknowledged(participantId: string, token: string): void;
+        reset(participantId: string, reason: 'missing_hint' | 'rejected_hint'): Promise<void>;
+    };
     loadModule?: (specifier: string) => Promise<unknown>;
     createSessionId?: () => string;
+    hostCapabilities?: Readonly<Record<string, PlaybookHostConstructionCapabilities>>;
     createCaptainRuntime?: (options: {
         readonly enabledPlaybooks: readonly {
             readonly id: string;
@@ -32,18 +68,67 @@ export interface PlaybookCaptainDeps {
         }[];
         readonly controller: CaptainControllerPort;
     }) => PlaybookRuntime;
+    unresolvedEffectSettlement?: {
+        begin(input: PlaybookCaptainUnresolvedEffectSettlementInput): Promise<void>;
+        complete(input: PlaybookCaptainUnresolvedEffectSettlementInput): Promise<void>;
+    };
 }
-export interface PlaybookCaptainRegistryEntry {
+/** Live, artifact-typed host facilities supplied outside configured options. */
+export interface PlaybookHostConstructionCapabilities {
+    readonly authority: {
+        readonly playbookId: string;
+        readonly artifactSchema: 3;
+        readonly cwd: string;
+        readonly sessionId: string;
+        readonly leaseOwnerToken: string;
+        readonly canonicalWorktree: {
+            readonly worktree: string;
+            readonly gitDir: string;
+        };
+        readonly requiredRoleIds: readonly string[];
+        readonly concurrentRoleSets: readonly (readonly string[])[];
+    };
+    readonly repository: {
+        readonly identity: {
+            readonly worktree: string;
+            readonly gitDir: string;
+        };
+        readonly observe: (options?: unknown) => Promise<unknown>;
+        readonly acquire: (options?: unknown) => Promise<unknown>;
+        readonly runExclusive: (options: unknown) => Promise<unknown>;
+        readonly runCohort: (options: unknown) => Promise<unknown>;
+        readonly runDeferred: (options: unknown) => Promise<unknown>;
+    };
+    readonly effectLedger: {
+        readonly snapshot: () => PlaybookEffectLedger;
+        readonly writeAhead: (commands: PlaybookEffectLedgerCommandBatch) => Promise<PlaybookEffectLedger>;
+    };
+}
+export type PlaybookCaptainRuntimeProfile = {
+    readonly kind: 'shared-factory';
+    readonly compat: {
+        readonly artifactSchema: 3;
+        readonly runtimeAbi: number;
+    };
+} | {
+    readonly kind: 'bespoke';
+    readonly artifactSchema: 3;
+};
+interface PlaybookCaptainRegistryEntryBase {
     id: string;
     command: string;
     intent: string;
-    artifactSchema: 2;
+    runtimeProfile: PlaybookCaptainRuntimeProfile;
     requiredRoleIds: readonly string[];
     concurrentRoleSets: readonly (readonly string[])[];
     summaryPolicy?: PlaybookSummaryPolicy;
     validateOptions(optionSlice: unknown): unknown;
-    createRuntime(options: unknown): PlaybookRuntime;
 }
+export interface PlaybookCaptainRegistryEntryV3 extends PlaybookCaptainRegistryEntryBase {
+    artifactSchema: 3;
+    createRuntime(configuredOptions: unknown, hostCapabilities: PlaybookHostConstructionCapabilities): PlaybookRuntime;
+}
+export type PlaybookCaptainRegistryEntry = PlaybookCaptainRegistryEntryV3;
 type PlaybookCaptainConversationSnapshot = {
     readonly kind: 'unopened';
 } | {
@@ -62,19 +147,23 @@ interface PlaybookCaptainJournalRecord {
     readonly kind: 'boss' | 'reply' | 'handoff' | 'action' | 'outcome';
     readonly payload: JsonValue;
 }
-interface PlaybookCaptainFrameSnapshot {
+export interface PlaybookCaptainFrameSnapshot {
     readonly playbookId: string;
     readonly sessionId: string;
     readonly rootSessionId: string;
     readonly depth: number;
     readonly parentSessionId?: string;
     readonly parentCallId?: string;
+    readonly request?: string;
+    readonly inputs?: readonly string[];
     readonly options: JsonValue;
     readonly roleBindings: Readonly<Record<string, string>>;
     readonly runtime: DeepReadonly<PlaybookRuntimeSnapshot>;
 }
 interface PlaybookCaptainShellSnapshotFields {
-    readonly schemaVersion: 3;
+    readonly schemaVersion: 4;
+    readonly effectLedger: DeepReadonly<PlaybookEffectLedger>;
+    readonly presentedEffectPrefix?: number;
     readonly captain: {
         readonly sessionId: string;
         readonly runtime: DeepReadonly<PlaybookRuntimeSnapshot>;
@@ -89,7 +178,7 @@ interface PlaybookCaptainShellSnapshotFields {
         readonly journal: number;
     };
     readonly journal: readonly PlaybookCaptainJournalRecord[];
-    readonly lastAction?: 'respond' | 'start' | 'switch' | 'dismiss' | 'deliver' | 'runtime';
+    readonly lastAction?: 'respond' | 'start' | 'switch' | 'resume' | 'dismiss' | 'deliver' | 'runtime' | 'recover';
     readonly lastSettlementStatus?: 'ok' | 'rejected' | 'failed';
 }
 /**
@@ -105,19 +194,129 @@ type PlaybookCaptainShellSnapshotValue = PlaybookCaptainShellSnapshotFields & ({
     readonly mode: 'engaged.parked';
     /** Root-to-leaf engagement order. */
     readonly frames: readonly PlaybookCaptainFrameSnapshot[];
+    readonly retainedEffectReconciliation?: PlaybookCaptainRetainedEffectReconciliation;
     readonly pendingBossQuestions?: JsonValue;
+    /** DR-063 §2: the parked failure's cause travels with its error. */
     readonly lastError?: {
         readonly name: string;
         readonly message: string;
+        readonly cause?: PlaybookFailureCause;
     };
 });
 export type PlaybookCaptainShellSnapshot = DeepReadonly<PlaybookCaptainShellSnapshotValue>;
+export interface PlaybookCaptainRetainedGeneration {
+    /** Repository-effect checkpoint reflected by the retained machine state. */
+    readonly effectLedger: DeepReadonly<PlaybookEffectLedger>;
+    readonly frames: readonly PlaybookCaptainFrameSnapshot[];
+    readonly retainedEffectReconciliation?: {
+        readonly sourceGenerationId: string;
+    };
+    /** Boss-facing description published for the retained root state, if any. */
+    readonly rootStateDescription?: string;
+}
+interface PlaybookCaptainRetainedEffectReconciliation {
+    readonly sourceGenerationId: string;
+    readonly checkpoint: DeepReadonly<PlaybookEffectLedger>;
+}
+export type PlaybookCaptainRetentionUpdate = {
+    readonly kind: 'retain';
+    readonly rootPlaybookId: string;
+    readonly generation: PlaybookCaptainRetainedGeneration;
+} | {
+    readonly kind: 'clear';
+    readonly rootPlaybookId: string;
+};
+export interface PlaybookCaptainSettlement {
+    readonly snapshot: PlaybookCaptainShellSnapshot;
+    readonly retentionUpdates: readonly PlaybookCaptainRetentionUpdate[];
+    readonly unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[];
+}
 /** tmux and headless front ends share this one durable Captain shell API. */
 export interface PlaybookCaptainShell extends Captain {
+    installRetainedGenerations(generations: Readonly<Record<string, PlaybookCaptainRetainedGeneration>>): Promise<void>;
     exportSnapshot(): PlaybookCaptainShellSnapshot | undefined;
+    exportSettlement(): PlaybookCaptainSettlement | undefined;
     restore(session: CaptainSession, snapshot: PlaybookCaptainShellSnapshot): Promise<void>;
+    /**
+     * The active leaf's currently advertised runtime actions, as the host's own
+     * reading of the control view the ControlView digest reads (CAPTAIN-60).
+     * Declared optional because capability absence is member absence: a shell
+     * that publishes no reader advertises nothing.
+     */
+    describeRuntimeActions?(): readonly PlaybookControlAction[];
+    /**
+     * Select one currently advertised runtime action as the next Boss turn's
+     * decision and return that turn's Boss text, which the host submits through
+     * `handleBossTurn` (CAPTAIN-7).
+     */
+    submitRuntimeAction?(actionId: string): string;
+    /**
+     * The controls the shell effects on its own behalf, disjoint from the leaf's
+     * advertised runtime actions (CAPTAIN-62). Declared optional for the same
+     * reason: a shell that publishes no reader advertises nothing.
+     */
+    describeShellActions?(): readonly PlaybookControlAction[];
+    /**
+     * Select one currently advertised shell control as the next Boss turn's
+     * decision and return that turn's Boss text, which the host submits through
+     * `handleBossTurn` (CAPTAIN-7).
+     */
+    submitShellAction?(actionId: string): string;
+    /** Report an interrupted attempt without dispatching work. */
+    selectInterruptedReport?(input: string, report: InterruptedReport): void;
 }
+/**
+ * Whether words may stand outside a code span in a statement the shell says
+ * (CAPTAIN-9); the pure renderer accepts everything, and the shell passes its
+ * guard.
+ */
+type Speakable = (text: string) => boolean;
+/**
+ * What the shell recorded of a failure: an error, which may carry the cause
+ * the runtime decided (DR-063 §2), or that cause alone.
+ */
+interface RecordedFailure {
+    readonly message?: string;
+    readonly cause?: unknown;
+}
+type DescribePlaybook = (playbookId: string) => string;
+/**
+ * CAPTAIN-71: the one way a failure is put into words — `<Subject> failed:
+ * <reason>.` — `subject` naming what failed in the Boss's words and `failure`
+ * the error or cause the shell recorded.
+ */
+declare function failureStatement(subject: string, failure: RecordedFailure | undefined, describePlaybook?: DescribePlaybook, speakable?: Speakable): string;
+/**
+ * The three kinds of statement a report the shell says holds (CAPTAIN-69):
+ * a listed fact, a numbered unresolved-effect entry, and the `Failure:` line.
+ */
+type StatementKind = 'fact' | 'entry' | 'failure';
+/** A statement the report assembly weighs. */
+interface BossStatement {
+    readonly text: string;
+    /** Its kind, which decides what may drop it; a fact where absent. */
+    readonly kind?: StatementKind;
+    /** The reason a `Failure:` line states (CAPTAIN-67). */
+    readonly reason?: string;
+}
+/** The statements of `statements` that stay, as CAPTAIN-69 assembles them. */
+declare function bossReport(statements: readonly (string | BossStatement)[], reasons?: Iterable<string>): string[];
+export declare function assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[];
 /** Validate, detach, and freeze one untrusted shell snapshot. */
 export declare function assertPlaybookCaptainShellSnapshot(value: unknown): PlaybookCaptainShellSnapshot;
+export type PlaybookCaptainUnresolvedEffectReference = {
+    readonly kind: 'boundary';
+    readonly boundaryId: string;
+} | {
+    readonly kind: 'logical-operation';
+    readonly operationId: string;
+};
+export declare const projectUnresolvedEffects: (ledger: PlaybookEffectLedger, references: readonly PlaybookCaptainUnresolvedEffectReference[]) => readonly PlaybookCaptainUnresolvedEffect[];
 export declare function createPlaybookCaptainShell(options: unknown, deps?: PlaybookCaptainDeps): PlaybookCaptainShell;
+export declare const _internal: {
+    failureStatement: typeof failureStatement;
+    bossReport: typeof bossReport;
+    RUNTIME_REASON_PHRASES: Readonly<Record<string, string>>;
+    LABELLED_RUNTIME_REASONS: readonly (readonly [RegExp, string])[];
+};
 export default createPlaybookCaptainShell;

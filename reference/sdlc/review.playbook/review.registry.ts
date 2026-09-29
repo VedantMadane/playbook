@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import createPlaybookRuntime, {
+  type PlaybookHostCapabilities,
   type PlaybookRuntime,
 } from './review.playbook.js';
+import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
 
 export interface PlaybookSummaryPolicy {
   stateCountLabels: Readonly<Record<string, string>>;
@@ -20,18 +22,31 @@ export interface ReviewPlaybookRegistryEntry {
   id: 'review';
   command: 'review';
   intent: string;
-  artifactSchema: 2;
+  artifactSchema: 3;
+  runtimeProfile: {
+    readonly kind: 'shared-factory';
+    readonly compat: {
+      readonly artifactSchema: 3;
+      readonly runtimeAbi: number;
+    };
+  };
   requiredRoleIds: readonly ['coder', 'reviewer'];
   concurrentRoleSets: readonly [];
   summaryPolicy: PlaybookSummaryPolicy;
   validateOptions(optionSlice: unknown): ReviewOptions;
-  createRuntime(options: ReviewOptions): PlaybookRuntime;
+  // The linked module types live authority as opaque (link-materialization);
+  // the Captain entry binds its own construction capabilities here.
+  createRuntime(
+    options: ReviewOptions,
+    hostCapabilities: PlaybookHostConstructionCapabilities &
+      PlaybookHostCapabilities,
+  ): PlaybookRuntime;
 }
 
 export const reviewStateCountLabels = {
-  reviewInitial: 'review round',
-  reviewAfterCommit: 'review round',
-  reviewAfterRebuttal: 'rebuttal',
+  firstReview: 'review round',
+  reviewAfterFix: 'review round',
+  reviewAfterRejection: 'rebuttal',
 } as const;
 
 export const reviewCopyPasteGuardNames = [
@@ -93,14 +108,21 @@ export const reviewPlaybookRegistryEntry: ReviewPlaybookRegistryEntry = {
   id: 'review',
   command: 'review',
   intent:
-    'review the latest commit until no material correctness or spec findings remain',
-  artifactSchema: 2,
+    'review a supplied scope of committed work until no unsettled findings remain',
+  artifactSchema: 3,
+  runtimeProfile: Object.freeze({
+    kind: 'shared-factory',
+    compat: createPlaybookRuntime.compat,
+  }),
   requiredRoleIds: ['coder', 'reviewer'],
   concurrentRoleSets: [],
   summaryPolicy: reviewSummaryPolicy,
   validateOptions: validateReviewOptions,
-  createRuntime(options) {
-    return createPlaybookRuntime(options);
+  createRuntime(options, hostCapabilities) {
+    return createPlaybookRuntime({
+      configuredOptions: options,
+      hostCapabilities,
+    });
   },
 };
 

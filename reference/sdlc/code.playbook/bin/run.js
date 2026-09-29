@@ -6,51 +6,79 @@
 // in tmux. The core below uses cligent's ordinary tmux-play runtime without a
 // presenter; it does not construct a registry runtime or PlaybookPorts itself.
 
-import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
-import { resolve } from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
-import { createTmuxPlayRuntime } from '@sublang/cligent/tmux-play';
-import { createPlaybookCaptainShell } from '../playbook-captain.js';
+import { randomUUID } from "node:crypto";
+import { attachSessionHints, validateSessionContext } from "./portable-codec.js";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { assertFastModeSupported } from "@sublang/cligent";
+import { createTmuxPlayRuntime } from "@sublang/cligent/tmux-play";
+import {
+  assertPlaybookEffectLedger,
+  emptyPlaybookEffectLedger,
+  isPlaybookEffectLedgerMonotonicExtension,
+} from "../../../../src/xstate-runtime.js";
+import {
+  assertPlaybookCaptainShellSnapshot,
+  createPlaybookCaptainShell,
+  projectUnresolvedEffects,
+} from "../playbook-captain.js";
 import {
   adapterSdkFailureLines,
   checkAdapterSdks,
   mappedSdksFor,
   probeAdapterSdk,
-} from './adapter-sdk.js';
+} from "./adapter-sdk.js";
 import {
   checkReadiness,
+  invalidRegistryEntryReason,
   loadLaunchPlan,
+  loadSelectedLaunchPlanDataOnly,
   projectHostAgent,
+  resolveLaunchSessionsDir,
+  relocateLegacyUserConfig,
+  resolveFormerUserConfigPaths,
   resolveUserConfigPath,
-} from './launch-config.js';
-import { prepareConfiguredRegistries } from './provision.js';
+  snapshotRegistryEntry,
+} from "./launch-config.js";
+import { prepareConfiguredRegistries } from "./provision.js";
+import {
+  createReplayRecordObserver,
+  replayIncompleteMessage,
+} from "./replay-observer.js";
+import {
+  createRepositoryEffectCapabilities,
+  refreshRepositoryEffectCapabilities,
+  recoverIncompleteRepositoryEffects,
+} from "./repository-effects.js";
 import {
   assertCaptainSessionExecutionCompatible,
-  captainSessionSelectedMembers,
+  assertCaptainSessionsDirectoryUsable,
   createCaptainSessionStore,
+  isUncertainTurnDiscardable,
   projectCaptainSessionStructure,
   SESSION_ID_PATTERN,
   validateCaptainSessionExecutionProjection,
   validateCaptainSessionRecord,
-} from './session-store.js';
+} from "./session-store.js";
 
 const EXIT = { ok: 0, argument: 1, turn: 2 };
 const UUID_PATTERN = SESSION_ID_PATTERN;
+const HEADLESS_REPLAY_CHANNELS = new WeakMap();
 class HeadlessHostSetupError extends Error {
   constructor(cause) {
     super(message(cause));
-    this.name = 'HeadlessHostSetupError';
+    this.name = "HeadlessHostSetupError";
     this.cause = cause;
   }
 }
 const RETIRED_FLAGS = new Set([
-  '--player',
-  '--captain',
-  '--option',
-  '--cwd',
-  '--last',
-  '--config',
+  "--player",
+  "--captain",
+  "--option",
+  "--cwd",
+  "--last",
+  "--config",
 ]);
 
 export async function runPlaybookRun(options = {}) {
@@ -67,15 +95,25 @@ export async function runPlaybookRun(options = {}) {
   }
   if (args.help) {
     const env = options.env ?? process.env;
-    const home = options.homeDir ?? env.HOME ?? homedir();
+    const home =
+      options.homeDir ??
+      (typeof env.HOME === "string" && env.HOME.trim().length > 0
+        ? env.HOME
+        : homedir());
     const userConfigPath =
       options.userConfigPath ?? resolveUserConfigPath(env, home);
+    // PBCLI-17: help resolves the path but writes nothing, so it neither
+    // seeds nor relocates.
     await writeStream(stdout, runHelpText(userConfigPath));
     return { code: EXIT.ok };
   }
 
   const env = options.env ?? process.env;
-  const home = options.homeDir ?? env.HOME ?? homedir();
+  const home =
+    options.homeDir ??
+    (typeof env.HOME === "string" && env.HOME.trim().length > 0
+      ? env.HOME
+      : homedir());
   const recovering = args.retryUncertain || args.discardUncertain;
   const continuing = args.continue || args.sessionId !== undefined;
   let input = args.input;
@@ -90,6 +128,53 @@ export async function runPlaybookRun(options = {}) {
     input = resolvedInput.input;
   }
 
+  const userConfigPath =
+    options.userConfigPath ?? resolveUserConfigPath(env, home);
+  // DR-043/DR-064: move a config left at a former location to the canonical
+  // path before any read, seed, or plan work observes its absence. The nearer
+  // former location goes first, and the one that moves ends the walk.
+  if (options.userConfigPath === undefined) {
+    try {
+      for (const formerPath of resolveFormerUserConfigPaths(env, home)) {
+        const moved = relocateLegacyUserConfig(
+          userConfigPath,
+          formerPath,
+          (line) => stderr.write(line),
+        );
+        if (moved) break;
+      }
+    } catch (error) {
+      await writeStream(stderr, `playbook run: ${message(error)}\n`);
+      return { code: EXIT.argument };
+    }
+  }
+  const bootstrapConfigNotices = [];
+  let resolvedSessionsDir;
+  let migrateDefaultStore = false;
+  if (options.sessionStore === undefined) {
+    try {
+      resolvedSessionsDir = resolveLaunchSessionsDir({
+        userConfigPath,
+        overlayPaths: args.withPaths,
+        env,
+        homeDir: home,
+        ...(options.sessionsDir !== undefined
+          ? { sessionsDir: options.sessionsDir }
+          : {}),
+        preparePrimary: !continuing,
+        onDefault: () => { migrateDefaultStore = !(typeof env.SPEX_HOME === 'string' && env.SPEX_HOME.trim() !== ''); },
+        onNotice: (line) => bootstrapConfigNotices.push(line),
+      });
+      await assertCaptainSessionsDirectoryUsable(resolvedSessionsDir);
+    } catch (error) {
+      for (const line of bootstrapConfigNotices) {
+        await writeStream(stderr, line);
+      }
+      await writeStream(stderr, `playbook run: ${message(error)}\n`);
+      return { code: EXIT.argument };
+    }
+  }
+
   let store;
   try {
     store =
@@ -97,12 +182,17 @@ export async function runPlaybookRun(options = {}) {
       createCaptainSessionStore({
         env,
         homeDir: home,
-        ...(options.sessionsDir ? { sessionsDir: options.sessionsDir } : {}),
+        sessionsDir: resolvedSessionsDir,
         ...(options.now ? { now: options.now } : {}),
         ...(options.createSessionTempId
           ? { createTempId: options.createSessionTempId }
           : {}),
       });
+    if (migrateDefaultStore) {
+      const migrated = await store.migrateLegacyDefault();
+      if (migrated.migrated.length > 0) await writeStream(stderr, `playbook run: migrated ${migrated.migrated.length} sessions from ${migrated.sourceDir}\n`);
+      for (const skipped of migrated.skipped) await writeStream(stderr, `playbook run: preserved legacy session ${skipped.sessionId} in ${migrated.sourceDir}: ${skipped.reason}\n`);
+    }
   } catch (error) {
     await writeStream(stderr, `playbook run: ${message(error)}\n`);
     return { code: EXIT.argument };
@@ -114,6 +204,7 @@ export async function runPlaybookRun(options = {}) {
   let config;
   let cwd;
   let restoreSnapshot;
+  let replayChannel;
   const loadModule = memoizedModuleLoader(
     options.loadModule ?? ((specifier) => import(specifier)),
   );
@@ -122,26 +213,47 @@ export async function runPlaybookRun(options = {}) {
   if (continuing) {
     try {
       if (args.sessionId === undefined) {
+        const invokingCwd = resolve(options.cwd ?? process.cwd());
         const selected = validateCaptainSessionRecord(
           await awaitWithAbort(
             store.latest({
-              onLegacyRecord: ({ sessionId: legacyId, path }) =>
-                writeStream(
+              preferredCwd: invokingCwd,
+              onLegacyRecord: (record) =>
+                reportSkippedCaptainSession(
                   stderr,
-                  `playbook run: skipping legacy Captain session ${JSON.stringify(legacyId)} at ${JSON.stringify(path)} because schema 2 has incompatible player identity; move it outside the sessions directory or remove it to silence this warning\n`,
+                  "playbook run",
+                  "legacy",
+                  record,
                 ),
             }),
             options.signal,
           ),
         );
+        if (selected.cwd !== invokingCwd) {
+          await writeStream(
+            stderr,
+            `playbook run: no same-directory Captain session exists for invoking working directory ${JSON.stringify(invokingCwd)}; selecting globally newest Captain session ${JSON.stringify(selected.sessionId)} with stored working directory ${JSON.stringify(selected.cwd)}\n`,
+          );
+        }
         sessionId = selected.sessionId;
       } else {
         sessionId = args.sessionId;
       }
       throwIfAborted(options.signal);
       lease = await store.acquire(sessionId);
+      if (!args.discardUncertain) await lease.assertContinuable();
+      else if ((await lease.readManifest()).schemaVersion !== 7) throw new Error(`session requires explicit migration; run playbook migrate-session ${sessionId}`);
+      replayChannel = createHeadlessReplayChannel({
+        lease,
+        sessionId,
+        stderr,
+      });
+      await reportHeadlessReplay(replayChannel);
       throwIfAborted(options.signal);
-      const authoritative = await lease.read();
+      const authoritative =
+        typeof lease.recoverUnresolvedEffectAbandonment === "function"
+          ? await lease.recoverUnresolvedEffectAbandonment()
+          : await lease.read();
       throwIfAborted(options.signal);
       if (authoritative === undefined) {
         throw new Error(
@@ -163,7 +275,7 @@ export async function runPlaybookRun(options = {}) {
       return { code: EXIT.argument };
     }
 
-    if (priorRecord.state === 'uncertain') {
+    if (priorRecord.state === "uncertain") {
       if (args.discardUncertain) {
         try {
           throwIfAborted(options.signal);
@@ -197,7 +309,7 @@ export async function runPlaybookRun(options = {}) {
       if (!args.retryUncertain) {
         const releaseError = await releaseLease(lease);
         lease = undefined;
-        await reportUncertainSession(stderr, sessionId);
+        await reportUncertainSession(stderr, sessionId, !isUncertainTurnDiscardable(priorRecord));
         if (releaseError !== undefined) {
           await writeStream(
             stderr,
@@ -244,26 +356,28 @@ export async function runPlaybookRun(options = {}) {
   }
 
   if (!continuing || !args.retryUncertain) {
-    const userConfigPath =
-      options.userConfigPath ?? resolveUserConfigPath(env, home);
     let plan;
-    const configNotices = [];
+    const configNotices = [...bootstrapConfigNotices];
     try {
       throwIfAborted(options.signal);
-      plan = await loadLaunchPlan({
-        userConfigPath,
-        overlayPaths: args.withPaths,
-        loadModule,
-        prepareRegistryModule,
-        onNotice: (line) => configNotices.push(line),
-        ...(continuing
-          ? {
-              selectedMembers: captainSessionSelectedMembers(
-                priorRecord.structuralProjection,
-              ),
-            }
-          : {}),
-      });
+      plan = continuing
+        ? await loadSelectedLaunchPlanDataOnly({
+            userConfigPath,
+            overlayPaths: args.withPaths,
+            structuralProjection: priorRecord.structuralProjection,
+            onNotice: (line) => configNotices.push(line),
+            env,
+            homeDir: home,
+          })
+        : await loadLaunchPlan({
+            userConfigPath,
+            overlayPaths: args.withPaths,
+            env,
+            homeDir: home,
+            loadModule,
+            prepareRegistryModule,
+            onNotice: (line) => configNotices.push(line),
+          });
       throwIfAborted(options.signal);
     } catch (error) {
       for (const line of configNotices) await writeStream(stderr, line);
@@ -283,13 +397,14 @@ export async function runPlaybookRun(options = {}) {
     try {
       const current = executionConfigFromPlan(plan);
       if (continuing) {
-        config = assertCaptainSessionExecutionCompatible(
+        config = await validateFrozenExecutionConfig(
           priorRecord.structuralProjection,
           current,
+          { loadModule, prepareRegistryModule },
         );
       } else {
         sessionId = (options.createLogicalSessionId ?? randomUUID)();
-        if (typeof sessionId !== 'string' || !UUID_PATTERN.test(sessionId)) {
+        if (typeof sessionId !== "string" || !UUID_PATTERN.test(sessionId)) {
           throw new Error(
             `logical session id generator returned a non-UUID value: ${JSON.stringify(sessionId)}`,
           );
@@ -392,6 +507,12 @@ export async function runPlaybookRun(options = {}) {
     try {
       throwIfAborted(options.signal);
       lease = await store.acquire(sessionId);
+      replayChannel = createHeadlessReplayChannel({
+        lease,
+        sessionId,
+        stderr,
+      });
+      await reportHeadlessReplay(replayChannel);
       throwIfAborted(options.signal);
     } catch (error) {
       const releaseError = await releaseLease(lease);
@@ -424,12 +545,15 @@ export async function runPlaybookRun(options = {}) {
   }
 
   let settled;
+  let freshLaunchRecord;
   try {
     settled = await driveHeadlessCaptainTurn({
       config,
       input,
       sessionId,
       cwd,
+      sessionLease: lease,
+      replayObserver: replayChannel?.observer,
       loadModule,
       stderr,
       verbose: args.verbose,
@@ -445,11 +569,56 @@ export async function runPlaybookRun(options = {}) {
       ...(options.createHostRuntime
         ? { createHostRuntime: options.createHostRuntime }
         : {}),
-      ...(restoreSnapshot !== undefined
-        ? { restoreSnapshot }
+      ...(options.createEffectLedgerWriteAhead
+        ? {
+            createEffectLedgerWriteAhead: options.createEffectLedgerWriteAhead,
+          }
         : {}),
+      ...(restoreSnapshot !== undefined ? { restoreSnapshot } : {}),
+      ...(args.retryUncertain ? { reconcileUncertainTurnReplay: true } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
-      beforeBossTurn: async (baselineSnapshot) => {
+      beforeBossTurn: async (
+        baselineSnapshot,
+        shell,
+        reconcileRepositoryEffects,
+      ) => {
+        throwIfAborted(options.signal);
+        const installForLaunch =
+          options.installRetainedGenerationsForLaunch ??
+          installRetainedGenerationsForLaunch;
+        await installForLaunch({
+          lease,
+          shell,
+          ...(priorRecord === undefined
+            ? {
+                freshBoundary: {
+                  cwd,
+                  structuralProjection: projectCaptainSessionStructure(config),
+                  executionProjection: config,
+                  snapshot: baselineSnapshot,
+                },
+                onFreshRecord(record) {
+                  freshLaunchRecord = record;
+                },
+                onLegacyRecord: (record) =>
+                  reportSkippedCaptainSession(
+                    stderr,
+                    "playbook run",
+                    "legacy",
+                    record,
+                  ),
+                onInvalidRecord: (record) =>
+                  reportSkippedCaptainSession(
+                    stderr,
+                    "playbook run",
+                    "invalid",
+                    record,
+                  ),
+              }
+            : {}),
+          retainedGenerations: priorRecord?.retainedGenerations ?? {},
+          reconcileRepositoryEffects,
+        });
         throwIfAborted(options.signal);
         return args.retryUncertain
           ? lease.beginRetry({
@@ -460,22 +629,26 @@ export async function runPlaybookRun(options = {}) {
               input,
               attemptId,
               attemptedExecutionProjection: config,
-              ...(priorRecord === undefined
-                ? {
-                    fresh: {
-                      cwd,
-                      structuralProjection:
-                        projectCaptainSessionStructure(config),
-                      snapshot: baselineSnapshot,
-                    },
-                  }
-                : {}),
             });
       },
       assertBeforeBossTurn: () => lease.assertOwner(),
     });
+    await reportHeadlessReplay(replayChannel);
   } catch (error) {
+    await reportHeadlessReplay(replayChannel);
     const cleanupIncomplete = isCaptainSessionHostCleanupIncomplete(error);
+    let abandonmentError;
+    if (
+      !cleanupIncomplete &&
+      freshLaunchRecord !== undefined &&
+      Object.keys(freshLaunchRecord.retainedGenerations ?? {}).length === 0
+    ) {
+      try {
+        await lease.abandonFreshSettled({ expected: freshLaunchRecord });
+      } catch (cause) {
+        abandonmentError = cause;
+      }
+    }
     const releaseError = cleanupIncomplete
       ? undefined
       : await releaseLease(lease);
@@ -483,7 +656,7 @@ export async function runPlaybookRun(options = {}) {
     if (cleanupIncomplete) {
       await writeStream(
         stderr,
-        'playbook run: writer lease retained until process exit because host cleanup was incomplete\n',
+        "playbook run: writer lease retained until process exit because host cleanup was incomplete\n",
       );
     }
     if (releaseError !== undefined) {
@@ -492,9 +665,17 @@ export async function runPlaybookRun(options = {}) {
         `playbook run: cannot release Captain session lease: ${message(releaseError)}\n`,
       );
     }
+    if (abandonmentError !== undefined) {
+      await writeStream(
+        stderr,
+        `playbook run: cannot retract unused fresh Captain session: ${message(abandonmentError)}\n`,
+      );
+    }
     return {
       code:
-        error instanceof HeadlessHostSetupError && releaseError === undefined
+        error instanceof HeadlessHostSetupError &&
+        abandonmentError === undefined &&
+        releaseError === undefined
           ? EXIT.argument
           : EXIT.turn,
     };
@@ -506,8 +687,12 @@ export async function runPlaybookRun(options = {}) {
     durableRecord = await lease.settle({
       attemptId: settled.uncertainRecord.uncertain.attemptId,
       snapshot: settled.snapshot,
+      unresolvedEffects: settled.unresolvedEffects,
+      retentionUpdates: settled.retentionUpdates,
     });
+    await reportHeadlessReplay(replayChannel);
   } catch (error) {
+    await reportHeadlessReplay(replayChannel);
     let cleanupError;
     try {
       await settled.dispose();
@@ -523,13 +708,10 @@ export async function runPlaybookRun(options = {}) {
         [error, cleanupError],
         `Captain session settlement failed (${message(error)}) and host cleanup also failed: ${message(cleanupError)}`,
       );
+      await writeStream(stderr, `playbook run: ${message(cleanupFailure)}\n`);
       await writeStream(
         stderr,
-        `playbook run: ${message(cleanupFailure)}\n`,
-      );
-      await writeStream(
-        stderr,
-        'playbook run: writer lease retained until process exit because host cleanup was incomplete\n',
+        "playbook run: writer lease retained until process exit because host cleanup was incomplete\n",
       );
       return { code: EXIT.turn };
     }
@@ -555,7 +737,7 @@ export async function runPlaybookRun(options = {}) {
   if (options.signal?.aborted) {
     await writeStream(
       stderr,
-      'playbook run: Captain turn was interrupted; reply withheld\n',
+      "playbook run: Captain turn was interrupted; reply withheld\n",
     );
     return { code: EXIT.turn, sessionId, record: durableRecord };
   }
@@ -593,6 +775,8 @@ export async function driveHeadlessCaptainTurn({
   input,
   sessionId,
   cwd,
+  sessionLease,
+  replayObserver,
   loadModule,
   stderr,
   verbose = false,
@@ -600,7 +784,9 @@ export async function driveHeadlessCaptainTurn({
   createCaptainRuntime,
   createCaptainSessionId,
   createHostRuntime = createTmuxPlayRuntime,
+  createEffectLedgerWriteAhead,
   restoreSnapshot,
+  reconcileUncertainTurnReplay = false,
   beforeBossTurn,
   assertBeforeBossTurn,
   signal,
@@ -608,49 +794,62 @@ export async function driveHeadlessCaptainTurn({
   const replies = [];
   let shell;
   let host;
+  let createdHost;
   let baselineSnapshot;
   let uncertainRecord;
   try {
     try {
-      const created = await createCaptainSessionHost({
+      const created = createdHost = await createCaptainSessionHost({
         config,
         sessionId,
         cwd,
+        sessionLease,
         loadModule,
         observers: [
           {
             async onRecord(record) {
-              if (record.type === 'captain_reply') {
+              if (record.type === "captain_reply") {
                 replies.push(record.text);
-              } else if (record.type === 'captain_status') {
+              } else if (record.type === "captain_status") {
                 await writeStream(stderr, `${record.message}\n`);
-              } else if (verbose && record.type === 'captain_telemetry') {
+              } else if (verbose && record.type === "captain_telemetry") {
                 await writeStream(stderr, `\u00b7 ${record.topic}\n`);
               }
             },
           },
+          ...(replayObserver === undefined ? [] : [replayObserver]),
         ],
         ...(signal ? { signal } : {}),
         ...(adapterImports ? { adapterImports } : {}),
         ...(createCaptainRuntime ? { createCaptainRuntime } : {}),
         ...(createCaptainSessionId ? { createCaptainSessionId } : {}),
         createHostRuntime,
+        ...(createEffectLedgerWriteAhead
+          ? { createEffectLedgerWriteAhead }
+          : {}),
         ...(restoreSnapshot !== undefined ? { restoreSnapshot } : {}),
+        ...(reconcileUncertainTurnReplay
+          ? { reconcileUncertainTurnReplay: true }
+          : {}),
       });
       ({ shell, host, snapshot: baselineSnapshot } = created);
-      uncertainRecord = await beforeBossTurn?.(baselineSnapshot);
+      uncertainRecord = await beforeBossTurn?.(
+        baselineSnapshot,
+        shell,
+        created.reconcileRepositoryEffects,
+      );
     } catch (error) {
       throw new HeadlessHostSetupError(error);
     }
     await assertBeforeBossTurn?.();
     if (signal?.aborted) {
-      throw signal.reason ?? new Error('Captain turn aborted');
+      throw signal.reason ?? new Error("Captain turn aborted");
     }
     await host.runBossTurn(input);
     throwIfAborted(signal);
     if (
       replies.length !== 1 ||
-      typeof replies[0] !== 'string' ||
+      typeof replies[0] !== "string" ||
       replies[0].trim().length === 0
     ) {
       throw new Error(
@@ -658,24 +857,29 @@ export async function driveHeadlessCaptainTurn({
       );
     }
     if (shell === undefined) {
-      throw new Error('Captain shell host initialized without a shell');
+      throw new Error("Captain shell host initialized without a shell");
     }
-    const snapshot = shell.exportSnapshot();
-    if (snapshot === undefined) {
-      throw new Error('Captain turn settled without an exportable session snapshot');
+    const settlement = shell.exportSettlement();
+    if (settlement === undefined) {
+      throw new Error(
+        "Captain turn settled without an exportable session settlement",
+      );
     }
+    const { snapshot, unresolvedEffects, retentionUpdates } = settlement;
     if (
       snapshot.captain?.sessionId === sessionId ||
       snapshot.issuedSessionIds?.includes(sessionId)
     ) {
       throw new Error(
-        'logical session id collided with an internal Captain session id',
+        "logical session id collided with an internal Captain session id",
       );
     }
     return {
       sessionId,
       reply: replies[0],
       snapshot,
+      unresolvedEffects,
+      retentionUpdates,
       config: cloneJson(config),
       cwd,
       uncertainRecord,
@@ -695,6 +899,11 @@ export async function driveHeadlessCaptainTurn({
           : cleanupFailure;
       }
     }
+    try {
+      if (createdHost?.getInterruptedSettlement(uncertainRecord?.uncertain?.attemptId)) {
+        await writeStream(stderr, 'The latest work is saved. Continue this session with a new instruction.\n');
+      }
+    } catch { /* Preserve the original turn or cleanup error. */ }
     throw error;
   }
 }
@@ -706,9 +915,51 @@ export async function driveHeadlessCaptainTurn({
 export class CaptainSessionHostCleanupError extends AggregateError {
   constructor(errors, messageText) {
     super(errors, messageText);
-    this.name = 'CaptainSessionHostCleanupError';
-    this.code = 'PLAYBOOK_CAPTAIN_HOST_CLEANUP_INCOMPLETE';
+    this.name = "CaptainSessionHostCleanupError";
+    this.code = "PLAYBOOK_CAPTAIN_HOST_CLEANUP_INCOMPLETE";
   }
+}
+
+async function createStoreEffectLedgerService(lease) {
+  let mirror =
+    (await lease.read())?.effectLedger ?? emptyPlaybookEffectLedger();
+  mirror = assertPlaybookEffectLedger(mirror);
+  return Object.freeze({
+    snapshot: () => mirror,
+    async refresh() {
+      mirror = assertPlaybookEffectLedger(
+        (await lease.read())?.effectLedger ?? emptyPlaybookEffectLedger(),
+      );
+      return mirror;
+    },
+    async writeAhead(authority, commands) {
+      mirror = assertPlaybookEffectLedger(
+        await lease.writeEffectLedger(authority, commands),
+      );
+      return mirror;
+    },
+  });
+}
+
+function effectLedgerSnapshotFromCapabilities(hostCapabilities) {
+  const capabilities = Object.values(hostCapabilities);
+  if (capabilities.length === 0) return emptyPlaybookEffectLedger();
+  const mirror = assertPlaybookEffectLedger(
+    capabilities[0].effectLedger.snapshot(),
+  );
+  for (const capability of capabilities.slice(1)) {
+    if (
+      !isDeepStrictEqual(
+        assertPlaybookEffectLedger(capability.effectLedger.snapshot()),
+        mirror,
+      )
+    ) {
+      throw new Error(
+        "schema-3 current-host capabilities disagree on their effect ledger",
+      );
+    }
+  }
+  return mirror;
 }
 
 function isCaptainSessionHostCleanupIncomplete(error) {
@@ -719,60 +970,228 @@ function isCaptainSessionHostCleanupIncomplete(error) {
   );
 }
 
+export function restoreInterruptedProgress(record, ledger) {
+  const base = record.snapshot;
+  const progress = record.uncertain.progress;
+  const current = assertPlaybookEffectLedger(ledger);
+  if (!isPlaybookEffectLedgerMonotonicExtension(base.effectLedger, current)) {
+    throw new Error('Captain recovery evidence changed incompatibly');
+  }
+  const steps = progress?.steps ?? [];
+  const saved = progress?.snapshot;
+  const changedBoundaries = current.boundaries.filter((boundary, index) => !isDeepStrictEqual(boundary, base.effectLedger.boundaries[index]));
+  const changedOperations = current.logicalOperations.filter((operation, index) => !isDeepStrictEqual(operation, base.effectLedger.logicalOperations[index]));
+  const noWork = isUncertainTurnDiscardable(record);
+  const completion = steps.findLast((step) => step.kind === 'completion');
+  const facts = steps.map((step) => {
+    const name = `/${record.structuralProjection.catalog[step.playbookId].command}`;
+    if (step.kind === 'completion') return `${name} ${step.result.terminalOutcome?.kind === 'failure' ? 'stopped with a failure' : 'finished'}. ${step.result.description ?? 'No result description was supplied.'}`;
+    if (step.kind === 'answer') return `Captain selected the original task as the answer for ${name}. Questions: ${step.result.questions.map(({ question }) => JSON.stringify(question)).join('; ')}. Answer: ${JSON.stringify(step.result.instruction)}.`;
+    if (step.kind === 'preparation') return step.result === undefined
+      ? `Captain started preparation for ${name}; it may have used tools. No result was saved.`
+      : `Captain preparation for ${name}: ${step.result.summary}`;
+    return `${name} ${step.kind} call: ${step.result === undefined ? 'started; no result was saved' : step.result?.status === undefined ? 'result saved' : `returned ${step.result.status}`}.`;
+  });
+  const completedRoots = steps.filter((step) => step.kind === 'completion' && step.result.retention !== 'keep').map((step) => ({ kind: 'clear', rootPlaybookId: step.playbookId }));
+  const report = {
+    retentionUpdates: completedRoots,
+    effects: projectUnresolvedEffects(current, [
+      ...changedBoundaries.map(({ boundaryId }) => ({ kind: 'boundary', boundaryId })),
+      ...changedOperations.map(({ operationId }) => ({ kind: 'logical-operation', operationId })),
+    ]),
+    text: [noWork
+      ? 'The last message was not processed. Your previous position and pending questions are restored; no work was repeated.'
+      : saved
+        ? completion && !saved.frames?.length
+          ? 'The completed run is restored; no work was repeated.'
+          : 'The run stopped. Its saved position is restored; no work was repeated. Choose how to continue. Before repeating unfinished work, confirm that the earlier worker has stopped and check any outside actions it may have taken.'
+        : 'The exact stopping point was not saved. Files and repository evidence are preserved; no work was repeated. Check the saved work and stop any earlier worker before starting another attempt.', ...facts].join('\n\n'),
+  };
+  if (noWork) return { snapshot: base, report };
+  if (saved) {
+    if (!isPlaybookEffectLedgerMonotonicExtension(saved.effectLedger, current)) throw new Error('Saved step evidence changed incompatibly');
+    const frames = saved.frames?.map((frame) => {
+      const checkpoint = frame.runtime.recoveryCheckpoint;
+      const step = steps.find((entry) => entry.id === checkpoint?.id && entry.runtimeSessionId === frame.sessionId && entry.playbookId === frame.playbookId && entry.stateId === checkpoint?.stateId);
+      const { failedEffectAttempt: priorAttempt, ...runtime } = frame.runtime;
+      const interrupted = step !== undefined && checkpoint?.id === progress.positionStepId;
+      const attempts = interrupted && priorAttempt
+        ? new Set(current.boundaries.filter(({ sequence }) => sequence > priorAttempt.boundaryPrefix).map(({ attemptId }) => attemptId)) : undefined;
+      const failedEffectAttempt = attempts === undefined ? priorAttempt : attempts.size > 1 ? undefined
+        : { boundaryPrefix: priorAttempt.boundaryPrefix, attemptId: attempts.values().next().value ?? null };
+      return { ...frame, runtime: { ...runtime, effectLedger: current,
+        ...(failedEffectAttempt === undefined ? {} : { failedEffectAttempt }),
+        ...(step?.result === undefined || !interrupted ? {} : { recoveryCheckpoint: { ...checkpoint, result: step.result } }),
+      } };
+    });
+    return { snapshot: assertPlaybookCaptainShellSnapshot({ ...saved, effectLedger: current, ...(frames ? { frames } : {}) }), report };
+  }
+  const owners = new Set([...changedBoundaries, ...changedOperations, ...(progress?.steps ?? [])].map((entry) => entry.runtimeSessionId));
+  const clears = Object.entries(record.retainedGenerations ?? {})
+    .filter(([, generation]) => generation.frames.some((frame) => owners.has(frame.sessionId) || owners.has(frame.runtime.retainedEffectSourceSessionId)))
+    .map(([rootPlaybookId]) => ({ kind: 'clear', rootPlaybookId }));
+  const { frames, pendingBossQuestions, lastError, retainedEffectReconciliation, ...chat } = base;
+  return {
+    snapshot: assertPlaybookCaptainShellSnapshot({ ...chat, mode: 'chat', effectLedger: current }),
+    report: { ...report, retentionUpdates: [...completedRoots, ...clears], unresolvedEffects: report.effects },
+  };
+}
+
+// A drained turn can retain its actual stopped stack without replaying work.
+// This runs inside the shared Captain boundary, before any host can dispose it.
+export async function settleInterruptedRecovery(shell, lease) {
+  if (typeof lease.read !== 'function') return;
+  const record = await lease.read();
+  if (!record?.uncertain?.progress) return;
+  const settlement = shell.exportSettlement();
+  if (!settlement) return;
+  return { attemptId: record.uncertain.attemptId, record: await lease.settle({ attemptId: record.uncertain.attemptId, ...settlement }) };
+}
+
 export async function createCaptainSessionHost({
   config,
   sessionId,
   cwd,
+  sessionLease,
   loadModule,
   observers,
   adapterImports,
   createCaptainRuntime,
   createCaptainSessionId,
   createHostRuntime = createTmuxPlayRuntime,
+  createEffectLedgerWriteAhead,
   restoreSnapshot,
+  reconcileUncertainTurnReplay = false,
   signal,
+  graphs = [],
+  initialVisible = [],
 }) {
+  if (restoreSnapshot !== undefined) await sessionLease.assertContinuable({ cwd, executionProjection: config });
+  const hostCapabilities = await createRepositoryEffectCapabilities({
+    cwd,
+    catalog: config.catalog,
+    sessionId,
+    sessionLease,
+    createWriteAhead:
+      createEffectLedgerWriteAhead ?? createStoreEffectLedgerService,
+  });
+  const reconcileRepositoryEffects = async () => {
+    await refreshRepositoryEffectCapabilities(hostCapabilities);
+    await recoverIncompleteRepositoryEffects({
+      catalog: config.catalog,
+      capabilities: hostCapabilities,
+    });
+    return effectLedgerSnapshotFromCapabilities(hostCapabilities);
+  };
+  try {
+    await reconcileRepositoryEffects();
+  } catch (error) {
+    if (!reconcileUncertainTurnReplay) throw error;
+    throw new Error(
+      `Captain uncertain turn repository-effect reconciliation failed: ${message(error)}`,
+      { cause: error },
+    );
+  }
+  const currentEffectLedger = () =>
+    effectLedgerSnapshotFromCapabilities(hostCapabilities);
+  const interrupted = reconcileUncertainTurnReplay && typeof sessionLease.read === 'function'
+    ? await sessionLease.read() : undefined;
+  let sourceSnapshot = restoreSnapshot;
+  let interruptedReport;
+  if (interrupted) {
+    const restored = restoreInterruptedProgress(interrupted, currentEffectLedger());
+    sourceSnapshot = restored.snapshot;
+    interruptedReport = restored.report;
+  } else if (sourceSnapshot && !isDeepStrictEqual(sourceSnapshot.effectLedger, currentEffectLedger())) {
+    const recovered = await sessionLease.read?.();
+    if (recovered?.state !== 'settled' || !isDeepStrictEqual(recovered.snapshot.effectLedger, currentEffectLedger())) {
+      throw new Error('Captain session effect ledger requires reconciliation before source-state restoration');
+    }
+    sourceSnapshot = recovered.snapshot;
+  }
+  if (sourceSnapshot !== undefined && !interrupted && typeof sessionLease.consumeHints === "function") {
+    sourceSnapshot = attachSessionHints(sourceSnapshot, await sessionLease.consumeHints());
+  }
+  const bufferedRecords = [];
+  let presentationReady = false;
+  const presentationTurnOffset = restoreSnapshot?.sequences.turn ?? 0;
+  const forwardRecord = async (record) => {
+    const projected = presentationTurnOffset > 0 && typeof record.turnId === "number"
+      ? { ...record, turnId: record.turnId + presentationTurnOffset, ...(record.type === "turn_started" ? { turn: { ...record.turn, id: record.turn.id + presentationTurnOffset } } : {}) }
+      : record;
+    for (const observer of observers ?? []) await observer.onRecord?.(projected);
+  };
+  const bufferedObservers = [{ async onRecord(record) {
+    if (!presentationReady) bufferedRecords.push(record);
+    else await forwardRecord(record);
+  } }];
   const shell = createPlaybookCaptainShell(captainOptionsFromConfig(config), {
+    abortPreparation: (reason) => host?.abortActiveTurn(typeof reason === 'string' ? reason : 'Captain preparation exceeded its 150-second limit'),
     loadModule,
+    hostCapabilities,
+    ...(typeof sessionLease.recordProgress === 'function' ? {
+      recordProgress: (change) => sessionLease.recordProgress(change),
+    } : {}),
+    continuity: {
+      async beforeCall(participantId) { sessionLease.clearHint?.(participantId); await sessionLease.assertOwner(); },
+      acknowledged(participantId, token) { sessionLease.acknowledgeHint?.(participantId, token); },
+      async reset(participantId, reason) { await sessionLease.append({ type: "continuity_reset", timestamp: Date.now(), participantId, reason }); },
+    },
+    unresolvedEffectSettlement: {
+      begin: (input) => sessionLease.beginUnresolvedEffectAbandonment(input),
+      complete: (input) =>
+        sessionLease.completeUnresolvedEffectAbandonment(input),
+    },
     ...(createCaptainRuntime ? { createCaptainRuntime } : {}),
     ...(createCaptainSessionId
       ? { createSessionId: createCaptainSessionId }
       : {}),
   });
   let host;
+  let interruptedSettlement;
   try {
-    const captain = captainHostBoundary(shell, restoreSnapshot);
+    const captain = captainHostBoundary(shell, sourceSnapshot, sessionLease, (record) => { interruptedSettlement = record; });
     host = await createHostRuntime({
       captain,
       captainConfig: projectHostAgent(
         config.captain,
-        'Captain execution config.captain',
+        "Captain execution config.captain",
       ),
       players: config.players.map(({ id, ...agent }) => ({
         id,
         ...projectHostAgent(agent, `Captain execution config.players.${id}`),
       })),
       cwd,
-      observers,
+      observers: bufferedObservers,
       ...(signal ? { signal } : {}),
       ...(adapterImports ? { adapterImports } : {}),
     });
     const snapshot = shell.exportSnapshot();
     if (snapshot === undefined) {
       throw new Error(
-        'Captain shell initialized without an exportable session snapshot',
+        "Captain shell initialized without an exportable session snapshot",
       );
     }
     if (
-      restoreSnapshot !== undefined &&
-      !isDeepStrictEqual(snapshot, restoreSnapshot)
+      sourceSnapshot !== undefined &&
+      !isDeepStrictEqual(snapshot, assertPlaybookCaptainShellSnapshot(sourceSnapshot))
     ) {
-      throw new Error('restored Captain snapshot changed before the Boss turn');
+      throw new Error("restored Captain snapshot changed before the Boss turn");
     }
     if (sessionId !== undefined) {
       assertLogicalSessionIdDistinct({ sessionId, snapshot });
     }
-    return { shell, host, snapshot };
+    if (typeof sessionLease.recordContext === "function") {
+      await sessionLease.recordContext(validateSessionContext({
+        type: "session_context", timestamp: Date.now(), contextVersion: 1,
+        captainId: snapshot.captain.sessionId, configuration: config,
+        graphs: Object.keys(config.catalog).map((playbookId) => ({ playbookId, graph: graphs.find((item) => item.playbookId === playbookId)?.graph ?? null })), initialVisible,
+      }));
+    }
+    presentationReady = true;
+    for (const record of bufferedRecords) await forwardRecord(record);
+    if (interruptedReport) shell.selectInterruptedReport(interrupted.uncertain.input, interruptedReport);
+    return { shell, host, snapshot, reconcileRepositoryEffects, getInterruptedSettlement: (attemptId) => attemptId !== undefined && interruptedSettlement?.attemptId === attemptId ? interruptedSettlement.record : undefined };
   } catch (error) {
     let cleanupError;
     try {
@@ -791,15 +1210,59 @@ export async function createCaptainSessionHost({
   }
 }
 
+// PBCLI-55: both presentations install one authoritative retention map at the
+// same post-shell, pre-turn boundary. Fresh-session guarded initialization
+// publishes either the intentional empty boundary or the transferred map.
+export async function installRetainedGenerationsForLaunch({
+  lease,
+  shell,
+  freshBoundary,
+  onFreshRecord,
+  onLegacyRecord,
+  onInvalidRecord,
+  retainedGenerations,
+  reconcileRepositoryEffects,
+}) {
+  let authoritative = retainedGenerations;
+  if (freshBoundary !== undefined) {
+    const record = await lease.initializeSettledWithPredecessor({
+      ...freshBoundary,
+      onLegacyRecord,
+      onInvalidRecord,
+    });
+    authoritative = record.retainedGenerations ?? {};
+  }
+  await reconcileRepositoryEffects?.();
+  if (freshBoundary !== undefined) {
+    onFreshRecord?.(await lease.read());
+  }
+  await shell.installRetainedGenerations(authoritative);
+  await lease.assertOwner();
+  return authoritative;
+}
+
 // PBCLI-20: restoration enters through the host's one init boundary. The
 // restored shell is fresh and receives restore instead of init, never both.
-function captainHostBoundary(shell, restoreSnapshot) {
+function captainHostBoundary(shell, restoreSnapshot, sessionLease, onInterrupted) {
   return {
     init: (session) =>
       restoreSnapshot === undefined
         ? shell.init(session)
         : shell.restore(session, restoreSnapshot),
-    handleBossTurn: (turn, context) => shell.handleBossTurn(turn, context),
+    async handleBossTurn(turn, context) {
+      onInterrupted(undefined);
+      try {
+        const result = await shell.handleBossTurn(turn, context);
+        context.signal.throwIfAborted();
+        return result;
+      } catch (error) {
+        try { onInterrupted(await settleInterruptedRecovery(shell, sessionLease)); }
+        catch (settlementError) {
+          throw new AggregateError([error, settlementError], `Captain turn stopped (${message(error)}) and its state could not be saved (${message(settlementError)})`);
+        }
+        throw error;
+      }
+    },
     prepareDispose: () => shell.prepareDispose?.(),
     dispose: () => shell.dispose?.(),
   };
@@ -844,6 +1307,7 @@ export async function validateFrozenExecutionConfig(
     structuralProjection,
     executionProjection,
   );
+  assertFrozenFastModesSupported(config);
   const catalogItems = Object.entries(config.catalog);
 
   // Preserve the complete-catalog preparation transaction: prepare every
@@ -859,7 +1323,9 @@ export async function validateFrozenExecutionConfig(
         authoredFrom: item.from,
       });
     } catch (cause) {
-      throw new Error(`stored playbook ${JSON.stringify(id)} failed to prepare: ${message(cause)}`);
+      throw new Error(
+        `stored playbook ${JSON.stringify(id)} failed to prepare: ${message(cause)}`,
+      );
     }
     if (prepared !== undefined && prepared !== item.from) {
       throw new Error(
@@ -871,12 +1337,16 @@ export async function validateFrozenExecutionConfig(
   for (const [id, item] of catalogItems) {
     let entry;
     try {
-      entry = (await loadModule(item.from))?.default;
+      entry = snapshotRegistryEntry((await loadModule(item.from))?.default);
     } catch (cause) {
-      throw new Error(`stored playbook ${JSON.stringify(id)} failed to import: ${message(cause)}`);
+      throw new Error(
+        `stored playbook ${JSON.stringify(id)} failed to import: ${message(cause)}`,
+      );
     }
-    if (!isValidRegistryEntry(entry)) {
-      throw new Error(`stored playbook ${JSON.stringify(id)} exposes no valid registry entry`);
+    if (invalidRegistryEntryReason(entry) !== undefined) {
+      throw new Error(
+        `stored playbook ${JSON.stringify(id)} exposes no valid registry entry`,
+      );
     }
     if (
       entry.id !== id ||
@@ -884,10 +1354,7 @@ export async function validateFrozenExecutionConfig(
       entry.intent !== item.intent ||
       entry.artifactSchema !== item.artifactSchema ||
       !isDeepStrictEqual(entry.requiredRoleIds, item.requiredRoleIds) ||
-      !isDeepStrictEqual(
-        entry.concurrentRoleSets,
-        item.concurrentRoleSets,
-      )
+      !isDeepStrictEqual(entry.concurrentRoleSets, item.concurrentRoleSets)
     ) {
       throw new Error(
         `stored playbook ${JSON.stringify(id)} no longer matches its recorded manifest identity`,
@@ -895,6 +1362,44 @@ export async function validateFrozenExecutionConfig(
     }
   }
   return config;
+}
+
+function assertFrozenFastModesSupported(config) {
+  if (config.captain.fastMode !== undefined) {
+    assertFastModeSupported(
+      config.captain.adapter,
+      "stored Captain fastMode",
+    );
+  }
+
+  const playerAdapters = new Map();
+  for (const player of config.players) {
+    playerAdapters.set(player.id, player.adapter);
+    if (player.fastMode !== undefined) {
+      assertFastModeSupported(
+        player.adapter,
+        `stored player ${JSON.stringify(player.id)} fastMode`,
+      );
+    }
+  }
+
+  for (const [playbookId, item] of Object.entries(config.catalog)) {
+    for (const [roleId, binding] of Object.entries(item.roles)) {
+      if (binding.fastMode === undefined) continue;
+      const adapter = playerAdapters.get(binding.playerId);
+      if (adapter === undefined) {
+        throw new Error(
+          `stored playbook ${JSON.stringify(playbookId)} role ` +
+            `${JSON.stringify(roleId)} names an unknown player`,
+        );
+      }
+      assertFastModeSupported(
+        adapter,
+        `stored playbook ${JSON.stringify(playbookId)} role ` +
+          `${JSON.stringify(roleId)} fastMode`,
+      );
+    }
+  }
 }
 
 function adaptersFromExecutionConfig(config) {
@@ -913,7 +1418,7 @@ function assertLogicalSessionIdDistinct(record) {
       record.snapshot.issuedSessionIds.includes(record.sessionId))
   ) {
     throw new Error(
-      'logical session id collides with an internal Captain session id',
+      "logical session id collides with an internal Captain session id",
     );
   }
 }
@@ -922,42 +1427,13 @@ function memoizedModuleLoader(loadModule) {
   const modules = new Map();
   return (specifier) => {
     if (!modules.has(specifier)) {
-      modules.set(specifier, Promise.resolve().then(() => loadModule(specifier)));
+      modules.set(
+        specifier,
+        Promise.resolve().then(() => loadModule(specifier)),
+      );
     }
     return modules.get(specifier);
   };
-}
-
-function isValidRegistryEntry(value) {
-  if (
-    value === null ||
-    typeof value !== 'object' ||
-    Array.isArray(value) ||
-    typeof value.id !== 'string' ||
-    value.id.trim().length === 0 ||
-    typeof value.command !== 'string' ||
-    value.command.trim().length === 0 ||
-    typeof value.intent !== 'string' ||
-    value.artifactSchema !== 2 ||
-    !Array.isArray(value.requiredRoleIds) ||
-    value.requiredRoleIds.some(
-      (role) => typeof role !== 'string' || role.trim().length === 0,
-    ) ||
-    new Set(value.requiredRoleIds).size !== value.requiredRoleIds.length ||
-    !Array.isArray(value.concurrentRoleSets) ||
-    typeof value.validateOptions !== 'function' ||
-    typeof value.createRuntime !== 'function'
-  ) {
-    return false;
-  }
-  const roles = new Set(value.requiredRoleIds);
-  return value.concurrentRoleSets.every(
-    (set) =>
-      Array.isArray(set) &&
-      set.length >= 2 &&
-      set.every((role) => typeof role === 'string' && roles.has(role)) &&
-      new Set(set).size === set.length,
-  );
 }
 
 export function captainOptionsFromConfig(config) {
@@ -979,7 +1455,7 @@ export function captainOptionsFromConfig(config) {
         config.players.map(({ id, ...agent }) => [id, cloneJson(agent)]),
       ),
     },
-    ...(typeof config.captain.adapter === 'string' &&
+    ...(typeof config.captain.adapter === "string" &&
     config.captain.adapter.length > 0
       ? { captainAdapter: config.captain.adapter }
       : {}),
@@ -1013,65 +1489,65 @@ export function parseRunArgs(argv) {
   const positionals = [];
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--') {
+    if (arg === "--") {
       parsed.terminated = true;
       positionals.push(...argv.slice(index + 1));
       break;
     }
-    if (arg === '--help' || arg === '-h') parsed.help = true;
-    else if (arg === '--json') parsed.json = true;
-    else if (arg === '--verbose') parsed.verbose = true;
-    else if (arg === '--no-provision') parsed.noProvision = true;
-    else if (arg === '--retry-uncertain') {
+    if (arg === "--help" || arg === "-h") parsed.help = true;
+    else if (arg === "--json") parsed.json = true;
+    else if (arg === "--verbose") parsed.verbose = true;
+    else if (arg === "--no-provision") parsed.noProvision = true;
+    else if (arg === "--retry-uncertain") {
       if (parsed.retryUncertain) {
-        throw new Error('--retry-uncertain may be specified only once');
+        throw new Error("--retry-uncertain may be specified only once");
       }
       parsed.retryUncertain = true;
-    } else if (arg === '--discard-uncertain') {
+    } else if (arg === "--discard-uncertain") {
       if (parsed.discardUncertain) {
-        throw new Error('--discard-uncertain may be specified only once');
+        throw new Error("--discard-uncertain may be specified only once");
       }
       parsed.discardUncertain = true;
-    }
-    else if (arg === '--continue') {
-      if (parsed.continue) throw new Error('--continue may be specified only once');
+    } else if (arg === "--continue") {
+      if (parsed.continue)
+        throw new Error("--continue may be specified only once");
       parsed.continue = true;
-    } else if (arg === '--session') {
+    } else if (arg === "--session") {
       const value = argv[index + 1];
-      if (value === undefined || value === '') {
-        throw new Error('--session needs a UUID value');
+      if (value === undefined || value === "") {
+        throw new Error("--session needs a UUID value");
       }
       if (parsed.sessionId !== undefined) {
-        throw new Error('--session may be specified only once');
+        throw new Error("--session may be specified only once");
       }
       parsed.sessionId = value;
       index += 1;
-    } else if (arg.startsWith('--session=')) {
-      const value = arg.slice('--session='.length);
-      if (value === '') throw new Error('--session needs a UUID value');
+    } else if (arg.startsWith("--session=")) {
+      const value = arg.slice("--session=".length);
+      if (value === "") throw new Error("--session needs a UUID value");
       if (parsed.sessionId !== undefined) {
-        throw new Error('--session may be specified only once');
+        throw new Error("--session may be specified only once");
       }
       parsed.sessionId = value;
-    } else if (arg === '--with') {
+    } else if (arg === "--with") {
       const value = argv[index + 1];
-      if (value === undefined || value === '') {
-        throw new Error('--with needs a value');
+      if (value === undefined || value === "") {
+        throw new Error("--with needs a value");
       }
       parsed.withPaths.push(value);
       index += 1;
-    } else if (arg.startsWith('--with=')) {
-      const value = arg.slice('--with='.length);
-      if (value === '') throw new Error('--with needs a value');
+    } else if (arg.startsWith("--with=")) {
+      const value = arg.slice("--with=".length);
+      if (value === "") throw new Error("--with needs a value");
       parsed.withPaths.push(value);
     } else if (
       RETIRED_FLAGS.has(arg) ||
       [...RETIRED_FLAGS].some((flag) => arg.startsWith(`${flag}=`))
     ) {
       throw new Error(
-        `${arg.split('=')[0]} was removed; configure the shared Captain session in playbook.config.yaml or a --with overlay`,
+        `${arg.split("=")[0]} was removed; configure the shared Captain session in playbook.config.yaml or a --with overlay`,
       );
-    } else if (arg.startsWith('-')) {
+    } else if (arg.startsWith("-")) {
       throw new Error(`unknown option ${arg}`);
     } else {
       positionals.push(arg);
@@ -1079,15 +1555,15 @@ export function parseRunArgs(argv) {
   }
   if (positionals.length > 1) {
     throw new Error(
-      'expected at most one [input] argument; quote multi-word input as one shell argument',
+      "expected at most one [input] argument; quote multi-word input as one shell argument",
     );
   }
   if (parsed.continue && parsed.sessionId !== undefined) {
-    throw new Error('--continue and --session are mutually exclusive');
+    throw new Error("--continue and --session are mutually exclusive");
   }
   if (parsed.retryUncertain && parsed.discardUncertain) {
     throw new Error(
-      '--retry-uncertain and --discard-uncertain are mutually exclusive',
+      "--retry-uncertain and --discard-uncertain are mutually exclusive",
     );
   }
   if (
@@ -1095,7 +1571,7 @@ export function parseRunArgs(argv) {
     parsed.sessionId === undefined
   ) {
     throw new Error(
-      '--retry-uncertain and --discard-uncertain require --session <id>',
+      "--retry-uncertain and --discard-uncertain require --session <id>",
     );
   }
   if (
@@ -1103,7 +1579,7 @@ export function parseRunArgs(argv) {
     (parsed.continue || positionals.length > 0)
   ) {
     throw new Error(
-      'uncertain-turn recovery accepts only an explicit --session and no input',
+      "uncertain-turn recovery accepts only an explicit --session and no input",
     );
   }
   if (
@@ -1111,20 +1587,20 @@ export function parseRunArgs(argv) {
     (parsed.json || parsed.verbose || parsed.noProvision)
   ) {
     throw new Error(
-      '--discard-uncertain does not accept --json, --verbose, or --no-provision',
+      "--discard-uncertain does not accept --json, --verbose, or --no-provision",
     );
   }
   if (
     (parsed.retryUncertain || parsed.discardUncertain) &&
     parsed.withPaths.length > 0
   ) {
-    throw new Error('--with is unavailable during uncertain-turn recovery');
+    throw new Error("--with is unavailable during uncertain-turn recovery");
   }
   if (
     parsed.sessionId !== undefined &&
     !SESSION_ID_PATTERN.test(parsed.sessionId)
   ) {
-    throw new Error('--session needs a canonical UUID value');
+    throw new Error("--session needs a canonical UUID value");
   }
   parsed.input = positionals[0];
   return parsed;
@@ -1147,18 +1623,15 @@ async function reportReadinessFailure({
     const [first, ...rest] = lines;
     await writeStream(
       stderr,
-      [
-        ...(first ? [`playbook run: ${first}`] : []),
-        ...rest,
-      ]
+      [...(first ? [`playbook run: ${first}`] : []), ...rest]
         .map((line) => `${line}\n`)
-        .join(''),
+        .join(""),
     );
   }
   if (failingAdapters.length > 0) {
     await writeStream(
       stderr,
-      `playbook run: adapters not ready: ${failingAdapters.join(', ')}\n`,
+      `playbook run: adapters not ready: ${failingAdapters.join(", ")}\n`,
     );
   }
 }
@@ -1182,7 +1655,7 @@ async function resolveBossInput(input, options, stderr) {
   if (resolved.trim().length === 0) {
     await writeStream(
       stderr,
-      'playbook run: empty input; pass one argument or pipe a Boss message on stdin\n',
+      "playbook run: empty input; pass one argument or pipe a Boss message on stdin\n",
     );
     return { ok: false };
   }
@@ -1191,22 +1664,22 @@ async function resolveBossInput(input, options, stderr) {
 
 async function awaitWithAbort(value, signal) {
   if (signal === undefined) return value;
-  if (signal.aborted) throw signal.reason ?? new Error('operation aborted');
+  if (signal.aborted) throw signal.reason ?? new Error("operation aborted");
   let onAbort;
   const aborted = new Promise((_, reject) => {
-    onAbort = () => reject(signal.reason ?? new Error('operation aborted'));
-    signal.addEventListener('abort', onAbort, { once: true });
+    onAbort = () => reject(signal.reason ?? new Error("operation aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
     return await Promise.race([value, aborted]);
   } finally {
-    signal.removeEventListener('abort', onAbort);
+    signal.removeEventListener("abort", onAbort);
   }
 }
 
 function throwIfAborted(signal) {
   if (signal?.aborted) {
-    throw signal.reason ?? new Error('operation aborted');
+    throw signal.reason ?? new Error("operation aborted");
   }
 }
 
@@ -1217,14 +1690,14 @@ function registryPreparer(args, options, stderr) {
       enabled: !args.noProvision,
       stderr,
       hostRoots: options.hostRoots,
-      commandName: 'playbook run',
+      commandName: "playbook run",
     })
   );
 }
 
 function createAttemptId(options) {
   const attemptId = (options.createAttemptId ?? randomUUID)();
-  if (typeof attemptId !== 'string' || !UUID_PATTERN.test(attemptId)) {
+  if (typeof attemptId !== "string" || !UUID_PATTERN.test(attemptId)) {
     throw new Error(
       `uncertain turn attempt id generator returned a non-UUID value: ${JSON.stringify(attemptId)}`,
     );
@@ -1234,35 +1707,108 @@ function createAttemptId(options) {
 
 async function releaseLease(lease) {
   if (lease === undefined) return undefined;
+  const replayChannel = HEADLESS_REPLAY_CHANNELS.get(lease);
   try {
-    await lease.release();
+    const status = await lease.release();
+    await reportHeadlessReplay(replayChannel, status);
+    HEADLESS_REPLAY_CHANNELS.delete(lease);
     return undefined;
   } catch (error) {
+    await reportHeadlessReplay(replayChannel);
     return error;
   }
 }
 
-async function reportUncertainSession(stderr, sessionId) {
+function createHeadlessReplayChannel({ lease, sessionId, stderr }) {
+  if (
+    typeof lease?.append !== "function" ||
+    typeof lease?.streamStatus !== "function"
+  ) {
+    return undefined;
+  }
+  let warningPending = false;
+  let warningAttempted = false;
+  const replay = createReplayRecordObserver({
+    lease,
+    onIncomplete() {
+      warningPending = true;
+    },
+  });
+  const channel = Object.freeze({
+    ...replay,
+    async flushWarning() {
+      if (!warningPending || warningAttempted) return;
+      warningAttempted = true;
+      try {
+        await writeStream(
+          stderr,
+          `playbook run: ${replayIncompleteMessage(sessionId)}\n`,
+        );
+      } catch {
+        // The bounded warning is best-effort and never changes run outcome.
+      }
+    },
+  });
+  HEADLESS_REPLAY_CHANNELS.set(lease, channel);
+  return channel;
+}
+
+async function reportHeadlessReplay(channel, status) {
+  if (channel === undefined) return;
+  await channel.reportIfIncomplete(status);
+  await channel.flushWarning();
+}
+
+async function reportUncertainSession(stderr, sessionId, hasRecordedWork = false) {
   await writeStream(
     stderr,
     [
       `playbook run: Captain session ${JSON.stringify(sessionId)} has an uncertain turn and will not be replayed automatically`,
-      'Retry may duplicate external effects from the interrupted attempt; discard abandons that attempted turn.',
+      hasRecordedWork
+        ? "Retry restores and reports the saved work without running it. Discard is unavailable because work or repository evidence was recorded."
+        : "Retry restores and reports without running work. Discard abandons the attempted turn only when no work was recorded.",
       `playbook run --session ${sessionId} --retry-uncertain`,
-      `playbook run --session ${sessionId} --discard-uncertain`,
-      '',
-    ].join('\n'),
+      ...(hasRecordedWork ? [] : [`playbook run --session ${sessionId} --discard-uncertain`]),
+      "",
+    ].join("\n"),
+  );
+}
+
+function legacyCaptainSessionReason(schemaVersion) {
+  if (schemaVersion === 2) {
+    return "schema 2 has incompatible player identity";
+  }
+  if (schemaVersion === 3 || schemaVersion === 4) {
+    return `schema ${JSON.stringify(schemaVersion)} predates the artifact-schema-3 effect-authority cutover and is not resumable`;
+  }
+  if (schemaVersion === 5) {
+    return "schema 5 predates the canonical schema-6 unresolved-effect settlement boundary for the artifact-schema-3 effect-authority cutover and is not resumable";
+  }
+  return `schema ${JSON.stringify(schemaVersion)} is unsupported`;
+}
+
+export async function reportSkippedCaptainSession(
+  stderr,
+  commandName,
+  kind,
+  { sessionId, path, schemaVersion, reason },
+) {
+  const explanation =
+    kind === "legacy" ? reason ?? legacyCaptainSessionReason(schemaVersion) : reason;
+  await writeStream(
+    stderr,
+    `${commandName}: skipping ${kind} Captain session ${JSON.stringify(sessionId)} at ${JSON.stringify(path)} because ${explanation}; move it outside the sessions directory or remove it to silence this warning\n`,
   );
 }
 
 function replayInvocation(argv, args, input) {
   if (args.retryUncertain || args.discardUncertain) {
-    return ['run', ...argv];
+    return ["run", ...argv];
   }
-  if (args.input !== undefined) return ['run', ...argv];
+  if (args.input !== undefined) return ["run", ...argv];
   return args.terminated
-    ? ['run', ...argv, input]
-    : ['run', ...argv, '--', input];
+    ? ["run", ...argv, input]
+    : ["run", ...argv, "--", input];
 }
 
 function cloneJson(value) {
@@ -1274,67 +1820,70 @@ async function readAllStdin() {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function writeStream(stream, text) {
   const ready = stream.write(text);
-  if (ready !== false || typeof stream.once !== 'function') return;
+  if (ready !== false || typeof stream.once !== "function") return;
   await new Promise((resolvePromise, rejectPromise) => {
     const onDrain = () => {
-      stream.off?.('error', onError);
+      stream.off?.("error", onError);
       resolvePromise();
     };
     const onError = (error) => {
-      stream.off?.('drain', onDrain);
+      stream.off?.("drain", onDrain);
       rejectPromise(error);
     };
-    stream.once('drain', onDrain);
-    stream.once('error', onError);
+    stream.once("drain", onDrain);
+    stream.once("error", onError);
   });
 }
 
 function runHelpText(userConfigPath) {
   return [
-    'Usage:',
-    '  playbook run [--with <path>]... [--no-provision] [--json]',
-    '               [--verbose] [--] [input]',
-    '  playbook run (--continue | --session <id>) [--with <path>]...',
-    '               [--no-provision] [--json] [--verbose] [--] [reply]',
-    '  playbook run --session <id> --retry-uncertain [--no-provision]',
-    '  playbook run --session <id> --discard-uncertain',
-    '',
-    '  [input]  one exact Boss message; read verbatim from stdin when omitted',
-    '  --        end options so a flag-shaped input remains Boss text',
-    '',
+    "Usage:",
+    "  playbook run [--with <path>]... [--no-provision] [--json]",
+    "               [--verbose] [--] [input]",
+    "  playbook run (--continue | --session <id>) [--with <path>]...",
+    "               [--no-provision] [--json] [--verbose] [--] [reply]",
+    "  playbook run --session <id> --retry-uncertain [--no-provision]",
+    "  playbook run --session <id> --discard-uncertain",
+    "",
+    "  [input]  one exact Boss message; read verbatim from stdin when omitted",
+    "  --        end options so a flag-shaped input remains Boss text",
+    "",
     `Default config: ${userConfigPath}`,
-    '',
-    'A new run uses the same configured Captain, enabled playbooks, players,',
-    'options, overlays, provisioning, and readiness gate as interactive',
-    '`playbook`. Enable an external registry in that config, then invoke its',
-    'effective /command through Captain. The former positional registry,',
-    'resume, and run-only binding surfaces have been removed.',
-    'Stable agents live under top-level players; every playbook-local role',
-    'binds explicitly under playbooks.<id>.roles. Equal player ids share one',
-    'provider conversation; distinct ids remain isolated.',
-    'Legacy playbooks.<id>.players is rejected and is not auto-migrated,',
-    'because choosing new ids decides sharing versus isolation.',
-    'An ordinary continued run restores the stored structure and working',
-    'directory, then reads current config and overlays for model and effort.',
-    'Uncertain retry instead uses its exact recorded input and settings.',
-    '',
-    'Options:',
-    '  --with <path>    overlay a generic config fragment (repeatable)',
-    '  --no-provision   do not provision thin filesystem registry engines',
-    '  --continue       reply to the latest durable Captain session',
-    '  --session <id>   reply to one durable Captain session UUID',
-    '  --retry-uncertain retry that session\'s exact recorded uncertain input',
-    '  --discard-uncertain discard that session\'s uncertain attempt',
+    "",
+    "A new run uses the same configured Captain, enabled playbooks, players,",
+    "options, overlays, provisioning, and readiness gate as interactive",
+    "`playbook`. Enable an external registry in that config, then invoke its",
+    "effective /command through Captain. The former positional registry,",
+    "resume, and run-only binding surfaces have been removed.",
+    "Stable agents live under top-level players; every playbook-local role",
+    "binds explicitly under playbooks.<id>.roles. Equal player ids share one",
+    "provider conversation; distinct ids remain isolated.",
+    "Legacy playbooks.<id>.players is rejected and is not auto-migrated,",
+    "because choosing new ids decides sharing versus isolation.",
+    "Bare continuation prefers the newest session stored for the invoking",
+    "working directory and reports when it uses the global newest fallback.",
+    "An ordinary continued run restores that stored structure and working",
+    "directory, then reads current config and overlays for model, effort,",
+    "and fast mode.",
+    "Uncertain retry only restores and reports; later work uses current settings.",
+    "",
+    "Options:",
+    "  --with <path>    overlay a generic config fragment (repeatable)",
+    "  --no-provision   do not provision thin filesystem registry engines",
+    "  --continue       prefer this working directory, else global newest",
+    "  --session <id>   reply to one durable Captain session UUID",
+    "  --retry-uncertain restore and report interrupted work without running it",
+    "  --discard-uncertain discard only an attempt with no recorded work",
     '  --json           print exactly {"sessionId", "reply"}',
-    '  --verbose        print Captain telemetry topics to stderr',
-    '  -h, --help       print this help without reading input or config',
-    '',
-  ].join('\n');
+    "  --verbose        print Captain telemetry topics to stderr",
+    "  -h, --help       print this help without reading input or config",
+    "",
+  ].join("\n");
 }
 
 function message(error) {

@@ -3,10 +3,19 @@
 
 // PBCLI-23: durable headless Captain sessions use one exact settled/uncertain
 // record union and one exclusive, crash-recoverable lease per logical session.
+// PBCLI-53: a fresh lease may move its newest same-directory predecessor's
+// complete retained-generation map under guarded source-first publication.
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  SESSION_MANIFEST_VERSION, EMPTY_REPLAY_SHA256, sha256,
+  validateSessionManifest, recoveryFromManifest, manifestFromRecovery,
+  contextFromRecovery, validateSessionContext, validateSessionHints,
+  projectRecovery, isRecordedAbsolutePath,
+} from './portable-codec.js';
 import { constants } from 'node:fs';
 import {
+  access,
   chmod,
   link,
   lstat,
@@ -23,19 +32,54 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { assertSupportedEffort } from '@sublang/cligent';
 import { KNOWN_PLAYER_ADAPTERS } from '@sublang/cligent/tmux-play';
-import { snapshotJsonValue } from '../../../../src/xstate-runtime.js';
-import { assertPlaybookCaptainShellSnapshot } from '../playbook-captain.js';
+import {
+  assertPlaybookEffectLedger,
+  assertPlaybookRuntimeSnapshot,
+  emptyPlaybookEffectLedger,
+  isPlaybookEffectLedgerMonotonicExtension,
+  snapshotJsonValue,
+} from '../../../../src/xstate-runtime.js';
+import {
+  assertPlaybookCaptainShellSnapshot,
+  assertPlaybookCaptainUnresolvedEffects,
+} from '../playbook-captain.js';
 
-export const CAPTAIN_SESSION_RECORD_SCHEMA_VERSION = 3;
+export const CAPTAIN_SESSION_RECORD_SCHEMA_VERSION = 6;
 export const CAPTAIN_SESSION_RECORD_KIND = 'captain-session';
+export const RECORDS_STREAM_VERSION = 1;
+const LEGACY_CAPTAIN_SESSION_RECORD_SCHEMA_VERSION = 3;
+// The interrupted retention change emitted this required-member shape before
+// canonical writes returned to additive schema 3. Both pre-effect shapes and
+// the pre-unresolved-effects schema-5 shape are projected in memory only far
+// enough to validate malformed data before the effect-authority cutover
+// classifies them as nonresumable.
+const COMPATIBLE_RETENTION_RECORD_SCHEMA_VERSION = 4;
+const PRE_UNRESOLVED_EFFECTS_RECORD_SCHEMA_VERSION = 5;
+const CURRENT_ARTIFACT_SCHEMAS = new Set([3]);
+const PRE_EFFECT_ARTIFACT_SCHEMAS = new Set([2, 3]);
 export const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const CAPTAIN_SESSION_STRUCTURAL_PROJECTION_SCHEMA_VERSION = 1;
 export const CAPTAIN_SESSION_EXECUTION_PROJECTION_SCHEMA_VERSION = 2;
 
 const PLAYER_ID_PATTERN = /^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$/;
-const ROLE_ID_PATTERN = /^[a-z][a-z0-9_-]*$/;
+const ROLE_ID_WHITESPACE_OR_CONTROL = /[\s\p{Cc}]/u;
 const RESERVED_ID = 'captain';
+
+// PBCLI-4: a local role id is its source role name lowercased by Unicode case
+// mapping — nonempty, free of whitespace and control characters, and equal to
+// its own lowercase form. The rule restricts neither script nor alphabet, so
+// `coder`, `编码者`, and `作者` are canonical while `Coder` is not. Callers
+// enforce the reserved `captain` name separately.
+export function isCanonicalLocalRoleId(value) {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value === value.toLowerCase() &&
+    !ROLE_ID_WHITESPACE_OR_CONTROL.test(value)
+  );
+}
+const HOST_CAPABILITIES_OPTION_KEY = 'hostCapabilities';
 const KNOWN_ADAPTERS = new Set(KNOWN_PLAYER_ADAPTERS);
 
 const COMMON_RECORD_KEYS = [
@@ -49,7 +93,12 @@ const COMMON_RECORD_KEYS = [
   'structuralProjection',
   'lastAppliedExecutionProjection',
   'snapshot',
+  'effectLedger',
+  'unresolvedEffects',
 ];
+const LEGACY_COMMON_RECORD_KEYS = COMMON_RECORD_KEYS.filter(
+  (key) => key !== 'effectLedger' && key !== 'unresolvedEffects',
+);
 const UNCERTAIN_KEYS = [
   'baseUpdatedAt',
   'input',
@@ -57,6 +106,11 @@ const UNCERTAIN_KEYS = [
   'attemptNumber',
   'markedAt',
   'attemptedExecutionProjection',
+];
+const UNCERTAIN_ABANDONMENT_KEYS = [
+  'phase',
+  'rootPlaybookId',
+  'unresolvedEffects',
 ];
 const RELEASED_SCHEMA_2_COMMON_RECORD_KEYS = [
   'schemaVersion',
@@ -88,7 +142,11 @@ const LEASE_OWNER_KEYS = [
   'hostname',
   'acquiredAt',
 ];
+const PLAYBOOK_SESSION_NOT_FOUND = 'PLAYBOOK_SESSION_NOT_FOUND';
+const PLAYBOOK_SESSION_LEASE_ACTIVE = 'PLAYBOOK_SESSION_LEASE_ACTIVE';
+const ACTIVE_LEASE_ERROR = Symbol('active Playbook session lease');
 const DEFAULT_FS_OPERATIONS = Object.freeze({
+  access,
   chmod,
   link,
   lstat,
@@ -99,6 +157,15 @@ const DEFAULT_FS_OPERATIONS = Object.freeze({
   rmdir,
   unlink,
 });
+const EMPTY_REPLAY_PREFIX_DIGEST = createHash('sha256').digest('hex');
+const REPLAY_READ_CHUNK_SIZE = 64 * 1024;
+
+class ReplaySnapshotChangedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ReplaySnapshotChangedError';
+  }
+}
 
 class CaptainSessionRecordSchemaError extends Error {
   constructor(schemaVersion, message, cause) {
@@ -109,12 +176,449 @@ class CaptainSessionRecordSchemaError extends Error {
   }
 }
 
+class CaptainSessionRecordNonresumableError extends
+  CaptainSessionRecordSchemaError {
+  constructor(schemaVersion, message, orderingBoundary, cause) {
+    super(schemaVersion, message, cause);
+    this.name = 'CaptainSessionRecordNonresumableError';
+    this.orderingBoundary = orderingBoundary;
+  }
+}
+
+class CaptainSessionNotFoundError extends Error {
+  constructor(sessionId, path) {
+    super(
+      `Captain session ${JSON.stringify(sessionId)} at ${JSON.stringify(path)} does not exist`,
+    );
+    this.name = 'CaptainSessionNotFoundError';
+    this.code = PLAYBOOK_SESSION_NOT_FOUND;
+  }
+}
+
+class CaptainSessionLeaseActiveError extends Error {
+  constructor(sessionId, pid) {
+    super(
+      `cannot acquire Captain session ${JSON.stringify(sessionId)} lease: Captain session lease is active in process ${pid}`,
+    );
+    this.name = 'CaptainSessionLeaseActiveError';
+    this.code = PLAYBOOK_SESSION_LEASE_ACTIVE;
+    this[ACTIVE_LEASE_ERROR] = true;
+    this.sessionId = sessionId;
+    this.pid = pid;
+  }
+}
+
+function foreignCaptainSessionLeaseActiveError(sessionId, hostname) {
+  const error = new Error(
+    `Captain session ${JSON.stringify(sessionId)} lease is owned by foreign host ${JSON.stringify(hostname)}`,
+  );
+  error.code = PLAYBOOK_SESSION_LEASE_ACTIVE;
+  error[ACTIVE_LEASE_ERROR] = true;
+  return error;
+}
+
+function isActiveLeaseError(value) {
+  return value?.[ACTIVE_LEASE_ERROR] === true;
+}
+
 export function defaultCaptainSessionsDir(
   env = process.env,
   home = env.HOME ?? homedir(),
 ) {
-  const stateHome = env.XDG_STATE_HOME || join(home, '.local', 'state');
-  return join(stateHome, 'playbook', 'sessions');
+  return join(typeof env.SPEX_HOME === 'string' && env.SPEX_HOME.trim() !== '' ? env.SPEX_HOME : join(home, '.spex'), 'sessions');
+}
+
+// PBCLI-78: front-end bootstrap checks the same private filesystem boundary
+// as later store operations without creating an otherwise-unused directory.
+// A missing leaf is usable because the first lease publication creates it.
+export async function assertCaptainSessionsDirectoryUsable(
+  sessionsDir,
+  options = {},
+) {
+  if (typeof sessionsDir !== 'string' || !isAbsolute(sessionsDir)) {
+    throw new Error('Captain session store path must be absolute');
+  }
+  const fs = { ...DEFAULT_FS_OPERATIONS, ...(options.fsOps ?? {}) };
+  try {
+    await prepareSessionPermissions(sessionsDir, fs);
+    await assertPrivateDirectory(sessionsDir, fs);
+    await fs.access(
+      sessionsDir,
+      constants.R_OK | constants.W_OK | constants.X_OK,
+    );
+    return;
+  } catch (cause) {
+    if (cause?.code !== 'ENOENT') throw cause;
+  }
+
+  // Reject a symlink or non-directory anywhere in an otherwise missing path;
+  // mode 0700 becomes mandatory once the sessions directory itself exists.
+  let cursor = sessionsDir;
+  for (;;) {
+    try {
+      await assertDirectoryNotLink(cursor, fs);
+      await fs.access(cursor, constants.W_OK | constants.X_OK);
+      return;
+    } catch (cause) {
+      if (cause?.code !== 'ENOENT') throw cause;
+      const parent = dirname(cursor);
+      if (parent === cursor) throw cause;
+      cursor = parent;
+    }
+  }
+}
+
+// PBCLI-73: caller-shape rejection precedes the PBCLI-75 sanitizer so Task 3
+// can keep non-latching argument errors distinct from latching data failures.
+export function assertReplayAppendArguments(record, role) {
+  if (
+    typeof record !== 'object' ||
+    record === null ||
+    Array.isArray(record)
+  ) {
+    throw new TypeError('replay append record must be an object');
+  }
+  if (
+    role !== undefined &&
+    (typeof role !== 'string' || role.length === 0)
+  ) {
+    throw new TypeError('replay append role must be a nonempty string');
+  }
+  return record;
+}
+
+export function sanitizeReplayRecord(value) {
+  const sanitized = sanitizeReplayValue(value, 'replay record', new Set());
+  return requireRecord(sanitized, 'replay record');
+}
+
+// PBCLI-75/76/83: one lease-owned writer repairs the retained prefix, queues
+// appends, and keeps replay durability fail-soft beside canonical settlement.
+async function createLeaseReplayWriter({
+  sessionsDir,
+  path,
+  fs,
+  assertOwner,
+  readStream,
+}) {
+  let lastReadableSeq = null;
+  let lastDurableSeq = null;
+  let incomplete = true;
+  let identity;
+  let completeOffset = 0;
+  let writerHandle;
+  let operationTail = Promise.resolve();
+  let appendAdmissionClosed = false;
+
+  const status = () =>
+    Object.freeze({ lastReadableSeq, lastDurableSeq, incomplete });
+
+  const enqueue = (operation) => {
+    const result = operationTail.then(operation);
+    operationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+
+  const latch = () => {
+    if (lastReadableSeq !== null) incomplete = true;
+  };
+
+  const updateReadableFromDisk = async () => {
+    if (lastReadableSeq === null) return;
+    try {
+      const snapshot = await readReplayWriterSnapshot({
+        sessionsDir,
+        path,
+        identity,
+        fs,
+      });
+      if (snapshot.absent) return;
+      const parsed = parseReplayLines(
+        snapshot.bytes,
+        0,
+        EMPTY_REPLAY_PREFIX_DIGEST,
+      );
+      lastReadableSeq = parsed.sequence;
+      completeOffset = parsed.completeBytes;
+      identity = snapshot.identity;
+    } catch {
+      // The already-established boundary remains the only trustworthy one.
+    }
+  };
+
+  const initialize = async () => {
+    let snapshot;
+    await assertOwner();
+    try {
+      snapshot = await readReplayWriterSnapshot({
+        sessionsDir,
+        path,
+        fs,
+      });
+      if (snapshot.absent) {
+        lastReadableSeq = 0;
+        lastDurableSeq = 0;
+        incomplete = false;
+        completeOffset = 0;
+        return;
+      }
+
+      const parsed = parseReplayLines(
+        snapshot.bytes,
+        0,
+        EMPTY_REPLAY_PREFIX_DIGEST,
+      );
+      const prefixSequence = parsed.sequence;
+      lastReadableSeq = prefixSequence;
+      lastDurableSeq = prefixSequence;
+      incomplete = false;
+      identity = snapshot.identity;
+      completeOffset = parsed.completeBytes;
+      const tail = snapshot.bytes.subarray(parsed.completeBytes);
+      if (tail.length === 0) return;
+
+      let retainTail = false;
+      try {
+        parseReplayEnvelope(tail, prefixSequence + 1);
+        retainTail = true;
+      } catch {
+        // Every other torn tail is discarded at the complete-prefix boundary.
+      }
+
+      if (retainTail) {
+        try {
+          writerHandle = await mutateReplayWriterFile({
+            sessionsDir,
+            path,
+            identity,
+            expectedSize: snapshot.bytes.length,
+            expectedFinalSize: snapshot.bytes.length + 1,
+            fs,
+            retainHandle: true,
+            operation: async (handle) => {
+              await writeReplayRange(
+                handle,
+                Buffer.from('\n'),
+                snapshot.bytes.length,
+              );
+              completeOffset = snapshot.bytes.length + 1;
+              lastReadableSeq = prefixSequence + 1;
+              await handle.sync();
+            },
+          });
+          lastDurableSeq = prefixSequence + 1;
+        } catch {
+          await updateReadableFromDisk();
+          latch();
+        }
+        return;
+      }
+
+      try {
+        writerHandle = await mutateReplayWriterFile({
+          sessionsDir,
+          path,
+          identity,
+          expectedSize: snapshot.bytes.length,
+          expectedFinalSize: parsed.completeBytes,
+          fs,
+          retainHandle: true,
+          operation: async (handle) => {
+            await handle.truncate(parsed.completeBytes);
+            completeOffset = parsed.completeBytes;
+            await handle.sync();
+          },
+        });
+      } catch {
+        await updateReadableFromDisk();
+        latch();
+      }
+    } catch {
+      lastReadableSeq = null;
+      lastDurableSeq = null;
+      incomplete = true;
+      identity = undefined;
+      completeOffset = 0;
+    }
+  };
+
+  const appendAtQueueHead = async (record, role) => {
+    if (lastReadableSeq === null || incomplete) return undefined;
+
+    let sanitized;
+    let sanitizationFailed = false;
+    let sanitizationFailure;
+    try {
+      sanitized = sanitizeReplayRecord(record);
+    } catch (cause) {
+      sanitizationFailed = true;
+      sanitizationFailure = cause;
+    }
+    // Sanitization may invoke caller-controlled Proxy traps. This one owner
+    // check is the append's cooperative-lease linearization point.
+    await assertOwner();
+    if (sanitizationFailed) {
+      latch();
+      throw sanitizationFailure;
+    }
+
+    if (lastReadableSeq >= Number.MAX_SAFE_INTEGER) {
+      latch();
+      throw new Error('replay stream sequence exhausted its safe integer range');
+    }
+    const sequence = lastReadableSeq + 1;
+    const line = Buffer.from(
+      `${JSON.stringify({
+        v: RECORDS_STREAM_VERSION,
+        seq: sequence,
+        ...(role === undefined ? {} : { role }),
+        record: sanitized,
+      })}\n`,
+    );
+    const publishing = identity === undefined;
+    try {
+      if (publishing) {
+        const published = await publishReplayWriterFile({
+          sessionsDir,
+          path,
+          bytes: line,
+          fs,
+        });
+        identity = published.identity;
+        writerHandle = published.handle;
+        completeOffset = line.length;
+        lastReadableSeq = sequence;
+        await syncDirectory(sessionsDir, fs);
+      } else if (writerHandle === undefined) {
+        writerHandle = await mutateReplayWriterFile({
+          sessionsDir,
+          path,
+          identity,
+          expectedSize: completeOffset,
+          expectedFinalSize: completeOffset + line.length,
+          fs,
+          retainHandle: true,
+          operation: (handle) =>
+            writeReplayRange(handle, line, completeOffset),
+        });
+        completeOffset += line.length;
+        lastReadableSeq = sequence;
+      } else {
+        await appendReplayWriterFile({
+          handle: writerHandle,
+          identity,
+          expectedSize: completeOffset,
+          bytes: line,
+        });
+        completeOffset += line.length;
+        lastReadableSeq = sequence;
+      }
+      return undefined;
+    } catch (cause) {
+      await updateReadableFromDisk();
+      latch();
+      throw cause;
+    }
+  };
+
+  const append = (record, role) => {
+    if (appendAdmissionClosed) {
+      return Promise.reject(
+        new Error('replay append admission is closed for release'),
+      );
+    }
+    if (lastReadableSeq === null || incomplete) return Promise.resolve();
+    try {
+      assertReplayAppendArguments(record, role);
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+    return enqueue(() => appendAtQueueHead(record, role));
+  };
+
+  const read = (options) => {
+    if (appendAdmissionClosed) {
+      return Promise.reject(new Error('replay writer is closing'));
+    }
+    return enqueue(async () => {
+      await assertOwner();
+      if (lastReadableSeq === null) {
+        throw new Error('replay stream is unavailable for this lease');
+      }
+      const result = await readStream(options);
+      lastReadableSeq = result.lastReadableSeq;
+      return freezeReplayLeaseReadResult(
+        result.entries,
+        lastReadableSeq,
+        lastDurableSeq,
+        incomplete,
+      );
+    });
+  };
+
+  const checkpointAtQueueHead = async () => {
+    if (
+      lastReadableSeq === null ||
+      incomplete ||
+      lastReadableSeq === lastDurableSeq
+    ) {
+      return;
+    }
+    try {
+      await assertOwner();
+      if (writerHandle === undefined) {
+        throw new Error('replay stream checkpoint has no writer handle');
+      }
+      await checkpointReplayWriterFile({
+        sessionsDir,
+        path,
+        handle: writerHandle,
+        identity,
+        expectedSize: completeOffset,
+        fs,
+      });
+      await assertOwner();
+      lastDurableSeq = lastReadableSeq;
+    } catch {
+      await updateReadableFromDisk();
+      latch();
+    }
+  };
+
+  const checkpoint = () => enqueue(checkpointAtQueueHead);
+
+  const closeAppendAdmission = () => {
+    appendAdmissionClosed = true;
+  };
+
+  const prepareRelease = () =>
+    enqueue(async () => {
+      try {
+        await checkpointAtQueueHead();
+      } finally {
+        const handle = writerHandle;
+        writerHandle = undefined;
+        try {
+          await handle?.close();
+        } catch {
+          // A completed checkpoint owns durability; descriptor cleanup cannot
+          // broaden the latch trigger set or block canonical lease retirement.
+        }
+      }
+    });
+
+  await initialize();
+  return Object.freeze({
+    append,
+    read,
+    status,
+    checkpoint,
+    closeAppendAdmission,
+    prepareRelease,
+  });
 }
 
 export function createCaptainSessionStore(options = {}) {
@@ -130,6 +634,9 @@ export function createCaptainSessionStore(options = {}) {
   const probeProcess =
     options.probeProcess ?? ((pid) => process.kill(pid, 0));
   const fs = { ...DEFAULT_FS_OPERATIONS, ...(options.fsOps ?? {}) };
+  const replayReadCursors = new Map();
+  const replayReadQueues = new Map();
+  const portableWriters = new Map();
 
   if (!isAbsolute(sessionsDir)) {
     throw new Error('Captain session store path must be absolute');
@@ -151,6 +658,10 @@ export function createCaptainSessionStore(options = {}) {
     assertSessionId(sessionId);
     return join(sessionsDir, `${sessionId}.json`);
   };
+  const recordsPathFor = (sessionId) => {
+    assertSessionId(sessionId);
+    return join(sessionsDir, `${sessionId}.records.jsonl`);
+  };
   const leasePathFor = (sessionId) => {
     assertSessionId(sessionId);
     return join(sessionsDir, `.${sessionId}.lock`);
@@ -161,7 +672,7 @@ export function createCaptainSessionStore(options = {}) {
     return join(sessionsDir, `.${sessionId}.lock.retired.${ownerToken}`);
   };
 
-  const readRecord = async (sessionId, { missing = 'error' } = {}) => {
+  const readRecord = async (sessionId, { missing = 'error', requirePortable = false } = {}) => {
     const path = recordPathFor(sessionId);
     let text;
     try {
@@ -170,9 +681,7 @@ export function createCaptainSessionStore(options = {}) {
     } catch (cause) {
       if (cause?.code === 'ENOENT' && missing === 'undefined') return undefined;
       if (cause?.code === 'ENOENT') {
-        throw new Error(
-          `Captain session ${JSON.stringify(sessionId)} at ${JSON.stringify(path)} does not exist`,
-        );
+        throw new CaptainSessionNotFoundError(sessionId, path);
       }
       throw new Error(
         `cannot read Captain session ${JSON.stringify(sessionId)} at ${JSON.stringify(path)}: ${errorMessage(cause)}`,
@@ -188,16 +697,38 @@ export function createCaptainSessionStore(options = {}) {
     }
     let record;
     try {
-      record = validateCaptainSessionRecord(value);
+      if (value.schemaVersion === SESSION_MANIFEST_VERSION && value.state === 'history-only') {
+        const manifest = validateSessionManifest(value);
+        throw new CaptainSessionRecordNonresumableError(7, manifest.reason, captainSessionOrderingBoundary(manifest));
+      }
+      record = value.schemaVersion === SESSION_MANIFEST_VERSION
+        ? recoveryFromManifest(value)
+        : validateCaptainSessionRecord(value);
+      if (requirePortable && value.schemaVersion !== SESSION_MANIFEST_VERSION) {
+        throw new CaptainSessionRecordNonresumableError(value.schemaVersion, `schema ${value.schemaVersion} requires explicit migration; run playbook migrate-session ${sessionId}`, captainSessionOrderingBoundary(record));
+      }
     } catch (cause) {
       const context =
         `Captain session ${JSON.stringify(sessionId)} at ` +
         `${JSON.stringify(path)}`;
       if (cause instanceof CaptainSessionRecordSchemaError) {
-        if (cause.schemaVersion === 2 && value.sessionId !== sessionId) {
+        const nonresumable =
+          cause instanceof CaptainSessionRecordNonresumableError;
+        if (
+          nonresumable &&
+          value.sessionId !== sessionId
+        ) {
           throw new Error(
             `Captain session file ${JSON.stringify(path)} contains record ` +
               JSON.stringify(value.sessionId),
+          );
+        }
+        if (nonresumable) {
+          throw new CaptainSessionRecordNonresumableError(
+            cause.schemaVersion,
+            `${context}: ${cause.message}`,
+            cause.orderingBoundary,
+            cause,
           );
         }
         throw new CaptainSessionRecordSchemaError(
@@ -219,9 +750,112 @@ export function createCaptainSessionStore(options = {}) {
     return record;
   };
 
+  const readManifest = async (sessionId) => {
+    let bytes;
+    try { await assertPrivateDirectory(sessionsDir, fs); bytes = await readPrivateRegularFile(recordPathFor(sessionId), 0o600, fs, 'record'); }
+    catch (cause) { if (cause?.code === 'ENOENT') throw new CaptainSessionNotFoundError(sessionId, recordPathFor(sessionId)); throw cause; }
+    const value = JSON.parse(bytes);
+    if (value.sessionId !== sessionId) throw new Error('session manifest identity does not match its filename');
+    return value.schemaVersion === 7 ? validateSessionManifest(value) : value;
+  };
+  const prepare = () => prepareSessionPermissions(sessionsDir, fs);
+  const readHistory = async (sessionId, options = {}) => {
+    assertSessionId(sessionId);
+    const history = await readSessionHistory({ sessionsDir, path: recordsPathFor(sessionId), fs, afterSeq: options.afterSeq ?? 0 });
+    if (!history.missing) return history;
+    let legacy;
+    try {
+      legacy = JSON.parse(await readPrivateRegularFile(recordPathFor(sessionId), 0o600, fs, 'legacy record'));
+      if (![2, 3, 4, 5, 6].includes(legacy.schemaVersion)) return history;
+      if (legacy.kind !== CAPTAIN_SESSION_RECORD_KIND || legacy.sessionId !== sessionId || !Array.isArray(legacy.snapshot?.journal) || !Number.isFinite(Date.parse(legacy.updatedAt))) return history;
+    } catch { return history; }
+    return legacyJournalHistory(legacy, options.afterSeq ?? 0, history);
+  };
+  const validate = async (sessionId, context = {}) => {
+    const manifest = await readManifest(sessionId);
+    const history = await readHistory(sessionId);
+    const reasons = [];
+    let integrityValid = !history.missing && !history.incomplete;
+    if (history.missing) reasons.push('session replay file is missing');
+    if (history.pendingTail) reasons.push('session replay has an unfinished final record');
+    if (manifest.schemaVersion !== 7) {
+      if ([2, 3, 4, 5, 6].includes(manifest.schemaVersion)) {
+        try { validateCaptainSessionRecord(manifest); }
+        catch (cause) { if (!(cause instanceof CaptainSessionRecordNonresumableError)) throw cause; reasons.push(cause.message); }
+        reasons.push(`schema ${manifest.schemaVersion} requires explicit migration; run playbook migrate-session ${sessionId}`);
+      } else reasons.push(`unsupported session schema ${manifest.schemaVersion}`);
+    }
+    else {
+      if (history.entries.some(({ record }) => !isDeepStrictEqual(record, sanitizeReplayRecord(record)))) {
+        integrityValid = false;
+        reasons.push('session replay contains provider continuation fields');
+      }
+      if (manifest.state === 'history-only') reasons.push(manifest.reason);
+      if (manifest.replay.incomplete || history.incomplete) reasons.push('session replay is incomplete');
+      if (history.digests[manifest.replay.seq] !== manifest.replay.sha256) { integrityValid = false; reasons.push('session replay checkpoint digest does not match'); }
+      if (manifest.contextSeq !== null) {
+        const contextRecord = history.entries.find((entry) => entry.seq === manifest.contextSeq)?.record;
+        try {
+          const supported = validateSessionContext(contextRecord);
+          if (manifest.state !== 'history-only') {
+            const execution = manifest.state === 'uncertain'
+              ? manifest.uncertain.attemptedExecutionProjection : manifest.lastAppliedExecutionProjection;
+            if (!isDeepStrictEqual(supported.configuration, execution) || supported.captainId !== manifest.snapshot.captain.sessionId) { integrityValid = false; reasons.push('required session context differs from checkpoint recovery'); }
+          }
+        } catch { reasons.push('required session context is absent or unsupported'); }
+      }
+      if (!isAbsolute(manifest.cwd) || resolve(manifest.cwd) !== manifest.cwd) reasons.push('recorded working directory is not native; checkpoint relocation is unsupported');
+      if (context.cwd !== undefined && context.cwd !== manifest.cwd) reasons.push('recorded working directory differs; checkpoint relocation is unsupported');
+      if (context.executionProjection !== undefined && manifest.state !== 'history-only') {
+        try { assertCaptainSessionExecutionCompatible(manifest.structuralProjection, context.executionProjection); }
+        catch (cause) { reasons.push(errorMessage(cause)); }
+      }
+    }
+    return Object.freeze({ sessionId, integrityValid, resumable: integrityValid && reasons.length === 0, reasons: Object.freeze(reasons), manifest, history });
+  };
+
   const read = (sessionId) => readRecord(sessionId);
 
-  const latest = async ({ onLegacyRecord } = {}) => {
+  const readStream = async (sessionId, options) => {
+    assertSessionId(sessionId);
+    const afterSeq = validateReplayReadOptions(options);
+    const previous = replayReadQueues.get(sessionId) ?? Promise.resolve();
+    const operation = previous.then(() =>
+      readReplayStream({
+        sessionsDir,
+        path: recordsPathFor(sessionId),
+        afterSeq,
+        cursor: replayReadCursors.get(sessionId),
+        fs,
+      }),
+    );
+    const drained = operation.then(
+      (result) => {
+        if (result.cursor === undefined) {
+          replayReadCursors.delete(sessionId);
+        } else {
+          replayReadCursors.set(sessionId, result.cursor);
+        }
+        return undefined;
+      },
+      () => undefined,
+    );
+    replayReadQueues.set(sessionId, drained);
+    void drained.then(() => {
+      if (replayReadQueues.get(sessionId) === drained) {
+        replayReadQueues.delete(sessionId);
+      }
+    });
+    const result = await operation;
+    return result.value;
+  };
+
+  const listRecords = async ({
+    onLegacyRecord,
+    onLegacyOrderingBoundary,
+    onInvalidRecord,
+    skipInvalidRecords = false,
+  } = {}) => {
     if (
       onLegacyRecord !== undefined &&
       typeof onLegacyRecord !== 'function'
@@ -230,13 +864,34 @@ export function createCaptainSessionStore(options = {}) {
         'Captain session legacy-record observer must be a function',
       );
     }
+    if (
+      onLegacyOrderingBoundary !== undefined &&
+      typeof onLegacyOrderingBoundary !== 'function'
+    ) {
+      throw new Error(
+        'Captain session legacy ordering-boundary observer must be a function',
+      );
+    }
+    if (
+      onInvalidRecord !== undefined &&
+      typeof onInvalidRecord !== 'function'
+    ) {
+      throw new Error(
+        'Captain session invalid-record observer must be a function',
+      );
+    }
+    if (typeof skipInvalidRecords !== 'boolean') {
+      throw new Error(
+        'Captain session invalid-record skip option must be a boolean',
+      );
+    }
     let names;
     try {
       await assertPrivateDirectory(sessionsDir, fs);
       names = await fs.readdir(sessionsDir);
     } catch (cause) {
       if (cause?.code === 'ENOENT') {
-        throw new Error('no resumable Captain session exists');
+        return [];
       }
       throw new Error(`cannot list Captain sessions: ${errorMessage(cause)}`);
     }
@@ -248,17 +903,26 @@ export function createCaptainSessionStore(options = {}) {
       // Canonically named records are store-owned. Corruption must not make
       // --continue silently select an older logical session.
       try {
-        candidates.push(await readRecord(sessionId));
+        candidates.push(await readRecord(sessionId, { requirePortable: true }));
       } catch (error) {
-        if (
-          error instanceof CaptainSessionRecordSchemaError &&
-          error.schemaVersion === 2
-        ) {
+        if (error instanceof CaptainSessionRecordNonresumableError) {
+          if (error.orderingBoundary) await onLegacyOrderingBoundary?.(error.orderingBoundary);
           await onLegacyRecord?.(
             Object.freeze({
               sessionId,
               path: recordPathFor(sessionId),
-              schemaVersion: 2,
+              schemaVersion: error.schemaVersion,
+              ...(error.schemaVersion >= 6 ? { reason: error.cause?.message ?? error.message } : {}),
+            }),
+          );
+          continue;
+        }
+        if (skipInvalidRecords) {
+          await onInvalidRecord?.(
+            Object.freeze({
+              sessionId,
+              path: recordPathFor(sessionId),
+              reason: errorMessage(error),
             }),
           );
           continue;
@@ -266,20 +930,104 @@ export function createCaptainSessionStore(options = {}) {
         throw error;
       }
     }
-    candidates.sort((left, right) => {
-      const byUpdated = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
-      if (byUpdated !== 0) return byUpdated;
-      if (right.sessionId === left.sessionId) return 0;
-      return right.sessionId < left.sessionId ? -1 : 1;
-    });
+    return candidates;
+  };
+
+  const latest = async ({ onLegacyRecord, preferredCwd } = {}) => {
+    const candidates = sortCaptainSessionRecords(
+      await listRecords({ onLegacyRecord }),
+    );
     if (candidates.length === 0) {
       throw new Error('no resumable Captain session exists');
     }
-    return candidates[0];
+    return (
+      candidates.find((candidate) => candidate.cwd === preferredCwd) ??
+      candidates[0]
+    );
   };
 
-  const writeRecord = async (recordValue, { noReplace }) => {
-    const record = validateCaptainSessionRecord(recordValue);
+  const readSummary = async (sessionId) => {
+    const manifest = await readManifest(sessionId);
+    if (manifest.schemaVersion !== 7) validateCaptainSessionRecord(manifest);
+    return projectPlaybookSessionSummary(manifest);
+  };
+
+  const listSummaries = async () => {
+    const sessions = [], skipped = [];
+    let names;
+    try { await assertPrivateDirectory(sessionsDir, fs); names = await fs.readdir(sessionsDir); }
+    catch (cause) { if (cause?.code === 'ENOENT') return { sessions, skipped }; throw cause; }
+    for (const name of names.sort()) {
+      const sessionId = name.slice(0, -5);
+      if (!name.endsWith('.json') || !SESSION_ID_PATTERN.test(sessionId)) continue;
+      try { sessions.push(await readSummary(sessionId)); }
+      catch (cause) { skipped.push({ sessionId, reason: errorMessage(cause) }); }
+    }
+    return Object.freeze({ sessions: Object.freeze(sortCaptainSessionRecords(sessions)), skipped: Object.freeze(skipped) });
+  };
+
+  const scanAdoptionPredecessor = async (
+    target,
+    { onLegacyRecord, onInvalidRecord } = {},
+  ) => {
+    let orderingUnproved = false;
+    const legacyOrderingBoundaries = [];
+    const observeInvalid = async (record) => {
+      orderingUnproved = true;
+      await onInvalidRecord?.(record);
+    };
+    const records = await listRecords({
+      onLegacyRecord,
+      onLegacyOrderingBoundary: (record) => {
+        legacyOrderingBoundaries.push(record);
+      },
+      onInvalidRecord: observeInvalid,
+      skipInvalidRecords: true,
+    });
+    const resumableCandidates = records.filter(
+      (candidate) =>
+        candidate.sessionId !== target.sessionId &&
+        candidate.state === 'settled' &&
+        candidate.cwd === target.cwd,
+    );
+    const resumableById = new Map(
+      resumableCandidates.map((candidate) => [candidate.sessionId, candidate]),
+    );
+    const orderedBoundaries = sortCaptainSessionRecords([
+      ...resumableCandidates,
+      ...legacyOrderingBoundaries.filter(
+        (candidate) =>
+          candidate.sessionId !== target.sessionId &&
+          candidate.state !== 'uncertain' &&
+          candidate.cwd === target.cwd,
+      ),
+    ]);
+    const newestBoundary = orderedBoundaries[0];
+    const candidate =
+      orderingUnproved || newestBoundary === undefined
+        ? undefined
+        : resumableById.get(newestBoundary.sessionId);
+    const adoptionDeclined =
+      orderingUnproved ||
+      (newestBoundary !== undefined && candidate === undefined);
+    // A fully validated legacy record has a trustworthy place in the
+    // same-cwd predecessor order even though it cannot resume. Only a record
+    // whose contents cannot be validated leaves that order globally unproved.
+    return {
+      candidate,
+      newestBoundaryUpdatedAt: newestBoundary?.updatedAt,
+      adoptionDeclined,
+    };
+  };
+
+  const writeRecord = async (
+    recordValue,
+    { noReplace, onPublished, portable = false },
+  ) => {
+    const record = portable
+      ? validateSessionManifest(recordValue)
+      : await portableWriters.get(recordValue.sessionId)?.checkpoint(recordValue);
+    if (record === undefined) throw new Error('session persistence requires its owning lifecycle');
     const destination = recordPathFor(record.sessionId);
     await ensurePrivateDirectory(sessionsDir, fs);
 
@@ -319,6 +1067,7 @@ export function createCaptainSessionStore(options = {}) {
         try {
           await fs.link(temporary, destination);
           published = true;
+          onPublished?.();
         } catch (cause) {
           if (cause?.code === 'EEXIST') {
             throw new Error(
@@ -339,8 +1088,10 @@ export function createCaptainSessionStore(options = {}) {
         await fs.rename(temporary, destination);
         ownsTemporary = false;
         published = true;
+        onPublished?.();
       }
       await syncDirectory(sessionsDir, fs);
+      portableWriters.get(record.sessionId)?.published(record);
       return record;
     } catch (cause) {
       try {
@@ -360,10 +1111,11 @@ export function createCaptainSessionStore(options = {}) {
   };
 
   const deleteRecord = async (sessionId) => {
-    const path = recordPathFor(sessionId);
-    await assertPrivateRegularPath(path, 0o600, fs, 'record');
-    await fs.unlink(path);
-    await syncDirectory(sessionsDir, fs);
+    for (const suffix of ['.records.jsonl', '.hints.json', '.spex.json', '.json']) {
+      const path = join(sessionsDir, `${sessionId}${suffix}`);
+      try { await assertPrivateRegularPath(path, 0o600, fs, 'session file'); await fs.unlink(path); await syncDirectory(sessionsDir, fs); }
+      catch (cause) { if (cause?.code !== 'ENOENT') throw cause; }
+    }
   };
 
   const readLeaseDirectory = async (
@@ -417,6 +1169,44 @@ export function createCaptainSessionStore(options = {}) {
 
   const readLeaseOwner = (sessionId, path = leasePathFor(sessionId)) =>
     readLeaseDirectory(sessionId, path, [LEASE_OWNER_FILE]);
+
+  const readLeaseState = async (sessionId) => {
+    assertSessionId(sessionId);
+    try {
+      await assertPrivateDirectory(sessionsDir, fs);
+      await fs.lstat(leasePathFor(sessionId));
+    } catch (cause) { return cause?.code === 'ENOENT' ? 'idle' : 'unknown'; }
+    try {
+      const owner = await readLeaseOwner(sessionId);
+      if (owner.hostname !== localHostname) return 'unknown';
+      let state = 'active';
+      try { await probeProcess(owner.pid); }
+      catch (cause) {
+        if (cause?.code !== 'ESRCH') return 'unknown';
+        state = 'idle';
+      }
+      const current = await readLeaseOwner(sessionId);
+      return current.ownerToken === owner.ownerToken ? state : 'unknown';
+    } catch { return 'unknown'; }
+  };
+
+  const activeLeaseErrorFor = async (sessionId, owner) => {
+    if (owner.hostname !== localHostname) {
+      return foreignCaptainSessionLeaseActiveError(
+        sessionId,
+        owner.hostname,
+      );
+    }
+    try {
+      await probeProcess(owner.pid);
+      return new CaptainSessionLeaseActiveError(sessionId, owner.pid);
+    } catch (cause) {
+      if (cause?.code === 'ESRCH') return undefined;
+      throw new Error(
+        `Captain session lease owner process cannot be ruled dead: ${errorMessage(cause)}`,
+      );
+    }
+  };
 
   const readRetiredLease = async (sessionId, path, expectedToken) => {
     const owner = await readLeaseDirectory(
@@ -570,18 +1360,27 @@ export function createCaptainSessionStore(options = {}) {
   const publishLeaseStage = async (sessionId, stage, onRenamed) => {
     const canonicalPath = leasePathFor(sessionId);
     await validateRetiredLeases(sessionId);
-    await assertPathMissing(
-      canonicalPath,
-      fs,
-      'Captain session lease became active before publication',
-    );
     try {
+      await assertPathMissing(
+        canonicalPath,
+        fs,
+        'Captain session lease became active before publication',
+      );
       // Program-created canonical lease directories are nonempty. Therefore a
       // racing rename cannot replace one; it fails closed instead. Static empty
       // or malformed destinations are rejected by the preflight above.
       await fs.rename(stage.stagePath, canonicalPath);
       onRenamed();
     } catch (cause) {
+      try {
+        const winner = await readLeaseOwner(sessionId);
+        const active = await activeLeaseErrorFor(sessionId, winner);
+        if (active !== undefined) throw active;
+      } catch (winnerCause) {
+        if (isActiveLeaseError(winnerCause)) {
+          throw winnerCause;
+        }
+      }
       throw new Error(
         `Captain session lease publication lost its race: ${errorMessage(cause)}`,
       );
@@ -594,8 +1393,9 @@ export function createCaptainSessionStore(options = {}) {
     return publishedOwner;
   };
 
-  const acquire = async (sessionId) => {
+  const acquire = async (sessionId, management = false) => {
     assertSessionId(sessionId);
+    await prepareSessionPermissions(sessionsDir, fs, sessionId);
     let stage;
     let stagePublished = false;
     try {
@@ -612,30 +1412,8 @@ export function createCaptainSessionStore(options = {}) {
         if (existing.ownerToken === stage.owner.ownerToken) {
           throw new Error('Captain session lease owner token was reused');
         }
-        if (existing.hostname !== localHostname) {
-          throw new Error(
-            `Captain session lease is owned by foreign host ${JSON.stringify(existing.hostname)}`,
-          );
-        }
-        try {
-          await probeProcess(existing.pid);
-          throw new Error(
-            `Captain session lease is active in process ${existing.pid}`,
-          );
-        } catch (cause) {
-          if (cause?.code !== 'ESRCH') {
-            if (
-              cause instanceof Error &&
-              cause.message ===
-                `Captain session lease is active in process ${existing.pid}`
-            ) {
-              throw cause;
-            }
-            throw new Error(
-              `Captain session lease owner process cannot be ruled dead: ${errorMessage(cause)}`,
-            );
-          }
-        }
+        const active = await activeLeaseErrorFor(sessionId, existing);
+        if (active !== undefined) throw active;
         await retireObservedLease(sessionId, existing);
       } else {
         // Preserve the explicit local solely for easier audit of the no-owner
@@ -646,12 +1424,38 @@ export function createCaptainSessionStore(options = {}) {
       await publishLeaseStage(sessionId, stage, () => {
         stagePublished = true;
       });
-      return createLease({
+      if (management) {
+        let released = false;
+        const assertOwner = async () => {
+          if (released) throw new Error('session management lease was released');
+          const current = await readLeaseOwner(sessionId);
+          if (current.ownerToken !== stage.owner.ownerToken) throw new Error('session management ownership changed');
+          return current;
+        };
+        return Object.freeze({ sessionId, ownerToken: stage.owner.ownerToken, assertOwner, async release() {
+          if (released) return;
+          const current = await assertOwner();
+          await retireObservedLease(sessionId, current);
+          released = true;
+        } });
+      }
+      return await createLease({
         sessionId,
         owner: stage.owner,
+        sessionsDir,
+        replayPath: recordsPathFor(sessionId),
+        replayFs: fs,
+        readReplayStream: (options) => readStream(sessionId, options),
         readRecord,
+        readManifest,
+        readHistory,
+        validateSession: validate,
+        portableWriters,
         writeRecord,
+        syncRecordDirectory: () => syncDirectory(sessionsDir, fs),
         deleteRecord,
+        scanAdoptionPredecessor,
+        acquireSession: acquire,
         readLeaseOwner,
         retireObservedLease,
         validateRetiredLeases,
@@ -677,44 +1481,1091 @@ export function createCaptainSessionStore(options = {}) {
           `cannot acquire Captain session ${JSON.stringify(sessionId)} lease without leaving ownership uncertain`,
         );
       }
+      if (isActiveLeaseError(cause)) throw cause;
       throw new Error(
         `cannot acquire Captain session ${JSON.stringify(sessionId)} lease: ${errorMessage(cause)}`,
       );
     }
   };
 
-  return Object.freeze({ sessionsDir, read, latest, acquire });
+  const migrate = async (sessionId, migration = {}) => {
+    assertSessionId(sessionId);
+    await prepareSessionPermissions(sessionsDir, fs, sessionId, true);
+    const sourcePath = migration.sourcePath ?? recordPathFor(sessionId);
+    const sidecar = sourcePath.endsWith('.spex.json');
+    const sourceDir = dirname(sourcePath);
+    const sourceReplayPath = join(sourceDir, `${sessionId}.records.jsonl`);
+    const external = sourceDir !== sessionsDir;
+    if (!isAbsolute(sourcePath) || sourcePath !== join(sourceDir, `${sessionId}${sidecar ? '.spex' : ''}.json`)) throw new Error('migration source must be the canonical session file');
+    const backupDir = migration.backupDir ?? join(dirname(sessionsDir), 'local', 'migrations', sessionId);
+    const inputsDir = join(backupDir, 'inputs');
+    const receiptPath = join(backupDir, 'receipt.json');
+    const decodeSource = (sourceBytes) => {
+      const source = JSON.parse(sourceBytes);
+      if (!sidecar && source.schemaVersion === 7) {
+        if (external) throw new Error('source is already portable; select its complete bundle instead of legacy migration');
+        return { source };
+      }
+      let recovery, metadata;
+      if (sidecar) {
+        const value = source.session ?? source;
+        if (source.v !== 1 || value.id !== sessionId || !Number.isFinite(value.createdAt) || typeof migration.cwd !== 'string' || !isAbsolute(migration.cwd) || resolve(migration.cwd) !== migration.cwd) throw new Error('invalid legacy desktop sidecar or missing normalized cwd');
+        metadata = { cwd: migration.cwd, createdAt: new Date(value.createdAt).toISOString(), updatedAt: new Date(value.endedAt ?? value.createdAt).toISOString(), reason: 'legacy desktop history lacks complete durable recovery', journal: value.snapshot?.shell?.journal ?? [] };
+      } else {
+        if (source.sessionId !== sessionId) throw new Error('migration session identity mismatch');
+        try { recovery = validateCaptainSessionRecord(source); }
+        catch (cause) {
+          if (!(cause instanceof CaptainSessionRecordNonresumableError)) throw cause;
+          metadata = { cwd: source.cwd, createdAt: source.createdAt, updatedAt: source.updatedAt, reason: `legacy schema ${source.schemaVersion} has no supported recovery`, journal: source.snapshot?.journal ?? [] };
+        }
+        if (recovery && source.schemaVersion !== 6) throw new Error('only schema 6 supports executable migration');
+      }
+      return { source, recovery, metadata };
+    };
+    if (external) await prepareSessionPermissions(sourceDir, fs, sessionId, true);
+    // Refusal needs no ownership or persistent memo. Reread after acquiring
+    // the lease below; a preflight read never authorizes migration writes.
+    try { decodeSource(await readPrivateRegularFile(sourcePath, 0o600, fs, 'migration source')); }
+    catch (cause) { if (cause?.code !== 'ENOENT' || !sidecar && !external) throw cause; }
+    let sourceLease, lease;
+    try {
+      if (external) {
+        const sourceStore = createCaptainSessionStore({ sessionsDir: sourceDir, env, homeDir: home, fsOps: fs, hostname: localHostname, pid: localPid, probeProcess });
+        sourceLease = await sourceStore.acquireManagement(sessionId);
+      }
+      lease = await acquire(sessionId, true);
+      await lease.assertOwner();
+      let sourceBytes;
+      try { sourceBytes = await readPrivateRegularFile(sourcePath, 0o600, fs, 'migration source'); }
+      catch (cause) {
+        if ((!sidecar && !external) || cause?.code !== 'ENOENT') throw cause;
+        let receipt;
+        if (external) {
+          receipt = JSON.parse(await readPrivateRegularFile(receiptPath, 0o600, fs, 'migration receipt'));
+          if (receipt.v !== 1 || receipt.id !== sessionId || !Array.isArray(receipt.inputs) || receipt.inputs[0]?.path !== sourcePath || ![1, 2].includes(receipt.inputs.length)) throw new Error('missing migration source has no matching receipt');
+          for (const [index, input] of receipt.inputs.entries()) {
+            const bytes = await readPrivateRegularFile(join(inputsDir, String(index)), 0o600, fs, 'retained migration input', true);
+            if (sha256(bytes) !== input.sha256) throw new Error('retained migration input differs');
+          }
+        }
+        const current = await validate(sessionId);
+        if (!current.integrityValid) throw new Error('completed migration destination failed validation');
+        if (receipt?.complete === false) await writePrivateJson(receiptPath, { ...receipt, complete: true }, fs);
+        return { manifest: current.manifest, migrated: false, reasons: current.reasons };
+      }
+      let { source, recovery, metadata } = decodeSource(sourceBytes);
+      if (!sidecar && source.schemaVersion === 7) {
+        const current = await validate(sessionId);
+        return { manifest: current.manifest, migrated: false, reasons: current.reasons };
+      }
+      const sourceSnapshot = await readReplaySnapshot({ sessionsDir: sourceDir, path: sourceReplayPath, fs, afterSeq: 0, forceFullRead: true });
+      const snapshot = external ? await readReplaySnapshot({ sessionsDir, path: recordsPathFor(sessionId), fs, afterSeq: 0, forceFullRead: true }) : sourceSnapshot;
+      const currentReplay = snapshot.absent ? undefined : snapshot.bytes;
+      let originalReplay = sourceSnapshot.absent ? undefined : sourceSnapshot.bytes;
+      let priorReceipt;
+      try { priorReceipt = JSON.parse(await readPrivateRegularFile(receiptPath, 0o600, fs, 'migration receipt')); }
+      catch (cause) { if (cause?.code !== 'ENOENT') throw cause; }
+      if (priorReceipt !== undefined) {
+        if (priorReceipt.v !== 1 || priorReceipt.id !== sessionId || !Array.isArray(priorReceipt.inputs) || priorReceipt.inputs[0]?.path !== sourcePath || priorReceipt.inputs[0]?.sha256 !== sha256(Buffer.from(sourceBytes))) throw new Error('migration source differs from retained input');
+        const retainedSource = await readPrivateRegularFile(join(inputsDir, '0'), 0o600, fs, 'retained migration source');
+        if (retainedSource !== sourceBytes) throw new Error('migration retained source differs');
+        if (priorReceipt.inputs.length === 2) {
+          originalReplay = await readPrivateRegularFile(join(inputsDir, '1'), 0o600, fs, 'retained migration replay', true);
+          if (priorReceipt.inputs[1].path !== sourceReplayPath || sha256(originalReplay) !== priorReceipt.inputs[1].sha256) throw new Error('retained migration replay differs');
+        } else if (priorReceipt.inputs.length === 1) originalReplay = undefined;
+        else throw new Error('invalid migration inputs');
+      }
+      if (external && priorReceipt && !sourceSnapshot.absent && !sourceSnapshot.bytes.equals(originalReplay ?? Buffer.alloc(0))) throw new Error('migration source replay differs from retained input');
+      let replayBytes = originalReplay ?? Buffer.alloc(0);
+      if (originalReplay === undefined) {
+        const journal = metadata?.journal ?? recovery?.snapshot?.journal ?? [];
+        const updatedAt = source.updatedAt ?? metadata.updatedAt;
+        const projected = legacyJournalHistory({ updatedAt, snapshot: { journal } }, 0, {}).entries;
+        const records = [...projected.map(({ record }) => record), ...journal.map((entry) => ({ type: 'legacy_journal', timestamp: Date.parse(updatedAt), entry }))];
+        replayBytes = Buffer.from(records.map((record, index) => `${JSON.stringify({ v: 1, seq: index + 1, record: sanitizeReplayRecord(record) })}\n`).join(''));
+      }
+      let history = parseSessionHistory(replayBytes);
+      if (history.pendingTail) {
+        try {
+          parseReplayEnvelope(replayBytes.subarray(history.completeBytes), history.lastReadableSeq + 1);
+          replayBytes = Buffer.concat([replayBytes, Buffer.from('\n')]);
+          history = parseSessionHistory(replayBytes);
+        } catch { /* Preserve a torn or invalid tail in the retained input only. */ }
+      }
+      const completeReplay = replayBytes.subarray(0, history.completeBytes);
+      let offset = 0;
+      replayBytes = Buffer.concat(history.entries.map((entry) => {
+        const end = completeReplay.indexOf(0x0a, offset) + 1;
+        const line = completeReplay.subarray(offset, end);
+        offset = end;
+        const record = sanitizeReplayRecord(entry.record);
+        return isDeepStrictEqual(record, entry.record)
+          ? line : Buffer.from(`${JSON.stringify({ ...entry, record })}\n`);
+      }));
+      let manifest;
+      if (recovery && !history.incomplete && !history.pendingTail) {
+        const context = contextFromRecovery(recovery);
+        context.timestamp = Date.parse(recovery.updatedAt);
+        const contextSeq = history.lastReadableSeq + 1;
+        replayBytes = Buffer.concat([replayBytes, Buffer.from(`${JSON.stringify({v:1,seq:contextSeq,record:context})}\n`)]);
+        manifest = manifestFromRecovery(recovery, { seq: contextSeq, sha256: sha256(replayBytes), incomplete: false }, contextSeq);
+      } else {
+        if (recovery) metadata = { cwd: recovery.cwd, createdAt: recovery.createdAt, updatedAt: recovery.updatedAt, reason: 'legacy replay is incomplete' };
+        manifest = validateSessionManifest({ schemaVersion: 7, kind: 'captain-session', sessionId, state: 'history-only', cwd: metadata.cwd, createdAt: metadata.createdAt, updatedAt: metadata.updatedAt, reason: metadata.reason, replay: { seq: history.lastReadableSeq, sha256: sha256(replayBytes), incomplete: history.incomplete || history.pendingTail }, contextSeq: null });
+      }
+      if (priorReceipt && currentReplay !== undefined && !currentReplay.equals(originalReplay ?? Buffer.alloc(0)) && !currentReplay.equals(replayBytes)) throw new Error('migration destination replay diverged');
+      if (external && currentReplay !== undefined && !currentReplay.equals(replayBytes)) throw new Error('migration destination replay diverged');
+      if (sidecar || external) {
+        try {
+          const existing = await readPrivateRegularFile(recordPathFor(sessionId), 0o600, fs, 'migration destination');
+          if (existing !== `${JSON.stringify(manifest)}\n`) throw new Error('migration destination manifest diverged');
+        } catch (cause) { if (cause?.code !== 'ENOENT') throw cause; }
+      }
+      await ensurePrivateDirectory(inputsDir, fs);
+      const inputs = [{ path: sourcePath, bytes: Buffer.from(sourceBytes, 'utf8') }, ...(originalReplay === undefined ? [] : [{ path: sourceReplayPath, bytes: originalReplay }])];
+      for (const [index, input] of inputs.entries()) {
+        const path = join(inputsDir, String(index));
+        try {
+          const retained = await readPrivateRegularFile(path, 0o600, fs, 'retained migration source', true);
+          if (!retained.equals(input.bytes)) throw new Error('migration retained source differs');
+        } catch (cause) { if (cause?.code !== 'ENOENT') throw cause; await writePrivateBytes(path, input.bytes, fs); }
+      }
+      const receipt = { v: 1, id: sessionId, inputs: inputs.map(({ path, bytes }) => ({ path, sha256: sha256(bytes) })), complete: false };
+      await writePrivateJson(receiptPath, receipt, fs);
+      await lease.assertOwner();
+      await writePrivateBytes(recordsPathFor(sessionId), replayBytes, fs);
+      await writePrivateBytes(recordPathFor(sessionId), Buffer.from(`${JSON.stringify(manifest)}\n`), fs);
+      const published = await validate(sessionId);
+      if (!published.integrityValid) throw new Error('published migration bundle failed validation');
+      if (external) {
+        await sourceLease.assertOwner();
+        try { await assertPrivateRegularPath(sourceReplayPath, 0o600, fs, 'migration source replay'); await fs.unlink(sourceReplayPath); await syncDirectory(sourceDir, fs); }
+        catch (cause) { if (cause?.code !== 'ENOENT') throw cause; }
+      }
+      if (sidecar || external) { await fs.unlink(sourcePath); await syncDirectory(sourceDir, fs); }
+      await writePrivateJson(receiptPath, { ...receipt, complete: true }, fs);
+      return { manifest, migrated: true, reasons: [] };
+    } finally {
+      try { await lease?.release(); } finally { await sourceLease?.release(); }
+    }
+  };
+
+  const migrateLegacyDefault = async (migration = {}) => {
+    const sourceEnv = migration.env ?? env;
+    const sourceHome = migration.homeDir ?? home;
+    const sourceDir = join(sourceEnv.XDG_STATE_HOME || join(sourceHome, '.local', 'state'), 'playbook', 'sessions');
+    const result = { sourceDir, migrated: [], skipped: [] };
+    if (sourceDir === sessionsDir) return result;
+    const sourceStore = createCaptainSessionStore({ sessionsDir: sourceDir, env: sourceEnv, homeDir: sourceHome, fsOps: fs, hostname: localHostname, pid: localPid, probeProcess });
+    await sourceStore.prepare();
+    try { await assertPrivateDirectory(sourceDir, fs); }
+    catch (cause) { if (cause?.code === 'ENOENT') return result; throw cause; }
+    const names = await fs.readdir(sourceDir);
+    const ids = [...new Set(names.map((name) => name.endsWith('.records.jsonl') ? name.slice(0, -14) : name.endsWith('.json') ? name.slice(0, -5) : '').filter((id) => SESSION_ID_PATTERN.test(id)))].sort();
+    for (const sessionId of ids) {
+      const state = await sourceStore.readLeaseState(sessionId);
+      if (state !== 'idle') throw new Error(`legacy session ${sessionId} ownership is ${state}; stop all old writers before migration`);
+      const sourcePath = join(sourceDir, `${sessionId}.json`);
+      try {
+        const source = JSON.parse(await readPrivateRegularFile(sourcePath, 0o600, fs, 'legacy default manifest'));
+        if (![2, 3, 4, 5, 6].includes(source.schemaVersion)) throw new Error(`unsupported legacy schema ${source.schemaVersion}`);
+        try { validateCaptainSessionRecord(source); }
+        catch (cause) { if (!(cause instanceof CaptainSessionRecordNonresumableError)) throw cause; }
+      } catch (cause) { result.skipped.push({ sessionId, reason: errorMessage(cause) }); continue; }
+      await migrate(sessionId, { sourcePath });
+      result.migrated.push(sessionId);
+    }
+    return result;
+  };
+
+  const remove = async (sessionId) => {
+    const lease = await acquire(sessionId, true);
+    try { await lease.assertOwner(); await deleteRecord(sessionId); }
+    finally { await lease.release(); }
+  };
+
+  return Object.freeze({
+    sessionsDir,
+    prepare,
+    migrate,
+    migrateLegacyDefault,
+    readManifest,
+    readHistory,
+    readLeaseState,
+    validate,
+    delete: remove,
+    listSummaries,
+    readSummary,
+    read,
+    readStream,
+    latest,
+    acquire,
+    acquireManagement: (sessionId) => acquire(sessionId, true),
+  });
 }
 
-function createLease({
+async function readReplayStream({
+  sessionsDir,
+  path,
+  afterSeq,
+  cursor,
+  fs,
+}) {
+  let forceFullRead = false;
+  let snapshot;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      snapshot = await readReplaySnapshot({
+        sessionsDir,
+        path,
+        afterSeq,
+        cursor,
+        forceFullRead,
+        fs,
+      });
+      break;
+    } catch (cause) {
+      if (!(cause instanceof ReplaySnapshotChangedError) || attempt === 1) {
+        throw cause;
+      }
+      if (cursor !== undefined) cursor.reusable = false;
+      forceFullRead = true;
+    }
+  }
+
+  if (snapshot === undefined) {
+    throw new Error('replay stream changed during both read snapshots');
+  }
+  if (snapshot.absent) {
+    if (cursor !== undefined) cursor.reusable = false;
+    if (cursor !== undefined && cursor.sequence > 0) {
+      throw new Error('replay stream rolled back below its observed prefix');
+    }
+    if (afterSeq !== 0) {
+      throw new Error(
+        `replay stream afterSeq ${afterSeq} exceeds last readable sequence 0`,
+      );
+    }
+    return {
+      cursor: undefined,
+      value: freezeReplayReadResult([], 0),
+    };
+  }
+
+  const initialSequence = snapshot.incremental ? cursor.sequence : 0;
+  const initialDigest = snapshot.incremental
+    ? cursor.digest
+    : EMPTY_REPLAY_PREFIX_DIGEST;
+  const parsed = parseReplayLines(
+    snapshot.bytes,
+    initialSequence,
+    initialDigest,
+    snapshot.incremental ? undefined : cursor?.sequence,
+  );
+  const lastReadableSeq = parsed.sequence;
+
+  if (!snapshot.incremental && cursor !== undefined && cursor.sequence > 0) {
+    if (
+      lastReadableSeq < cursor.sequence ||
+      parsed.observedDigest !== cursor.digest
+    ) {
+      throw new Error('replay stream rolled back or changed its observed prefix');
+    }
+  }
+  if (afterSeq > lastReadableSeq) {
+    throw new Error(
+      `replay stream afterSeq ${afterSeq} exceeds last readable sequence ${lastReadableSeq}`,
+    );
+  }
+
+  const completeOffset = snapshot.startOffset + parsed.completeBytes;
+  const nextCursor = {
+    identity: snapshot.identity,
+    offset: completeOffset,
+    sequence: lastReadableSeq,
+    digest: parsed.digest,
+    reusable: true,
+  };
+  const entries = parsed.entries.filter((entry) => entry.seq > afterSeq);
+  return {
+    cursor: nextCursor,
+    value: freezeReplayReadResult(entries, lastReadableSeq),
+  };
+}
+
+async function readReplaySnapshot({
+  sessionsDir,
+  path,
+  afterSeq,
+  cursor,
+  forceFullRead,
+  fs,
+}) {
+  try {
+    await assertPrivateDirectory(sessionsDir, fs);
+  } catch (cause) {
+    if (cause?.code === 'ENOENT') return { absent: true };
+    throw cause;
+  }
+
+  let pathStat;
+  try {
+    pathStat = await assertPrivateRegularPath(path, 0o600, fs, 'replay stream');
+  } catch (cause) {
+    if (cause?.code === 'ENOENT') return { absent: true };
+    throw cause;
+  }
+
+  let handle;
+  try {
+    handle = await fs.open(
+      path,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
+  } catch (cause) {
+    if (cause?.code === 'ENOENT') {
+      throw new ReplaySnapshotChangedError(
+        'replay stream disappeared while opening its snapshot',
+      );
+    }
+    throw cause;
+  }
+
+  try {
+    const openedStat = await handle.stat();
+    assertPrivateRegularStat(openedStat, 0o600, 'replay stream');
+    if (!sameFileIdentity(pathStat, openedStat)) {
+      throw new ReplaySnapshotChangedError(
+        'replay stream was replaced while opening its snapshot',
+      );
+    }
+    const snapshotLength = requireReplayFileSize(openedStat.size);
+    const identity = replayFileIdentity(openedStat);
+    const cursorBoundaryChanged =
+      cursor !== undefined &&
+      (!sameReplayIdentity(cursor.identity, identity) ||
+        snapshotLength < cursor.offset);
+    if (cursorBoundaryChanged) cursor.reusable = false;
+    const incremental =
+      !forceFullRead &&
+      cursor !== undefined &&
+      cursor.reusable &&
+      sameReplayIdentity(cursor.identity, identity) &&
+      snapshotLength >= cursor.offset &&
+      afterSeq >= cursor.sequence;
+    const startOffset = incremental ? cursor.offset : 0;
+    const bytes = await readReplayRange(handle, startOffset, snapshotLength);
+
+    const finalHandleStat = await handle.stat();
+    assertPrivateRegularStat(finalHandleStat, 0o600, 'replay stream');
+    if (
+      !sameFileIdentity(openedStat, finalHandleStat) ||
+      requireReplayFileSize(finalHandleStat.size) < snapshotLength
+    ) {
+      throw new ReplaySnapshotChangedError(
+        'replay stream was truncated within its pinned snapshot',
+      );
+    }
+
+    let finalPathStat;
+    try {
+      finalPathStat = await assertPrivateRegularPath(
+        path,
+        0o600,
+        fs,
+        'replay stream',
+      );
+    } catch (cause) {
+      if (cause?.code === 'ENOENT') {
+        throw new ReplaySnapshotChangedError(
+          'replay stream disappeared within its pinned snapshot',
+        );
+      }
+      throw cause;
+    }
+    if (!sameFileIdentity(openedStat, finalPathStat)) {
+      throw new ReplaySnapshotChangedError(
+        'replay stream was replaced within its pinned snapshot',
+      );
+    }
+    await assertPrivateDirectory(sessionsDir, fs);
+
+    return {
+      absent: false,
+      bytes,
+      identity,
+      incremental,
+      startOffset,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readReplayRange(handle, start, end) {
+  const buffer = Buffer.allocUnsafe(end - start);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const length = Math.min(REPLAY_READ_CHUNK_SIZE, buffer.length - offset);
+    const result = await handle.read(buffer, offset, length, start + offset);
+    if (
+      result === null ||
+      typeof result !== 'object' ||
+      !Number.isSafeInteger(result.bytesRead) ||
+      result.bytesRead <= 0 ||
+      result.bytesRead > length
+    ) {
+      throw new ReplaySnapshotChangedError(
+        'replay stream ended before its pinned snapshot boundary',
+      );
+    }
+    offset += result.bytesRead;
+  }
+  return buffer;
+}
+
+async function writeReplayRange(handle, bytes, start) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = await handle.write(
+      bytes,
+      offset,
+      bytes.length - offset,
+      start + offset,
+    );
+    if (
+      result === null ||
+      typeof result !== 'object' ||
+      !Number.isSafeInteger(result.bytesWritten) ||
+      result.bytesWritten <= 0 ||
+      result.bytesWritten > bytes.length - offset
+    ) {
+      throw new Error('replay stream append did not write its complete bytes');
+    }
+    offset += result.bytesWritten;
+  }
+}
+
+async function readReplayWriterSnapshot({
+  sessionsDir,
+  path,
+  identity,
+  fs,
+}) {
+  await assertPrivateDirectory(sessionsDir, fs);
+  let pathStat;
+  try {
+    pathStat = await assertPrivateRegularPath(path, 0o600, fs, 'replay stream');
+  } catch (cause) {
+    if (cause?.code === 'ENOENT' && identity === undefined) {
+      return { absent: true };
+    }
+    throw cause;
+  }
+  let handle;
+  try {
+    handle = await fs.open(
+      path,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
+    const openedStat = await handle.stat();
+    assertPrivateRegularStat(openedStat, 0o600, 'replay stream');
+    if (
+      !sameFileIdentity(pathStat, openedStat) ||
+      (identity !== undefined && !sameReplayIdentity(identity, openedStat))
+    ) {
+      throw new Error('replay stream identity changed for its writer');
+    }
+    const size = requireReplayFileSize(openedStat.size);
+    const bytes = await readReplayRange(handle, 0, size);
+    const finalHandleStat = await handle.stat();
+    assertPrivateRegularStat(finalHandleStat, 0o600, 'replay stream');
+    if (
+      !sameFileIdentity(openedStat, finalHandleStat) ||
+      requireReplayFileSize(finalHandleStat.size) !== size
+    ) {
+      throw new Error('replay stream changed during writer validation');
+    }
+    const finalPathStat = await assertPrivateRegularPath(
+      path,
+      0o600,
+      fs,
+      'replay stream',
+    );
+    if (!sameFileIdentity(openedStat, finalPathStat)) {
+      throw new Error('replay stream path changed during writer validation');
+    }
+    await assertPrivateDirectory(sessionsDir, fs);
+    return {
+      absent: false,
+      bytes,
+      identity: replayFileIdentity(openedStat),
+    };
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function mutateReplayWriterFile({
+  sessionsDir,
+  path,
+  identity,
+  expectedSize,
+  expectedFinalSize,
+  fs,
+  retainHandle = false,
+  operation,
+}) {
+  await assertPrivateDirectory(sessionsDir, fs);
+  const pathStat = await assertPrivateRegularPath(
+    path,
+    0o600,
+    fs,
+    'replay stream',
+  );
+  if (!sameReplayIdentity(identity, pathStat)) {
+    throw new Error('replay stream identity changed for its writer');
+  }
+  let handle;
+  try {
+    handle = await fs.open(
+      path,
+      constants.O_RDWR |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
+    const openedStat = await handle.stat();
+    assertPrivateRegularStat(openedStat, 0o600, 'replay stream');
+    if (
+      !sameFileIdentity(pathStat, openedStat) ||
+      !sameReplayIdentity(identity, openedStat) ||
+      requireReplayFileSize(openedStat.size) !== expectedSize
+    ) {
+      throw new Error('replay stream changed before writer mutation');
+    }
+    await operation(handle);
+    const finalStat = await handle.stat();
+    assertPrivateRegularStat(finalStat, 0o600, 'replay stream');
+    if (
+      !sameFileIdentity(openedStat, finalStat) ||
+      (expectedFinalSize !== undefined &&
+        requireReplayFileSize(finalStat.size) !== expectedFinalSize)
+    ) {
+      throw new Error('replay stream changed during writer mutation');
+    }
+    const finalPathStat = await assertPrivateRegularPath(
+      path,
+      0o600,
+      fs,
+      'replay stream',
+    );
+    if (!sameFileIdentity(openedStat, finalPathStat)) {
+      throw new Error('replay stream path changed during writer mutation');
+    }
+    await assertPrivateDirectory(sessionsDir, fs);
+    if (retainHandle) {
+      const retained = handle;
+      handle = undefined;
+      return retained;
+    }
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function appendReplayWriterFile({
+  handle,
+  identity,
+  expectedSize,
+  bytes,
+}) {
+  const openedStat = await handle.stat();
+  assertPrivateRegularStat(openedStat, 0o600, 'replay stream');
+  if (
+    !sameReplayIdentity(identity, openedStat) ||
+    requireReplayFileSize(openedStat.size) !== expectedSize
+  ) {
+    throw new Error('replay stream changed before writer append');
+  }
+  await writeReplayRange(handle, bytes, expectedSize);
+}
+
+async function checkpointReplayWriterFile({
+  sessionsDir,
+  path,
+  handle,
+  identity,
+  expectedSize,
+  fs,
+}) {
+  await assertPrivateDirectory(sessionsDir, fs);
+  const pathStat = await assertPrivateRegularPath(
+    path,
+    0o600,
+    fs,
+    'replay stream',
+  );
+  const openedStat = await handle.stat();
+  assertPrivateRegularStat(openedStat, 0o600, 'replay stream');
+  if (
+    !sameFileIdentity(pathStat, openedStat) ||
+    !sameReplayIdentity(identity, openedStat) ||
+    requireReplayFileSize(openedStat.size) !== expectedSize
+  ) {
+    throw new Error('replay stream changed before writer checkpoint');
+  }
+  await handle.sync();
+  const finalStat = await handle.stat();
+  assertPrivateRegularStat(finalStat, 0o600, 'replay stream');
+  if (
+    !sameFileIdentity(openedStat, finalStat) ||
+    requireReplayFileSize(finalStat.size) !== expectedSize
+  ) {
+    throw new Error('replay stream changed during writer checkpoint');
+  }
+  const finalPathStat = await assertPrivateRegularPath(
+    path,
+    0o600,
+    fs,
+    'replay stream',
+  );
+  if (!sameFileIdentity(openedStat, finalPathStat)) {
+    throw new Error('replay stream path changed during writer checkpoint');
+  }
+  await assertPrivateDirectory(sessionsDir, fs);
+}
+
+async function publishReplayWriterFile({ sessionsDir, path, bytes, fs }) {
+  await assertPrivateDirectory(sessionsDir, fs);
+  let handle;
+  try {
+    handle = await fs.open(
+      path,
+      constants.O_RDWR |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+      0o600,
+    );
+    await handle.chmod(0o600);
+    const openedStat = await handle.stat();
+    assertPrivateRegularStat(openedStat, 0o600, 'replay stream');
+    if (requireReplayFileSize(openedStat.size) !== 0) {
+      throw new Error('new replay stream is not empty');
+    }
+    await writeReplayRange(handle, bytes, 0);
+    const finalStat = await handle.stat();
+    assertPrivateRegularStat(finalStat, 0o600, 'replay stream');
+    if (
+      !sameFileIdentity(openedStat, finalStat) ||
+      requireReplayFileSize(finalStat.size) !== bytes.length
+    ) {
+      throw new Error('new replay stream did not retain its complete append');
+    }
+    const pathStat = await assertPrivateRegularPath(
+      path,
+      0o600,
+      fs,
+      'replay stream',
+    );
+    if (!sameFileIdentity(openedStat, pathStat)) {
+      throw new Error('new replay stream path changed during publication');
+    }
+    await assertPrivateDirectory(sessionsDir, fs);
+    const retained = handle;
+    handle = undefined;
+    return {
+      handle: retained,
+      identity: replayFileIdentity(openedStat),
+    };
+  } finally {
+    await handle?.close();
+  }
+}
+
+function parseReplayLines(bytes, initialSequence, initialDigest, observedSeq) {
+  const entries = [];
+  let sequence = initialSequence;
+  let digest = initialDigest;
+  let observedDigest = observedSeq === 0 ? initialDigest : undefined;
+  let lineStart = 0;
+
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0x0a) continue;
+    const line = bytes.subarray(lineStart, index);
+    const entry = parseReplayEnvelope(line, sequence + 1);
+    sequence = entry.seq;
+    digest = digestReplayEntry(digest, entry);
+    if (sequence === observedSeq) observedDigest = digest;
+    entries.push(entry);
+    lineStart = index + 1;
+  }
+
+  return {
+    completeBytes: lineStart,
+    digest,
+    entries,
+    observedDigest,
+    sequence,
+  };
+}
+
+function parseReplayEnvelope(bytes, expectedSequence) {
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (cause) {
+    throw new Error(
+      `replay stream sequence ${expectedSequence} is not valid UTF-8: ${errorMessage(cause)}`,
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (cause) {
+    throw new Error(
+      `replay stream sequence ${expectedSequence} is not valid JSON: ${errorMessage(cause)}`,
+    );
+  }
+  const envelope = requireRecord(
+    snapshotJsonValue(parsed, `replay stream sequence ${expectedSequence}`),
+    `replay stream sequence ${expectedSequence}`,
+  );
+  exactOptionalKeys(
+    envelope,
+    ['v', 'seq', 'record'],
+    ['role'],
+    `replay stream sequence ${expectedSequence}`,
+  );
+  if (envelope.v !== RECORDS_STREAM_VERSION) {
+    throw new Error(
+      `replay stream sequence ${expectedSequence} version must be ${RECORDS_STREAM_VERSION}`,
+    );
+  }
+  if (!Number.isSafeInteger(envelope.seq) || envelope.seq <= 0) {
+    throw new Error(
+      `replay stream sequence ${expectedSequence} seq must be a positive safe integer`,
+    );
+  }
+  if (envelope.seq !== expectedSequence) {
+    throw new Error(
+      `replay stream expected sequence ${expectedSequence}, received ${envelope.seq}`,
+    );
+  }
+  if (envelope.role !== undefined && typeof envelope.role !== 'string') {
+    throw new Error(
+      `replay stream sequence ${expectedSequence} role must be a string`,
+    );
+  }
+  requireRecord(
+    envelope.record,
+    `replay stream sequence ${expectedSequence} record`,
+  );
+  return envelope;
+}
+
+function validateReplayReadOptions(options) {
+  if (
+    options === undefined ||
+    isExactUndefinedReplayReadOption(options)
+  ) {
+    return 0;
+  }
+  const value = requireRecord(
+    snapshotJsonValue(options, 'replay stream read options'),
+    'replay stream read options',
+  );
+  exactOptionalKeys(value, [], ['afterSeq'], 'replay stream read options');
+  const afterSeq = Object.hasOwn(value, 'afterSeq') ? value.afterSeq : 0;
+  if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) {
+    throw new Error(
+      'replay stream read options afterSeq must be a nonnegative safe integer',
+    );
+  }
+  return afterSeq;
+}
+
+function isExactUndefinedReplayReadOption(options) {
+  if (
+    options === null ||
+    typeof options !== 'object' ||
+    Array.isArray(options)
+  ) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(options);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(options);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.length !== 1 || keys[0] !== 'afterSeq') return false;
+  const descriptor = descriptors.afterSeq;
+  return (
+    descriptor.enumerable &&
+    Object.hasOwn(descriptor, 'value') &&
+    descriptor.value === undefined
+  );
+}
+
+function freezeReplayReadResult(entries, lastReadableSeq) {
+  return Object.freeze({
+    entries: Object.freeze(entries),
+    lastReadableSeq,
+  });
+}
+
+function projectPlaybookSessionSummary(record) {
+  return Object.freeze({
+    schemaVersion: record.schemaVersion,
+    sessionId: record.sessionId,
+    state: record.state,
+    cwd: record.cwd,
+    updatedAt: record.updatedAt,
+  });
+}
+
+function freezeReplayLeaseReadResult(
+  entries,
+  lastReadableSeq,
+  lastDurableSeq,
+  incomplete,
+) {
+  return Object.freeze({
+    entries: Object.freeze(entries),
+    lastReadableSeq,
+    lastDurableSeq,
+    incomplete,
+  });
+}
+
+function replayFileIdentity(stat) {
+  return Object.freeze({ dev: stat.dev, ino: stat.ino });
+}
+
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameReplayIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function requireReplayFileSize(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error('replay stream size must be a nonnegative safe integer');
+  }
+  return value;
+}
+
+function assertPrivateRegularStat(stat, mode, label) {
+  if (!stat.isFile()) {
+    throw new Error(`${label} path is not a regular file`);
+  }
+  if ((stat.mode & 0o7777) !== mode) {
+    throw new Error(`${label} permissions must be ${octal(mode)}`);
+  }
+}
+
+function digestReplayEntry(previous, entry) {
+  return createHash('sha256')
+    .update(previous)
+    .update('\u0000')
+    .update(canonicalReplayJson(entry))
+    .digest('hex');
+}
+
+function canonicalReplayJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalReplayJson).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalReplayJson(value[key])}`,
+      )
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sanitizeReplayValue(value, path, ancestors, scope = 'record') {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new TypeError(`${path} must contain a finite JSON number`);
+    }
+    if (Object.is(value, -0)) {
+      throw new TypeError(`${path} must not contain negative zero`);
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      throw new TypeError(`${path} must be a plain JSON array`);
+    }
+    if (ancestors.has(value)) {
+      throw new TypeError(`${path} must not contain a JSON cycle`);
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.some((key) => typeof key === 'symbol')) {
+      throw new TypeError(`${path} must not contain symbol-keyed properties`);
+    }
+    const lengthDescriptor = descriptors.length;
+    if (
+      lengthDescriptor === undefined ||
+      !Object.hasOwn(lengthDescriptor, 'value') ||
+      !Number.isSafeInteger(lengthDescriptor.value) ||
+      lengthDescriptor.value < 0
+    ) {
+      throw new TypeError(`${path} must be a plain JSON array`);
+    }
+    const length = lengthDescriptor.value;
+    const nextAncestors = new Set(ancestors).add(value);
+    const copy = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (
+        descriptor === undefined ||
+        !descriptor.enumerable ||
+        !Object.hasOwn(descriptor, 'value')
+      ) {
+        throw new TypeError(`${path} must not be a sparse JSON array`);
+      }
+      copy.push(
+        sanitizeReplayValue(
+          descriptor.value,
+          `${path}[${index}]`,
+          nextAncestors,
+          scope,
+        ),
+      );
+    }
+    const extra = keys.find(
+      (key) =>
+        typeof key === 'string' &&
+        key !== 'length' &&
+        (!Number.isSafeInteger(Number(key)) ||
+          Number(key) < 0 ||
+          Number(key) >= length ||
+          String(Number(key)) !== key),
+    );
+    if (extra !== undefined) {
+      throw new TypeError(`${path}.${extra} is not a JSON array index`);
+    }
+    return Object.freeze(copy);
+  }
+  if (value === null || typeof value !== 'object') {
+    throw new TypeError(`${path} must be a JSON value`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`${path} must be a JSON value`);
+  }
+  if (ancestors.has(value)) {
+    throw new TypeError(`${path} must not contain a JSON cycle`);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key === 'symbol')) {
+    throw new TypeError(`${path} must not contain symbol-keyed properties`);
+  }
+  const nextAncestors = new Set(ancestors).add(value);
+  // Cligent session IDs are provider continuations. Playbook trace and
+  // checkpoint session IDs are logical identities and must survive.
+  const type = descriptors.type?.value;
+  const adapterEvent = scope !== 'content' &&
+    typeof type === 'string' && typeof descriptors.agent?.value === 'string' &&
+    Number.isFinite(descriptors.timestamp?.value) && Object.hasOwn(descriptors, 'payload');
+  const provider = scope === 'provider' || scope === 'identity' || adapterEvent;
+  const observed = type === 'captain_event' || type === 'player_event';
+  const copy = {};
+  for (const key of keys) {
+    if (typeof key !== 'string') continue;
+    if (key === 'resumeToken') continue;
+    if (provider && (['sessionid', 'nativesessionid', 'threadid', 'conversationid'].includes(key.replaceAll('_', '').toLowerCase()) || (scope === 'identity' && key === 'id'))) continue;
+    const descriptor = descriptors[key];
+    if (
+      descriptor === undefined ||
+      !descriptor.enumerable ||
+      !Object.hasOwn(descriptor, 'value')
+    ) {
+      throw new TypeError(
+        `${path}.${key} must be an enumerable JSON data property`,
+      );
+    }
+    if (key === 'resume' && typeof descriptor.value === 'string') continue;
+    if (descriptor.value === undefined) continue;
+    Object.defineProperty(copy, key, {
+      value: sanitizeReplayValue(
+        descriptor.value,
+        `${path}.${key}`,
+        nextAncestors,
+        scope === 'content' || (provider && (key === 'input' || key === 'output'))
+          ? 'content'
+          : provider
+            ? ['session', 'thread', 'conversation'].includes(key) ? 'identity' : 'provider'
+            : observed && key === 'event' ? 'provider' : 'record',
+      ),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return Object.freeze(copy);
+}
+
+async function createLease({
   sessionId,
   owner,
+  sessionsDir,
+  replayPath,
+  replayFs,
+  readReplayStream,
   readRecord,
+  readManifest,
+  readHistory,
+  validateSession,
+  portableWriters,
   writeRecord,
+  syncRecordDirectory,
   deleteRecord,
+  scanAdoptionPredecessor,
+  acquireSession,
   readLeaseOwner,
   retireObservedLease,
   validateRetiredLeases,
   now,
 }) {
   let released = false;
-  let operationActive = false;
+  let operationTail = Promise.resolve();
+  let indeterminateEffectLedgerWrite;
+  let releasing = false;
+  const ownerChecks = new Set();
 
-  const requireActive = () => {
-    if (released) throw new Error('Captain session lease was already released');
-    if (operationActive) {
-      throw new Error('Captain session lease operation is already in progress');
-    }
-  };
-
-  const runExclusive = async (operation) => {
-    requireActive();
-    operationActive = true;
-    try {
-      return await operation();
-    } finally {
-      operationActive = false;
-    }
+  // All lifecycle, step and repository writes share one order, including
+  // calls from parallel players. A failed write does not poison the queue.
+  const runExclusive = (operation) => {
+    if (releasing) return Promise.reject(new Error('Captain session lease is releasing'));
+    const run = operationTail.then(() => {
+      if (released) throw new Error('Captain session lease was already released');
+      return operation();
+    });
+    operationTail = run.then(() => undefined, () => undefined);
+    return run;
   };
 
   const assertOwnerUnchecked = async () => {
@@ -726,7 +2577,120 @@ function createLease({
     return current;
   };
 
-  const assertOwner = () => runExclusive(assertOwnerUnchecked);
+  const assertOwner = () => {
+    if (releasing) return Promise.reject(new Error('Captain session lease is releasing'));
+    // This reads only the lease token. Parallel players must not compete
+    // for the mutation guard, but release must still join admitted reads.
+    const check = assertOwnerUnchecked();
+    ownerChecks.add(check);
+    return check.finally(() => ownerChecks.delete(check));
+  };
+
+  const replayWriter = await createLeaseReplayWriter({
+    sessionsDir,
+    path: replayPath,
+    fs: replayFs,
+    assertOwner: assertOwnerUnchecked,
+    readStream: readReplayStream,
+  });
+
+  let contextSeq;
+  let previousManifest;
+  let acknowledgedHints = { players: {} };
+  try { previousManifest = await readManifest(sessionId); contextSeq = previousManifest.contextSeq; }
+  catch { /* Unsupported recovery still permits leased migration/deletion. */ }
+
+  const recordContext = async (value) => {
+    const context = validateSessionContext(value);
+    if (contextSeq !== undefined && contextSeq !== null) {
+      const previous = (await readHistory(sessionId)).entries.find((entry) => entry.seq === contextSeq)?.record;
+      if (previous) {
+        const { timestamp: _previousTimestamp, ...oldContext } = previous;
+        const { timestamp: _newTimestamp, ...newContext } = context;
+        if (isDeepStrictEqual(oldContext, newContext)) return contextSeq;
+      }
+    }
+    await replayWriter.append(context);
+    await replayWriter.checkpoint();
+    const status = replayWriter.status();
+    if (status.incomplete || status.lastDurableSeq === null) throw new Error('cannot persist session execution context');
+    contextSeq = status.lastDurableSeq;
+    return contextSeq;
+  };
+  const checkpoint = async (value) => {
+    const recovery = validateCaptainSessionRecord(value);
+    const required = contextFromRecovery(recovery);
+    let contextHistory;
+    try { contextHistory = await readHistory(sessionId); } catch { /* Preserve the last proven context on replay failure. */ }
+    const applicable = contextHistory?.entries.findLast(({ record }) =>
+      record.type === 'session_context' && record.contextVersion === 1 &&
+      record.captainId === required.captainId && isDeepStrictEqual(record.configuration, required.configuration));
+    if (applicable) contextSeq = applicable.seq;
+    else if (contextSeq === undefined || contextSeq === null || !replayWriter.status().incomplete) await recordContext(required);
+    await replayWriter.checkpoint();
+    const status = replayWriter.status();
+    let history;
+    try { history = await readHistory(sessionId); }
+    catch { history = { digests: [], incomplete: true }; }
+    const durableSeq = status.lastDurableSeq ?? previousManifest?.replay?.seq ?? 0;
+    const seq = history.digests[durableSeq] === undefined ? previousManifest?.replay?.seq ?? 0 : durableSeq;
+    const digest = history.digests[seq] ?? previousManifest?.replay?.sha256 ?? EMPTY_REPLAY_SHA256;
+    const replay = { seq, sha256: digest, incomplete: previousManifest?.replay?.incomplete === true || status.incomplete || history.incomplete || history.digests[seq] === undefined };
+    const manifest = manifestFromRecovery(recovery, replay, contextSeq);
+    return manifest;
+  };
+  portableWriters.set(sessionId, { checkpoint, sync: replayWriter.checkpoint, published: (manifest) => { previousManifest = manifest; } });
+
+  const hintsPath = join(sessionsDir, `${sessionId}.hints.json`);
+  const readHints = async () => {
+    try {
+      const bytes = await readPrivateRegularFile(join(sessionsDir, `${sessionId}.json`), 0o600, replayFs, 'record');
+      const manifest = validateSessionManifest(JSON.parse(bytes));
+      const hints = JSON.parse(await readPrivateRegularFile(hintsPath, 0o600, replayFs, 'hints'));
+      return validateSessionHints(hints, bytes, manifest);
+    } catch { return { players: {} }; }
+  };
+  const writeHints = async (hints) => {
+    const bytes = await readPrivateRegularFile(join(sessionsDir, `${sessionId}.json`), 0o600, replayFs, 'record');
+    const manifest = validateSessionManifest(JSON.parse(bytes));
+    const value = { v: 1, sessionId, checkpointSha256: sha256(bytes), players: hints.players, ...(hints.captain ? { captain: hints.captain } : {}) };
+    validateSessionHints(value, bytes, manifest);
+    await writePrivateJson(hintsPath, value, replayFs);
+  };
+  const consumeHints = () => runExclusive(async () => {
+    await assertOwnerUnchecked();
+    const hints = await readHints();
+    await writeHints({ players: {} });
+    // Unused conversations cannot advance. Retain that proof until the
+    // participant's before-call hook clears it; crashes still lose the hints.
+    acknowledgedHints = structuredClone(hints);
+    return hints;
+  });
+  const acknowledgeHint = (participantId, token) => {
+    if (typeof token !== 'string' || token.length === 0) return;
+    if (participantId === 'captain') acknowledgedHints.captain = { kind: 'pinned', token };
+    else acknowledgedHints.players[participantId] = token;
+  };
+  const clearHint = (participantId) => {
+    if (participantId === 'captain') delete acknowledgedHints.captain;
+    else delete acknowledgedHints.players[participantId];
+  };
+  const assertContinuable = async (context = {}) => {
+    const result = await validateSession(sessionId, context);
+    if (!result.resumable) throw new Error(result.reasons.join('; '));
+    return result;
+  };
+  const append = (record, role) => replayWriter.append(
+    contextSeq !== undefined && record?.type !== 'session_context' && typeof record?.type === 'string' && Number.isFinite(record?.timestamp)
+      ? { ...record, contextSeq } : record,
+    role,
+  );
+
+  const finishSettlement = async (record) => {
+    await replayWriter.checkpoint();
+    try { await writeHints(acknowledgedHints); } catch { /* Hints are optional; missing hints start fresh. */ }
+    return validateCaptainSessionRecord(projectRecovery(record));
+  };
 
   const read = () =>
     runExclusive(async () => {
@@ -736,47 +2700,334 @@ function createLease({
       return record;
     });
 
-  const initializeSettled = ({
+  const freshSettledRecord = ({
     cwd,
     structuralProjection,
     executionProjection,
     snapshot,
-  } = {}) =>
-    runExclusive(async () => {
-      const initial = validateFreshBoundary({
-        cwd,
-        structuralProjection,
-        snapshot,
+  } = {}) => {
+    const initial = validateFreshBoundary({
+      cwd,
+      structuralProjection,
+      snapshot,
+    });
+    const applied = assertCaptainSessionExecutionCompatible(
+      initial.structuralProjection,
+      executionProjection,
+    );
+    const createdAt = timestampFrom(now(), 'session timestamp');
+    const updatedAt = nextTimestamp(now(), createdAt);
+    return validateCaptainSessionRecord({
+      schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
+      kind: CAPTAIN_SESSION_RECORD_KIND,
+      state: 'settled',
+      sessionId,
+      createdAt,
+      updatedAt,
+      cwd: initial.cwd,
+      structuralProjection: initial.structuralProjection,
+      lastAppliedExecutionProjection: applied,
+      snapshot: initial.snapshot,
+      effectLedger: emptyPlaybookEffectLedger(),
+      unresolvedEffects: [],
+      retainedGenerations: {},
+    });
+  };
+
+  const laterTimestamp = (left, right) =>
+    right !== undefined && Date.parse(right) > Date.parse(left) ? right : left;
+
+  const emptyFreshTargetAfter = (target, predecessorUpdatedAt) => {
+    if (predecessorUpdatedAt === undefined) return target;
+    return settledRecordWithRetainedGenerations(
+      target,
+      {},
+      nextTimestamp(
+        now(),
+        laterTimestamp(target.updatedAt, predecessorUpdatedAt),
+      ),
+    );
+  };
+
+  const publishEmptyFreshTarget = async (target) => {
+    try {
+      await assertOwnerUnchecked();
+      await writeRecord(target, {
+        noReplace: true,
       });
-      const applied = assertCaptainSessionExecutionCompatible(
-        initial.structuralProjection,
-        executionProjection,
+    } catch (cause) {
+      throw new Error(
+        `cannot publish empty Captain session adoption target: ${errorMessage(cause)}`,
+        { cause },
       );
-      const createdAt = timestampFrom(now(), 'session timestamp');
-      const updatedAt = nextTimestamp(now(), createdAt);
-      const record = validateCaptainSessionRecord({
-        schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
-        kind: CAPTAIN_SESSION_RECORD_KIND,
-        state: 'settled',
-        sessionId,
-        createdAt,
-        updatedAt,
-        cwd: initial.cwd,
-        structuralProjection: initial.structuralProjection,
-        lastAppliedExecutionProjection: applied,
-        snapshot: initial.snapshot,
-      });
+    }
+  };
+
+  const useAcquiredSession = async (sourceSessionId, operation) => {
+    const sourceLease = await acquireSession(sourceSessionId);
+    let result;
+    let operationFailed = false;
+    let operationError;
+    try {
+      result = await operation(sourceLease);
+    } catch (cause) {
+      operationFailed = true;
+      operationError = cause;
+    }
+    try {
+      await sourceLease.release();
+    } catch (releaseError) {
+      if (operationFailed) {
+        throw new AggregateError(
+          [operationError, releaseError],
+          'Captain session adoption predecessor operation failed and its lease could not be released',
+        );
+      }
+      throw releaseError;
+    }
+    if (operationFailed) throw operationError;
+    return result;
+  };
+
+  const useAvailableSession = async (sourceSessionId, operation) => {
+    try {
+      return await useAcquiredSession(sourceSessionId, operation);
+    } catch (error) {
+      if (error instanceof CaptainSessionLeaseActiveError) return undefined;
+      throw error;
+    }
+  };
+
+  const initializeSettledWithPredecessor = (options = {}) =>
+    runExclusive(async () => {
+      const target = freshSettledRecord(options);
+      if (options.context !== undefined) await recordContext(options.context);
       await assertOwnerUnchecked();
-      await writeRecord(record, { noReplace: true });
+      if (
+        (await readRecord(sessionId, { missing: 'undefined' })) !== undefined
+      ) {
+        throw new Error(
+          `Captain session ${JSON.stringify(sessionId)} already exists`,
+        );
+      }
+      const reportedSkippedRecords = new Set();
+      const reportOnce = (observer, label) => {
+        if (observer === undefined) return undefined;
+        if (typeof observer !== 'function') {
+          throw new Error(`Captain session ${label} observer must be a function`);
+        }
+        return async (record) => {
+          const key = `${record.sessionId}\u0000${record.path}`;
+          if (reportedSkippedRecords.has(key)) return;
+          reportedSkippedRecords.add(key);
+          await observer(record);
+        };
+      };
+      const predecessorScanOptions = {
+        onLegacyRecord: reportOnce(
+          options.onLegacyRecord,
+          'legacy-record',
+        ),
+        onInvalidRecord: reportOnce(
+          options.onInvalidRecord,
+          'invalid-record',
+        ),
+      };
+      const initialScan = await scanAdoptionPredecessor(
+        target,
+        predecessorScanOptions,
+      );
+      if (initialScan.adoptionDeclined) {
+        const emptyTarget = emptyFreshTargetAfter(
+          target,
+          initialScan.newestBoundaryUpdatedAt,
+        );
+        await publishEmptyFreshTarget(emptyTarget);
+        await assertOwnerUnchecked();
+        return emptyTarget;
+      }
+      const selected = initialScan.candidate;
+      if (selected === undefined) {
+        await publishEmptyFreshTarget(target);
+        await assertOwnerUnchecked();
+        return target;
+      }
+
+      let result = await useAvailableSession(
+        selected.sessionId,
+        async (sourceLease) => {
+          const source = await sourceLease.read();
+          if (source === undefined) {
+            const currentScan = await scanAdoptionPredecessor(
+              target,
+              predecessorScanOptions,
+            );
+            return {
+              kind: 'declined',
+              predecessorUpdatedAt: laterTimestamp(
+                selected.updatedAt,
+                currentScan.newestBoundaryUpdatedAt,
+              ),
+            };
+          }
+          await assertOwnerUnchecked();
+          if (
+            (await readRecord(sessionId, { missing: 'undefined' })) !==
+            undefined
+          ) {
+            throw new Error('Captain session adoption target changed');
+          }
+          const currentScan = await scanAdoptionPredecessor(
+            target,
+            predecessorScanOptions,
+          );
+          if (currentScan.candidate?.sessionId !== source.sessionId) {
+            return {
+              kind: 'declined',
+              predecessorUpdatedAt: laterTimestamp(
+                source.updatedAt,
+                currentScan.newestBoundaryUpdatedAt,
+              ),
+            };
+          }
+
+          const retainedGenerations = source.retainedGenerations ?? {};
+          try {
+            assertAdoptionTransferEnvelope(
+              source.structuralProjection,
+              target.structuralProjection,
+              retainedGenerations,
+              source.effectLedger,
+            );
+          } catch {
+            return {
+              kind: 'declined',
+              predecessorUpdatedAt: source.updatedAt,
+            };
+          }
+          if (Object.keys(retainedGenerations).length === 0) {
+            return {
+              kind: 'empty',
+              predecessorUpdatedAt: source.updatedAt,
+            };
+          }
+
+          const sourceNext = settledRecordWithRetainedGenerations(
+            source,
+            {},
+            nextTimestamp(now(), source.updatedAt),
+          );
+          const targetTimestampFloor =
+            Date.parse(target.updatedAt) > Date.parse(sourceNext.updatedAt)
+              ? target.updatedAt
+              : sourceNext.updatedAt;
+          const targetNext = settledRecordWithRetainedGenerations(
+            target,
+            retainedGenerations,
+            nextTimestamp(now(), targetTimestampFloor),
+            source.effectLedger,
+          );
+
+          await sourceLease.assertOwner();
+          await assertOwnerUnchecked();
+          let sourcePublished = false;
+          try {
+            await writeRecord(sourceNext, {
+              noReplace: false,
+              onPublished: () => {
+                sourcePublished = true;
+              },
+            });
+          } catch (cause) {
+            throw new Error(
+              `cannot clear Captain session adoption predecessor: ${errorMessage(cause)}`,
+              { cause },
+            );
+          }
+          if (!sourcePublished) {
+            throw new Error(
+              'Captain session adoption predecessor clear did not publish',
+            );
+          }
+          await sourceLease.assertOwner();
+          await assertOwnerUnchecked();
+
+          let targetPublished = false;
+          try {
+            await writeRecord(targetNext, {
+              noReplace: true,
+              onPublished: () => {
+                targetPublished = true;
+              },
+            });
+          } catch (cause) {
+            if (!targetPublished) {
+              try {
+                await sourceLease.assertOwner();
+                await assertOwnerUnchecked();
+                await writeRecord(source, { noReplace: false });
+                await sourceLease.assertOwner();
+                await assertOwnerUnchecked();
+              } catch (rollbackError) {
+                throw new AggregateError(
+                  [cause, rollbackError],
+                  'Captain session adoption transfer failed and its predecessor could not be restored',
+                );
+              }
+            }
+            throw new Error(
+              `cannot install Captain session adoption generations: ${errorMessage(cause)}`,
+              { cause },
+            );
+          }
+          await sourceLease.assertOwner();
+          await assertOwnerUnchecked();
+          return { kind: 'transferred', target: targetNext };
+        },
+      );
+      if (result === undefined) {
+        result = {
+          kind: 'declined',
+          predecessorUpdatedAt: selected.updatedAt,
+        };
+      }
+
+      if (result.kind === 'transferred') return result.target;
       await assertOwnerUnchecked();
-      return record;
+      if (
+        (await readRecord(sessionId, { missing: 'undefined' })) !== undefined
+      ) {
+        throw new Error('Captain session adoption target changed');
+      }
+      const emptyTarget = emptyFreshTargetAfter(
+        target,
+        result.predecessorUpdatedAt,
+      );
+      await publishEmptyFreshTarget(emptyTarget);
+      await assertOwnerUnchecked();
+      return emptyTarget;
+    });
+
+  const abandonFreshSettled = ({ expected: value } = {}) =>
+    runExclusive(async () => {
+      const expected = validateCaptainSessionRecord(value);
+      if (expected.sessionId !== sessionId) {
+        throw new Error('fresh Captain session abandonment id is mismatched');
+      }
+      assertFreshAdoptionTarget(expected);
+      await assertOwnerUnchecked();
+      const current = await readRecord(sessionId, { missing: 'undefined' });
+      if (!isDeepStrictEqual(current, expected)) return false;
+      await assertOwnerUnchecked();
+      await deleteRecord(sessionId);
+      await assertOwnerUnchecked();
+      return true;
     });
 
   const beginTurn = ({
     input,
     attemptId,
     attemptedExecutionProjection,
-    fresh,
   } = {}) =>
     runExclusive(async () => {
       assertAcceptedInput(input);
@@ -786,68 +3037,42 @@ function createLease({
         'Captain session attempted execution projection',
       );
       await assertOwnerUnchecked();
+      await assertContinuable();
       const prior = await readRecord(sessionId, { missing: 'undefined' });
-      let record;
-      if (fresh !== undefined) {
-        if (prior !== undefined) {
-          throw new Error('fresh Captain session record already exists');
-        }
-        const initial = validateFreshBoundary(fresh);
-        const timestamp = timestampFrom(now(), 'session timestamp');
-        record = validateCaptainSessionRecord({
-          schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
-          kind: CAPTAIN_SESSION_RECORD_KIND,
-          state: 'uncertain',
-          sessionId,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-          cwd: initial.cwd,
-          structuralProjection: initial.structuralProjection,
-          lastAppliedExecutionProjection: attempted,
-          snapshot: initial.snapshot,
-          uncertain: {
-            baseUpdatedAt: null,
-            input,
-            attemptId,
-            attemptNumber: 1,
-            markedAt: timestamp,
-            attemptedExecutionProjection: attempted,
-          },
-        });
-        await assertOwnerUnchecked();
-        await writeRecord(record, { noReplace: true });
-      } else {
-        if (prior === undefined) {
-          throw new Error('Captain session does not exist for continuation');
-        }
-        if (prior.state !== 'settled') {
-          throw new Error('Captain session already has an uncertain turn');
-        }
-        const timestamp = nextTimestamp(now(), prior.updatedAt);
-        record = validateCaptainSessionRecord({
-          schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
-          kind: CAPTAIN_SESSION_RECORD_KIND,
-          state: 'uncertain',
-          sessionId,
-          createdAt: prior.createdAt,
-          updatedAt: timestamp,
-          cwd: prior.cwd,
-          structuralProjection: prior.structuralProjection,
-          lastAppliedExecutionProjection:
-            prior.lastAppliedExecutionProjection,
-          snapshot: prior.snapshot,
-          uncertain: {
-            baseUpdatedAt: prior.updatedAt,
-            input,
-            attemptId,
-            attemptNumber: 1,
-            markedAt: timestamp,
-            attemptedExecutionProjection: attempted,
-          },
-        });
-        await assertOwnerUnchecked();
-        await writeRecord(record, { noReplace: false });
+      if (prior === undefined) {
+        throw new Error('Captain session does not exist for continuation');
       }
+      if (prior.state !== 'settled') {
+        throw new Error('Captain session already has an uncertain turn');
+      }
+      const timestamp = nextTimestamp(now(), prior.updatedAt);
+      const record = validateCaptainSessionRecord({
+        schemaVersion: prior.schemaVersion,
+        kind: CAPTAIN_SESSION_RECORD_KIND,
+        state: 'uncertain',
+        sessionId,
+        createdAt: prior.createdAt,
+        updatedAt: timestamp,
+        cwd: prior.cwd,
+        structuralProjection: prior.structuralProjection,
+        lastAppliedExecutionProjection:
+          prior.lastAppliedExecutionProjection,
+        snapshot: prior.snapshot,
+        effectLedger: prior.effectLedger,
+        unresolvedEffects: prior.unresolvedEffects,
+        ...retainedGenerationsMember(prior),
+        ...settledAbandonmentMember(prior),
+        uncertain: {
+          baseUpdatedAt: prior.updatedAt,
+          input,
+          attemptId,
+          attemptNumber: 1,
+          markedAt: timestamp,
+          attemptedExecutionProjection: attempted,
+        },
+      });
+      await assertOwnerUnchecked();
+      await writeRecord(record, { noReplace: false });
       await assertOwnerUnchecked();
       return record;
     });
@@ -860,16 +3085,22 @@ function createLease({
         throw new Error('Captain session retry requires a fresh attempt id');
       }
       await assertOwnerUnchecked();
+      await assertContinuable();
       const prior = await requireUncertainRecord(
         await readRecord(sessionId, { missing: 'undefined' }),
         expectedAttemptId,
       );
+      if (Object.hasOwn(prior.uncertain, 'abandonment')) {
+        throw new Error(
+          'Captain session unresolved-effect abandonment must recover before retry',
+        );
+      }
       if (!Number.isSafeInteger(prior.uncertain.attemptNumber + 1)) {
         throw new Error('Captain session attempt number cannot be incremented');
       }
       const timestamp = nextTimestamp(now(), prior.updatedAt);
       const record = validateCaptainSessionRecord({
-        schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
+        schemaVersion: prior.schemaVersion,
         kind: CAPTAIN_SESSION_RECORD_KIND,
         state: 'uncertain',
         sessionId,
@@ -880,8 +3111,13 @@ function createLease({
         lastAppliedExecutionProjection:
           prior.lastAppliedExecutionProjection,
         snapshot: prior.snapshot,
+        effectLedger: prior.effectLedger,
+        unresolvedEffects: prior.unresolvedEffects,
+        ...retainedGenerationsMember(prior),
+        ...settledAbandonmentMember(prior),
         uncertain: {
           baseUpdatedAt: prior.uncertain.baseUpdatedAt,
+          ...(prior.uncertain.progress === undefined ? {} : { progress: prior.uncertain.progress }),
           input: prior.uncertain.input,
           attemptId: nextAttemptId,
           attemptNumber: prior.uncertain.attemptNumber + 1,
@@ -896,13 +3132,211 @@ function createLease({
       return record;
     });
 
-  const settle = ({ attemptId, snapshot } = {}) =>
+  const requireAbandonmentSettlement = (
+    abandonment,
+    unresolvedEffects,
+    retentionUpdates,
+    snapshot,
+    retainedGenerations,
+  ) => {
+    if (
+      !isDeepStrictEqual(
+        abandonment.unresolvedEffects,
+        unresolvedEffects,
+      )
+    ) {
+      throw new Error(
+        'Captain session abandonment settlement differs from its durable unresolved effects',
+      );
+    }
+    if (
+      !retentionUpdates.some(
+        (update) =>
+          update.kind === 'clear' &&
+          update.rootPlaybookId === abandonment.rootPlaybookId,
+      ) ||
+      retentionUpdates.some(
+        (update) =>
+          update.kind !== 'clear' ||
+          (update.rootPlaybookId !== abandonment.rootPlaybookId &&
+            Object.hasOwn(retainedGenerations, update.rootPlaybookId)),
+      )
+    ) {
+      throw new Error(
+        'Captain session abandonment settlement must clear its durable root without changing another retained generation',
+      );
+    }
+    if (
+      snapshot.mode !== 'chat' ||
+      (snapshot.lastAction !== 'runtime' && snapshot.lastAction !== 'dismiss') ||
+      snapshot.lastSettlementStatus !== 'ok'
+    ) {
+      throw new Error(
+        'Captain session abandonment settlement requires a successful host-disposal snapshot',
+      );
+    }
+  };
+
+  const unresolvedEffectAbandonmentInput = (value) => {
+    const input = requireRecord(
+      snapshotJsonValue(value, 'Captain unresolved-effect abandonment'),
+      'Captain unresolved-effect abandonment',
+    );
+    rejectUnknownOrMissingKeys(
+      input,
+      ['rootPlaybookId', 'unresolvedEffects'],
+      'Captain unresolved-effect abandonment',
+    );
+    const rootPlaybookId = requireCanonicalNonblank(
+      input.rootPlaybookId,
+      'Captain unresolved-effect abandonment.rootPlaybookId',
+    );
+    const unresolvedEffects = assertPlaybookCaptainUnresolvedEffects(
+      input.unresolvedEffects,
+    );
+    if (unresolvedEffects.length === 0) {
+      throw new Error(
+        'Captain unresolved-effect abandonment requires nonempty unresolved effects',
+      );
+    }
+    return { rootPlaybookId, unresolvedEffects };
+  };
+
+  const beginUnresolvedEffectAbandonment = (value) =>
     runExclusive(async () => {
-      assertUuid(attemptId, 'Captain session attempt id');
+      const input = unresolvedEffectAbandonmentInput(value);
       await assertOwnerUnchecked();
       const prior = await requireUncertainRecord(
         await readRecord(sessionId, { missing: 'undefined' }),
-        attemptId,
+      );
+      if (Object.hasOwn(prior.uncertain, 'abandonment')) {
+        const existing = prior.uncertain.abandonment;
+        if (
+          existing.phase === 'started' &&
+          existing.rootPlaybookId === input.rootPlaybookId &&
+          isDeepStrictEqual(existing.unresolvedEffects, input.unresolvedEffects)
+        ) {
+          await assertOwnerUnchecked();
+          await syncRecordDirectory();
+          await assertOwnerUnchecked();
+          return prior;
+        }
+        throw new Error(
+          'Captain session unresolved-effect abandonment is already in progress',
+        );
+      }
+      if (
+        prior.snapshot.mode !== 'engaged.parked' ||
+        prior.snapshot.frames[0]?.playbookId !== input.rootPlaybookId
+      ) {
+        throw new Error(
+          'Captain session unresolved-effect abandonment root does not match its durable engagement',
+        );
+      }
+      const record = validateCaptainSessionRecord({
+        ...prior,
+        uncertain: {
+          ...prior.uncertain,
+          abandonment: {
+            phase: 'started',
+            rootPlaybookId: input.rootPlaybookId,
+            unresolvedEffects: input.unresolvedEffects,
+          },
+        },
+      });
+      await assertOwnerUnchecked();
+      await writeRecord(record, { noReplace: false });
+      await assertOwnerUnchecked();
+      return record;
+    });
+
+  const completeUnresolvedEffectAbandonment = (value) =>
+    runExclusive(async () => {
+      const input = unresolvedEffectAbandonmentInput(value);
+      await assertOwnerUnchecked();
+      const prior = await requireUncertainRecord(
+        await readRecord(sessionId, { missing: 'undefined' }),
+      );
+      const abandonment = prior.uncertain.abandonment;
+      if (
+        abandonment === undefined ||
+        abandonment.rootPlaybookId !== input.rootPlaybookId ||
+        !isDeepStrictEqual(
+          abandonment.unresolvedEffects,
+          input.unresolvedEffects,
+        )
+      ) {
+        throw new Error(
+          'Captain session unresolved-effect abandonment completion differs from its durable start',
+        );
+      }
+      if (abandonment.phase === 'disposed') {
+        await assertOwnerUnchecked();
+        await syncRecordDirectory();
+        await assertOwnerUnchecked();
+        return prior;
+      }
+      const record = validateCaptainSessionRecord({
+        ...prior,
+        unresolvedEffects: input.unresolvedEffects,
+        retainedGenerations: applyRetainedGenerationUpdates(
+          prior.retainedGenerations ?? {},
+          [{ kind: 'clear', rootPlaybookId: input.rootPlaybookId }],
+          prior.structuralProjection,
+        ),
+        uncertain: {
+          ...prior.uncertain,
+          abandonment: {
+            phase: 'disposed',
+            rootPlaybookId: input.rootPlaybookId,
+            unresolvedEffects: input.unresolvedEffects,
+          },
+        },
+      });
+      await assertOwnerUnchecked();
+      await writeRecord(record, { noReplace: false });
+      await assertOwnerUnchecked();
+      return record;
+    });
+
+  const recoverUnresolvedEffectAbandonment = () =>
+    runExclusive(async () => {
+      await assertOwnerUnchecked();
+      const prior = await readRecord(sessionId, { missing: 'undefined' });
+      if (
+        prior === undefined ||
+        prior.state !== 'uncertain' ||
+        !Object.hasOwn(prior.uncertain, 'abandonment')
+      ) {
+        await assertOwnerUnchecked();
+        if (
+          prior?.state === 'settled' &&
+          Object.hasOwn(prior, 'settledAbandonment')
+        ) {
+          await syncRecordDirectory();
+          await assertOwnerUnchecked();
+        }
+        return prior;
+      }
+      const abandonment = prior.uncertain.abandonment;
+      const {
+        frames: _frames,
+        retainedEffectReconciliation: _retainedEffectReconciliation,
+        pendingBossQuestions: _pendingBossQuestions,
+        lastError: _lastError,
+        ...snapshotCommon
+      } = prior.snapshot;
+      const snapshot = assertPlaybookCaptainShellSnapshot({
+        ...snapshotCommon,
+        effectLedger: prior.effectLedger,
+        mode: 'chat',
+        lastAction: 'runtime',
+        lastSettlementStatus: 'ok',
+      });
+      const retainedGenerations = applyRetainedGenerationUpdates(
+        prior.retainedGenerations ?? {},
+        [{ kind: 'clear', rootPlaybookId: abandonment.rootPlaybookId }],
+        prior.structuralProjection,
       );
       const timestamp = nextTimestamp(now(), prior.updatedAt);
       const record = validateCaptainSessionRecord({
@@ -917,12 +3351,309 @@ function createLease({
         lastAppliedExecutionProjection:
           prior.uncertain.attemptedExecutionProjection,
         snapshot,
+        effectLedger: prior.effectLedger,
+        unresolvedEffects: abandonment.unresolvedEffects,
+        retainedGenerations,
+        settledAbandonment: {
+          phase: 'recovered',
+          attemptId: prior.uncertain.attemptId,
+          rootPlaybookId: abandonment.rootPlaybookId,
+          unresolvedEffects: abandonment.unresolvedEffects,
+        },
       });
       await assertOwnerUnchecked();
       await writeRecord(record, { noReplace: false });
       await assertOwnerUnchecked();
       return record;
     });
+
+  const settle = ({
+    attemptId,
+    snapshot,
+    unresolvedEffects,
+    retentionUpdates = [],
+  } = {}) =>
+    runExclusive(async () => {
+      assertUuid(attemptId, 'Captain session attempt id');
+      const rawUpdates = validateRetainedGenerationUpdates(retentionUpdates);
+      const settledUnresolvedEffects = assertPlaybookCaptainUnresolvedEffects(
+        unresolvedEffects,
+      );
+      await assertOwnerUnchecked();
+      const current = await readRecord(sessionId, { missing: 'undefined' });
+      const settledAbandonment =
+        current?.state === 'settled' &&
+        Object.hasOwn(current, 'settledAbandonment')
+          ? current.settledAbandonment
+          : undefined;
+      const prior =
+        settledAbandonment === undefined
+          ? await requireUncertainRecord(current, attemptId)
+          : undefined;
+      if (
+        settledAbandonment !== undefined &&
+        settledAbandonment.attemptId !== attemptId
+      ) {
+        throw new Error(
+          'Captain session abandonment settlement attempt differs from its durable marker',
+        );
+      }
+      // Compare durable recovery forms, not provider-local continuation hints.
+      // Validate before projection so removing a token cannot legalize bad input.
+      const rawSnapshot = assertPlaybookCaptainShellSnapshot(snapshot);
+      const rawRetained = applyRetainedGenerationUpdates(
+        current.retainedGenerations ?? {}, rawUpdates, current.structuralProjection);
+      validateRetainedGenerations(rawRetained, current.structuralProjection, current.effectLedger);
+      const projected = projectRecovery({ ...current, snapshot: rawSnapshot,
+        retainedGenerations: rawRetained,
+      });
+      const settledSnapshot = assertPlaybookCaptainShellSnapshot(projected.snapshot);
+      const updates = rawUpdates.map((update) => update.kind === 'retain'
+        ? { ...update, generation: projected.retainedGenerations[update.rootPlaybookId] }
+        : update);
+      if (settledAbandonment !== undefined) {
+        requireAbandonmentSettlement(
+          settledAbandonment,
+          settledUnresolvedEffects,
+          updates,
+          settledSnapshot,
+          current.retainedGenerations ?? {},
+        );
+        if (
+          !isDeepStrictEqual(
+            settledSnapshot.effectLedger,
+            current.effectLedger,
+          )
+        ) {
+          throw new Error(
+            'Captain session settlement snapshot effect ledger differs from its durable ledger',
+          );
+        }
+        const retainedGenerations = applyRetainedGenerationUpdates(
+          current.retainedGenerations ?? {},
+          updates,
+          current.structuralProjection,
+        );
+        const settlementIsExact =
+          isDeepStrictEqual(current.snapshot, settledSnapshot) &&
+          isDeepStrictEqual(
+            current.unresolvedEffects,
+            settledUnresolvedEffects,
+          ) &&
+          isDeepStrictEqual(
+            current.retainedGenerations ?? {},
+            retainedGenerations,
+          );
+        if (
+          settledAbandonment.phase === 'final' &&
+          settlementIsExact
+        ) {
+          await assertOwnerUnchecked();
+          await syncRecordDirectory();
+          await assertOwnerUnchecked();
+          return finishSettlement(current);
+        }
+        if (settledAbandonment.phase === 'final') {
+          throw new Error(
+            'Captain session abandonment settlement differs from its finalized durable record',
+          );
+        }
+        const record = validateCaptainSessionRecord({
+          schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
+          kind: CAPTAIN_SESSION_RECORD_KIND,
+          state: 'settled',
+          sessionId,
+          createdAt: current.createdAt,
+          updatedAt: nextTimestamp(now(), current.updatedAt),
+          cwd: current.cwd,
+          structuralProjection: current.structuralProjection,
+          lastAppliedExecutionProjection:
+            current.lastAppliedExecutionProjection,
+          snapshot: settledSnapshot,
+          effectLedger: current.effectLedger,
+          unresolvedEffects: settledUnresolvedEffects,
+          retainedGenerations,
+          settledAbandonment: {
+            ...settledAbandonment,
+            phase: 'final',
+          },
+        });
+        await assertOwnerUnchecked();
+        await writeRecord(record, { noReplace: false });
+        await assertOwnerUnchecked();
+        return finishSettlement(record);
+      }
+      if (Object.hasOwn(prior.uncertain, 'abandonment')) {
+        const abandonment = prior.uncertain.abandonment;
+        if (abandonment.phase !== 'disposed') {
+          throw new Error(
+            'Captain session unresolved-effect abandonment has not completed disposal',
+          );
+        }
+        requireAbandonmentSettlement(
+          abandonment,
+          settledUnresolvedEffects,
+          updates,
+          settledSnapshot,
+          prior.retainedGenerations ?? {},
+        );
+      }
+      if (!isDeepStrictEqual(settledSnapshot.effectLedger, prior.effectLedger)) {
+        throw new Error(
+          'Captain session settlement snapshot effect ledger differs from its durable ledger',
+        );
+      }
+      const timestamp = nextTimestamp(now(), prior.updatedAt);
+      const record = validateCaptainSessionRecord({
+        schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
+        kind: CAPTAIN_SESSION_RECORD_KIND,
+        state: 'settled',
+        sessionId,
+        createdAt: prior.createdAt,
+        updatedAt: timestamp,
+        cwd: prior.cwd,
+        structuralProjection: prior.structuralProjection,
+        lastAppliedExecutionProjection:
+          prior.uncertain.attemptedExecutionProjection,
+        snapshot: settledSnapshot,
+        effectLedger: prior.effectLedger,
+        unresolvedEffects: settledUnresolvedEffects,
+        retainedGenerations: applyRetainedGenerationUpdates(
+          prior.retainedGenerations ?? {},
+          updates,
+          prior.structuralProjection,
+        ),
+        ...(Object.hasOwn(prior.uncertain, 'abandonment')
+          ? {
+              settledAbandonment: {
+                phase: 'final',
+                attemptId: prior.uncertain.attemptId,
+                rootPlaybookId:
+                  prior.uncertain.abandonment.rootPlaybookId,
+                unresolvedEffects:
+                  prior.uncertain.abandonment.unresolvedEffects,
+              },
+            }
+          : {}),
+      });
+      await assertOwnerUnchecked();
+      await writeRecord(record, { noReplace: false });
+      await assertOwnerUnchecked();
+      return finishSettlement(record);
+    });
+
+  const writeEffectLedger = (authorityValue, commandsValue) =>
+    runExclusive(async () => {
+      await assertOwnerUnchecked();
+      const prior = await readRecord(sessionId, { missing: 'undefined' });
+      if (prior === undefined) {
+        throw new Error('Captain session does not exist for effect-ledger write-ahead');
+      }
+      const settledRecovery =
+        prior.state === 'settled' &&
+        prior.snapshot.mode === 'chat' &&
+        (Object.keys(prior.retainedGenerations ?? {}).length > 0 ||
+          prior.unresolvedEffects.length > 0);
+      if (prior.state !== 'uncertain' && !settledRecovery) {
+        throw new Error(
+          'Captain session effect-ledger write-ahead requires an uncertain turn or a settled chat recovery boundary',
+        );
+      }
+      const authority = validateEffectLedgerAuthority(
+        authorityValue,
+        prior,
+        owner,
+      );
+      const commands = snapshotJsonValue(
+        commandsValue,
+        'effect-ledger write commands',
+      );
+      if (settledRecovery) assertSettledEffectRecoveryCommands(commands);
+      if (
+        indeterminateEffectLedgerWrite !== undefined &&
+        isDeepStrictEqual(commands, indeterminateEffectLedgerWrite.commands) &&
+        isDeepStrictEqual(
+          prior.effectLedger,
+          indeterminateEffectLedgerWrite.ledger,
+        )
+      ) {
+        await assertOwnerUnchecked();
+        await syncRecordDirectory();
+        await assertOwnerUnchecked();
+        indeterminateEffectLedgerWrite = undefined;
+        return prior.effectLedger;
+      }
+      indeterminateEffectLedgerWrite = undefined;
+      const nextLedger = applyEffectLedgerCommands(
+        prior.effectLedger,
+        authority,
+        prior.uncertain,
+        commands,
+      );
+      if (isDeepStrictEqual(nextLedger, prior.effectLedger)) {
+        await assertOwnerUnchecked();
+        return prior.effectLedger;
+      }
+      const record = validateCaptainSessionRecord({
+        ...prior,
+        effectLedger: nextLedger,
+        ...(settledRecovery
+          ? { snapshot: { ...prior.snapshot, effectLedger: nextLedger } }
+          : {}),
+      });
+      indeterminateEffectLedgerWrite = {
+        commands,
+        ledger: record.effectLedger,
+      };
+      await assertOwnerUnchecked();
+      await writeRecord(record, { noReplace: false });
+      await assertOwnerUnchecked();
+      indeterminateEffectLedgerWrite = undefined;
+      return record.effectLedger;
+    });
+
+  const recordProgress = (value) => runExclusive(async () => {
+    const change = requireRecord(snapshotJsonValue(value, 'Captain progress change'), 'Captain progress change');
+    exactOptionalKeys(change, [], ['snapshot', 'step'], 'Captain progress change');
+    await assertOwnerUnchecked();
+    const prior = await readRecord(sessionId, { missing: 'undefined' });
+    if (prior?.state !== 'uncertain' || prior.uncertain.abandonment) {
+      throw new Error('Saving progress requires an active uncertain turn');
+    }
+    const progress = structuredClone(prior.uncertain.progress ?? { snapshot: null, steps: [], positionStepId: null });
+    const newStepStart = change.step && !Object.hasOwn(change.step, 'result') && !progress.steps.some(({ id }) => id === change.step.id);
+    if (Object.hasOwn(change, 'snapshot')) {
+      if (change.snapshot !== null && !isDeepStrictEqual(change.snapshot.effectLedger, prior.effectLedger)) {
+        throw new Error('Saved progress must contain the current effect ledger');
+      }
+      progress.snapshot = change.snapshot;
+      progress.positionStepId = change.snapshot !== null && newStepStart ? change.step.id : null;
+    }
+    if (change.step !== undefined) {
+      const step = snapshotJsonValue(change.step, 'Captain step');
+      const index = progress.steps.findIndex(({ id }) => id === step.id);
+      if (index < 0) {
+        if (!Object.hasOwn(change, 'snapshot')) throw new Error('A step start requires its position or explicit null');
+        if (Object.hasOwn(step, 'result') && !['completion', 'answer'].includes(step.kind)) throw new Error('A step result requires its saved start');
+        progress.steps.push(step);
+      } else {
+        const { result, ...start } = step;
+        const saved = progress.steps[index];
+        const { result: priorResult, ...priorStart } = saved;
+        if (!isDeepStrictEqual(start, priorStart) ||
+            (priorResult !== undefined && !isDeepStrictEqual(priorResult, result))) {
+          throw new Error('A saved step cannot be replaced');
+        }
+        progress.steps[index] = step;
+      }
+    }
+    const record = validateCaptainSessionRecord(projectRecovery({
+      ...prior, uncertain: { ...prior.uncertain, progress },
+    }));
+    await assertOwnerUnchecked();
+    await writeRecord(record, { noReplace: false });
+    await assertOwnerUnchecked();
+  });
 
   const discard = ({ attemptId } = {}) =>
     runExclusive(async () => {
@@ -932,16 +3663,23 @@ function createLease({
         await readRecord(sessionId, { missing: 'undefined' }),
         attemptId,
       );
+      if (Object.hasOwn(prior.uncertain, 'abandonment')) {
+        throw new Error(
+          'Captain session unresolved-effect abandonment must recover before discard',
+        );
+      }
+      if (!isUncertainTurnDiscardable(prior)) {
+        throw new Error('Recorded work or changed repository evidence must be restored and reported; the turn cannot be discarded');
+      }
       await assertOwnerUnchecked();
       if (prior.uncertain.baseUpdatedAt === null) {
         await deleteRecord(sessionId);
         await assertOwnerUnchecked();
         return undefined;
       }
-      // writeRecord's stable key order reconstructs the exact prior settled
-      // bytes from the baseline carried by the uncertain record.
+      // Restore the prior recovery baseline while retaining attempt history.
       const record = validateCaptainSessionRecord({
-        schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
+        schemaVersion: prior.schemaVersion,
         kind: CAPTAIN_SESSION_RECORD_KIND,
         state: 'settled',
         sessionId,
@@ -952,26 +3690,62 @@ function createLease({
         lastAppliedExecutionProjection:
           prior.lastAppliedExecutionProjection,
         snapshot: prior.snapshot,
+        effectLedger: prior.effectLedger,
+        unresolvedEffects: prior.unresolvedEffects,
+        ...retainedGenerationsMember(prior),
+        ...settledAbandonmentMember(prior),
       });
       await writeRecord(record, { noReplace: false });
       await assertOwnerUnchecked();
       return record;
     });
 
-  const release = () =>
-    runExclusive(async () => {
-      const current = await assertOwnerUnchecked();
-      await retireObservedLease(sessionId, current);
-      released = true;
+  const release = () => {
+    if (released || releasing) return Promise.reject(new Error(`Captain session lease is ${released ? 'released' : 'releasing'}`));
+    replayWriter.closeAppendAdmission();
+    const pending = runExclusive(async () => {
+      try {
+        await Promise.allSettled([...ownerChecks]);
+        await replayWriter.prepareRelease();
+        if (replayWriter.status().incomplete && previousManifest?.replay?.incomplete !== true) {
+          const record = await readRecord(sessionId, { missing: 'undefined' });
+          if (record !== undefined) await writeRecord(record, { noReplace: false });
+        }
+        const current = await assertOwnerUnchecked();
+        await retireObservedLease(sessionId, current);
+        released = true;
+        portableWriters.delete(sessionId);
+        return replayWriter.status();
+      } finally {
+        releasing = false;
+      }
     });
+    releasing = true;
+    return pending;
+  };
 
   return Object.freeze({
     sessionId,
     ownerToken: owner.ownerToken,
+    append,
+    recordContext,
+    consumeHints,
+    acknowledgeHint,
+    clearHint,
+    assertContinuable,
+    readManifest: () => readManifest(sessionId),
+    readStream: replayWriter.read,
+    streamStatus: replayWriter.status,
     read,
-    initializeSettled,
+    initializeSettledWithPredecessor,
+    abandonFreshSettled,
     beginTurn,
     beginRetry,
+    beginUnresolvedEffectAbandonment,
+    completeUnresolvedEffectAbandonment,
+    recoverUnresolvedEffectAbandonment,
+    writeEffectLedger,
+    recordProgress,
     settle,
     discard,
     assertOwner,
@@ -983,8 +3757,24 @@ export function validateCaptainSessionExecutionProjection(
   value,
   path = 'Captain session execution projection',
 ) {
+  return validateCaptainSessionExecutionProjectionWithSchemas(
+    value,
+    path,
+    CURRENT_ARTIFACT_SCHEMAS,
+  );
+}
+
+function validateCaptainSessionExecutionProjectionWithSchemas(
+  value,
+  path,
+  artifactSchemas,
+) {
   const projection = requireRecord(snapshotJsonValue(value, path), path);
-  validateCaptainSessionProjection(projection, { path, structural: false });
+  validateCaptainSessionProjection(projection, {
+    path,
+    structural: false,
+    artifactSchemas,
+  });
   return projection;
 }
 
@@ -992,13 +3782,40 @@ export function validateCaptainSessionStructuralProjection(
   value,
   path = 'Captain session structural projection',
 ) {
+  return validateCaptainSessionStructuralProjectionWithSchemas(
+    value,
+    path,
+    CURRENT_ARTIFACT_SCHEMAS,
+  );
+}
+
+function validateCaptainSessionStructuralProjectionWithSchemas(
+  value,
+  path,
+  artifactSchemas,
+) {
   const projection = requireRecord(snapshotJsonValue(value, path), path);
-  validateCaptainSessionProjection(projection, { path, structural: true });
+  validateCaptainSessionProjection(projection, {
+    path,
+    structural: true,
+    artifactSchemas,
+  });
   return projection;
 }
 
 export function projectCaptainSessionStructure(value) {
-  const execution = validateCaptainSessionExecutionProjection(value);
+  return projectCaptainSessionStructureWithSchemas(
+    value,
+    CURRENT_ARTIFACT_SCHEMAS,
+  );
+}
+
+function projectCaptainSessionStructureWithSchemas(value, artifactSchemas) {
+  const execution = validateCaptainSessionExecutionProjectionWithSchemas(
+    value,
+    'Captain session execution projection',
+    artifactSchemas,
+  );
   const fixedAgent = (agent) => ({
     adapter: agent.adapter,
     ...(agent.instruction === undefined
@@ -1008,49 +3825,72 @@ export function projectCaptainSessionStructure(value) {
       ? {}
       : { permissions: agent.permissions }),
   });
-  return validateCaptainSessionStructuralProjection({
-    schemaVersion: CAPTAIN_SESSION_STRUCTURAL_PROJECTION_SCHEMA_VERSION,
-    captain: fixedAgent(execution.captain),
-    players: execution.players.map(({ id, ...agent }) => ({
-      id,
-      ...fixedAgent(agent),
-    })),
-    catalog: Object.fromEntries(
-      Object.entries(execution.catalog).map(([id, item]) => [
+  return validateCaptainSessionStructuralProjectionWithSchemas(
+    {
+      schemaVersion: CAPTAIN_SESSION_STRUCTURAL_PROJECTION_SCHEMA_VERSION,
+      captain: fixedAgent(execution.captain),
+      players: execution.players.map(({ id, ...agent }) => ({
         id,
-        {
-          id: item.id,
-          from: item.from,
-          manifestCommand: item.manifestCommand,
-          command: item.command,
-          intent: item.intent,
-          artifactSchema: item.artifactSchema,
-          requiredRoleIds: item.requiredRoleIds,
-          concurrentRoleSets: item.concurrentRoleSets,
-          roles: Object.fromEntries(
-            Object.entries(item.roles).map(([roleId, binding]) => [
-              roleId,
-              { playerId: binding.playerId },
-            ]),
-          ),
-          options: item.options,
-        },
-      ]),
-    ),
-  });
+        ...fixedAgent(agent),
+      })),
+      catalog: Object.fromEntries(
+        Object.entries(execution.catalog).map(([id, item]) => [
+          id,
+          {
+            id: item.id,
+            from: item.from,
+            manifestCommand: item.manifestCommand,
+            command: item.command,
+            intent: item.intent,
+            artifactSchema: item.artifactSchema,
+            requiredRoleIds: item.requiredRoleIds,
+            concurrentRoleSets: item.concurrentRoleSets,
+            roles: Object.fromEntries(
+              Object.entries(item.roles).map(([roleId, binding]) => [
+                roleId,
+                { playerId: binding.playerId },
+              ]),
+            ),
+            options: item.options,
+          },
+        ]),
+      ),
+    },
+    'Captain session structural projection',
+    artifactSchemas,
+  );
 }
 
 export function assertCaptainSessionExecutionCompatible(
   structuralProjection,
   executionProjection,
 ) {
-  const structural = validateCaptainSessionStructuralProjection(
+  return assertCaptainSessionExecutionCompatibleWithSchemas(
     structuralProjection,
-  );
-  const execution = validateCaptainSessionExecutionProjection(
     executionProjection,
+    CURRENT_ARTIFACT_SCHEMAS,
   );
-  const projected = projectCaptainSessionStructure(execution);
+}
+
+function assertCaptainSessionExecutionCompatibleWithSchemas(
+  structuralProjection,
+  executionProjection,
+  artifactSchemas,
+) {
+  const structural = validateCaptainSessionStructuralProjectionWithSchemas(
+    structuralProjection,
+    'Captain session structural projection',
+    artifactSchemas,
+  );
+  const execution = validateCaptainSessionExecutionProjectionWithSchemas(
+    executionProjection,
+    'Captain session execution projection',
+    artifactSchemas,
+  );
+  const projected = projectCaptainSessionStructureWithSchemas(
+    execution,
+    artifactSchemas,
+  );
   if (!isDeepStrictEqual(projected, structural)) {
     throw new Error(
       'Captain session execution projection does not reproduce the stored structural projection',
@@ -1071,33 +3911,106 @@ export function captainSessionSelectedMembers(value) {
 }
 
 export function validateCaptainSessionRecord(value) {
+  if (value?.schemaVersion === 7) return recoveryFromManifest(value);
   const record = requireRecord(
     snapshotJsonValue(value, 'Captain session record'),
     'Captain session record',
   );
-  if (record.schemaVersion !== CAPTAIN_SESSION_RECORD_SCHEMA_VERSION) {
-    if (record.schemaVersion === 2) {
-      assertReleasedSchema2CaptainSessionRecord(record);
-      throw new CaptainSessionRecordSchemaError(
-        record.schemaVersion,
-        'Captain session record schema 2 has incompatible root-owned player identity; schema 3 is required',
+  if (record.schemaVersion === 2) {
+    assertReleasedSchema2CaptainSessionRecord(record);
+    throw new CaptainSessionRecordNonresumableError(
+      record.schemaVersion,
+      'Captain session record schema 2 has incompatible root-owned player identity; schema 6 is required',
+      captainSessionOrderingBoundary(record),
+    );
+  }
+  if (
+    record.schemaVersion === LEGACY_CAPTAIN_SESSION_RECORD_SCHEMA_VERSION ||
+    record.schemaVersion === COMPATIBLE_RETENTION_RECORD_SCHEMA_VERSION
+  ) {
+    const projectedRecord = validateCanonicalCaptainSessionRecord(
+      projectPreEffectCaptainSessionRecordForValidation(record),
+      PRE_EFFECT_ARTIFACT_SCHEMAS,
+    );
+    throw new CaptainSessionRecordNonresumableError(
+      record.schemaVersion,
+      `Captain session record schema ${record.schemaVersion} predates the artifact-schema-3 effect-authority cutover and is not resumable`,
+      captainSessionOrderingBoundary(projectedRecord),
+    );
+  }
+  if (
+    record.schemaVersion === PRE_UNRESOLVED_EFFECTS_RECORD_SCHEMA_VERSION
+  ) {
+    const hasUnresolvedEffects = Object.hasOwn(record, 'unresolvedEffects');
+    if (
+      !hasUnresolvedEffects &&
+      (Object.hasOwn(record, 'settledAbandonment') ||
+        (typeof record.uncertain === 'object' &&
+          record.uncertain !== null &&
+          Object.hasOwn(record.uncertain, 'abandonment')))
+    ) {
+      throw new Error(
+        'Captain session record schema 5 pre-unresolved-effects shape has an unknown abandonment field',
       );
     }
+    const projectedRecord = validateCanonicalCaptainSessionRecord(
+      {
+        ...record,
+        schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
+        ...(hasUnresolvedEffects ? {} : { unresolvedEffects: [] }),
+      },
+      hasUnresolvedEffects
+        ? CURRENT_ARTIFACT_SCHEMAS
+        : PRE_EFFECT_ARTIFACT_SCHEMAS,
+    );
+    throw new CaptainSessionRecordNonresumableError(
+      record.schemaVersion,
+      'Captain session record schema 5 predates the canonical schema-6 unresolved-effect settlement boundary for the artifact-schema-3 effect-authority cutover and is not resumable',
+      captainSessionOrderingBoundary(projectedRecord),
+    );
+  }
+  if (record.schemaVersion !== CAPTAIN_SESSION_RECORD_SCHEMA_VERSION) {
     throw new CaptainSessionRecordSchemaError(
       record.schemaVersion,
       `Captain session record schema ${JSON.stringify(record.schemaVersion)} is not supported`,
     );
   }
+  return validateCanonicalCaptainSessionRecord(record);
+}
+
+function captainSessionOrderingBoundary(record) {
+  return Object.freeze({
+    sessionId: record.sessionId,
+    state: record.state,
+    cwd: record.cwd,
+    updatedAt: record.updatedAt,
+  });
+}
+
+function validateCanonicalCaptainSessionRecord(
+  record,
+  artifactSchemas = CURRENT_ARTIFACT_SCHEMAS,
+) {
+  record = requireRecord(
+    snapshotJsonValue(record, 'Captain session record'),
+    'Captain session record',
+  );
   if (record.state !== 'settled' && record.state !== 'uncertain') {
     throw new Error('Captain session record state is not supported');
   }
-  rejectUnknownOrMissingKeys(
+  exactOptionalKeys(
     record,
     record.state === 'uncertain'
       ? [...COMMON_RECORD_KEYS, 'uncertain']
       : COMMON_RECORD_KEYS,
+    ['retainedGenerations', 'settledAbandonment'],
     'Captain session record',
   );
+  if (record.schemaVersion !== CAPTAIN_SESSION_RECORD_SCHEMA_VERSION) {
+    throw new Error(
+      `Captain session record schemaVersion must be ${CAPTAIN_SESSION_RECORD_SCHEMA_VERSION}`,
+    );
+  }
   if (record.kind !== CAPTAIN_SESSION_RECORD_KIND) {
     throw new Error('Captain session record kind is not supported');
   }
@@ -1112,23 +4025,53 @@ export function validateCaptainSessionRecord(value) {
       'settled Captain session updatedAt must follow its creation marker',
     );
   }
-  if (typeof record.cwd !== 'string' || !isAbsolute(record.cwd)) {
-    throw new Error('Captain session record cwd must be an absolute path');
-  }
-  if (resolve(record.cwd) !== record.cwd) {
-    throw new Error('Captain session record cwd must be normalized');
-  }
-  const structural = validateCaptainSessionStructuralProjection(
+  if (!isRecordedAbsolutePath(record.cwd)) throw new Error('Captain session record cwd must be a normalized absolute path');
+  const structural = validateCaptainSessionStructuralProjectionWithSchemas(
     record.structuralProjection,
     'Captain session record structuralProjection',
+    artifactSchemas,
   );
-  const lastApplied = assertCaptainSessionExecutionCompatible(
+  const lastApplied = assertCaptainSessionExecutionCompatibleWithSchemas(
     structural,
     record.lastAppliedExecutionProjection,
+    artifactSchemas,
   );
   void lastApplied;
   const snapshot = assertPlaybookCaptainShellSnapshot(record.snapshot);
-  assertSnapshotMatchesStructure(snapshot, structural);
+  assertSnapshotMatchesStructure(snapshot, structural, artifactSchemas);
+  const effectLedger = assertPlaybookEffectLedger(
+    record.effectLedger,
+    'Captain session record effectLedger',
+  );
+  const unresolvedEffects = assertPlaybookCaptainUnresolvedEffects(
+    record.unresolvedEffects,
+  );
+  void unresolvedEffects;
+  assertEffectLedgerMatchesCatalog(effectLedger, structural.catalog);
+  if (record.state === 'settled') {
+    if (!isDeepStrictEqual(effectLedger, snapshot.effectLedger)) {
+      throw new Error(
+        'settled Captain session effect ledger differs from its shell snapshot mirror',
+      );
+    }
+  } else if (
+    !isPlaybookEffectLedgerMonotonicExtension(
+      snapshot.effectLedger,
+      effectLedger,
+    )
+  ) {
+    throw new Error(
+      'uncertain Captain session effect ledger is not a monotonic extension of its pre-turn shell snapshot mirror',
+    );
+  }
+  if (Object.hasOwn(record, 'retainedGenerations')) {
+    validateRetainedGenerations(
+      record.retainedGenerations,
+      structural,
+      effectLedger,
+      artifactSchemas,
+    );
+  }
   if (
     snapshot.captain.sessionId === record.sessionId ||
     snapshot.issuedSessionIds.includes(record.sessionId)
@@ -1143,9 +4086,10 @@ export function validateCaptainSessionRecord(value) {
       record.uncertain,
       'Captain session record uncertain',
     );
-    rejectUnknownOrMissingKeys(
+    exactOptionalKeys(
       uncertain,
       UNCERTAIN_KEYS,
+      ['abandonment', 'progress'],
       'Captain session record uncertain',
     );
     if (uncertain.baseUpdatedAt !== null) {
@@ -1174,6 +4118,41 @@ export function validateCaptainSessionRecord(value) {
     ) {
       throw new Error('Captain session attempt number must be a positive integer');
     }
+    const newBoundaries = effectLedger.boundaries.slice(
+      snapshot.effectLedger.boundaries.length,
+    );
+    const attemptIds = new Map();
+    const attemptNumbersById = new Map();
+    for (const boundary of newBoundaries) {
+      if (boundary.attemptNumber > uncertain.attemptNumber) {
+        throw new Error(
+          'Captain session post-checkpoint effect boundary names a future uncertain attempt',
+        );
+      }
+      const priorId = attemptIds.get(boundary.attemptNumber);
+      if (priorId !== undefined && priorId !== boundary.attemptId) {
+        throw new Error(
+          'Captain session post-checkpoint effect boundaries use inconsistent ids for one attempt number',
+        );
+      }
+      const priorNumber = attemptNumbersById.get(boundary.attemptId);
+      if (priorNumber !== undefined && priorNumber !== boundary.attemptNumber) {
+        throw new Error(
+          'Captain session post-checkpoint effect attempts reuse one id across attempt numbers',
+        );
+      }
+      attemptIds.set(boundary.attemptNumber, boundary.attemptId);
+      attemptNumbersById.set(boundary.attemptId, boundary.attemptNumber);
+      if (
+        boundary.attemptNumber === uncertain.attemptNumber
+          ? boundary.attemptId !== uncertain.attemptId
+          : boundary.attemptId === uncertain.attemptId
+      ) {
+        throw new Error(
+          'Captain session post-checkpoint effect boundary attempt identity conflicts with the current uncertain marker',
+        );
+      }
+    }
     const markedAt = canonicalTimestamp(
       uncertain.markedAt,
       'uncertain.markedAt',
@@ -1183,10 +4162,70 @@ export function validateCaptainSessionRecord(value) {
         'Captain session uncertain markedAt must equal updatedAt',
       );
     }
-    const attempted = assertCaptainSessionExecutionCompatible(
+    const attempted = assertCaptainSessionExecutionCompatibleWithSchemas(
       structural,
       uncertain.attemptedExecutionProjection,
+      artifactSchemas,
     );
+    if (uncertain.progress !== undefined) {
+      const progress = requireRecord(uncertain.progress, 'Captain progress');
+      exactOptionalKeys(progress, ['snapshot', 'steps'], ['positionStepId'], 'Captain progress');
+      if (!Array.isArray(progress.steps)) throw new Error('Captain steps must be an array');
+      const ids = new Set();
+      for (const step of progress.steps) {
+        exactOptionalKeys(requireRecord(step, 'Captain step'), ['id', 'kind', 'stateId', 'runtimeSessionId', 'playbookId'], ['result'], 'Captain step');
+        assertUuid(step.id, 'Captain step id');
+        assertUuid(step.runtimeSessionId, 'Captain step runtime');
+        if (ids.has(step.id)) throw new Error('Captain step ids must be unique');
+        ids.add(step.id);
+        if (!['player', 'captain', 'script', 'preparation', 'completion', 'answer'].includes(step.kind)) throw new Error('Unknown Captain step kind');
+        if (['completion', 'answer'].includes(step.kind) && (!step.result || typeof step.result !== 'object' || Array.isArray(step.result))) throw new Error('A recorded completion or answer requires its result');
+        if (step.kind === 'completion') {
+          exactOptionalKeys(step.result, ['state'], ['description', 'terminalOutcome', 'retention'], 'Completed root result');
+          if (step.result.retention !== undefined && !['clear', 'keep'].includes(step.result.retention)) throw new Error('Completed root retention must be clear or keep');
+          if (step.result.state?.status !== 'done' || (step.result.state.stateId !== undefined && step.result.state.stateId !== step.stateId)) throw new Error('Completed root result must name its final state');
+          if (step.result.description !== undefined) requireNonblank(step.result.description, 'Completed root description');
+          if (step.result.terminalOutcome !== undefined) {
+            const terminal = step.result.terminalOutcome;
+            exactOptionalKeys(terminal, ['stateId', 'kind'], ['description'], 'Completed root outcome');
+            if (terminal.stateId !== step.stateId || !['success', 'failure'].includes(terminal.kind)) throw new Error('Completed root outcome must name its final state and kind');
+            if (terminal.description !== undefined) requireNonblank(terminal.description, 'Completed root outcome description');
+          }
+        }
+        if (step.kind === 'answer') {
+          exactOptionalKeys(step.result, ['questions', 'instruction'], [], 'Selected answer');
+          requireNonblank(step.result.instruction, 'Selected answer instruction');
+          if (!Array.isArray(step.result.questions) || !step.result.questions.length) throw new Error('Selected answer requires questions');
+          for (const question of step.result.questions) {
+            exactOptionalKeys(question, ['asker', 'question'], [], 'Selected answer question');
+            if (question.asker?.kind === 'captain') exactOptionalKeys(question.asker, ['kind'], [], 'Selected answer asker');
+            else {
+              exactOptionalKeys(question.asker, ['kind', 'roleId'], [], 'Selected answer asker');
+              if (question.asker.kind !== 'role') throw new Error('Unknown selected answer asker');
+              requireCanonicalNonblank(question.asker.roleId, 'Selected answer role');
+            }
+            requireNonblank(question.question, 'Selected answer question');
+          }
+        }
+        requireCanonicalNonblank(step.stateId, 'Captain step state');
+        if (!Object.hasOwn(structural.catalog, step.playbookId)) throw new Error('Captain step names an unknown playbook');
+      }
+      if (progress.positionStepId !== undefined && progress.positionStepId !== null && !ids.has(progress.positionStepId)) throw new Error('Captain progress positionStepId must name a recorded step');
+      if (progress.snapshot === null && progress.positionStepId != null) throw new Error('Captain progress positionStepId requires a saved position');
+      if (progress.snapshot !== null) {
+        const prepared = assertPlaybookCaptainShellSnapshot(progress.snapshot);
+        assertSnapshotMatchesStructure(prepared, structural, artifactSchemas);
+        if ((Object.hasOwn(progress.snapshot, 'presentedEffectPrefix') && prepared.presentedEffectPrefix !== snapshot.presentedEffectPrefix) ||
+            !isDeepStrictEqual(prepared.captain, snapshot.captain) ||
+            !isDeepStrictEqual(prepared.journal, snapshot.journal) ||
+            !isDeepStrictEqual(prepared.sequences, snapshot.sequences) ||
+            !isPlaybookEffectLedgerMonotonicExtension(snapshot.effectLedger, prepared.effectLedger) ||
+            !isPlaybookEffectLedgerMonotonicExtension(prepared.effectLedger, effectLedger)) {
+          throw new Error('Saved progress must retain the settled controller and current work');
+        }
+
+      }
+    }
     if (uncertain.baseUpdatedAt === null) {
       if (!isDeepStrictEqual(lastApplied, attempted)) {
         throw new Error(
@@ -1198,9 +4237,1022 @@ export function validateCaptainSessionRecord(value) {
         'fresh Captain session record snapshot',
       );
     }
+    if (Object.hasOwn(uncertain, 'abandonment')) {
+      const abandonment = requireRecord(
+        uncertain.abandonment,
+        'Captain session record uncertain.abandonment',
+      );
+      rejectUnknownOrMissingKeys(
+        abandonment,
+        UNCERTAIN_ABANDONMENT_KEYS,
+        'Captain session record uncertain.abandonment',
+      );
+      if (abandonment.phase !== 'started' && abandonment.phase !== 'disposed') {
+        throw new Error(
+          'Captain session record uncertain.abandonment.phase must be "started" or "disposed"',
+        );
+      }
+      const rootPlaybookId = requireCanonicalNonblank(
+        abandonment.rootPlaybookId,
+        'Captain session record uncertain.abandonment.rootPlaybookId',
+      );
+      if (!Object.hasOwn(structural.catalog, rootPlaybookId)) {
+        throw new Error(
+          `Captain session unresolved-effect abandonment names unknown stored playbook ${JSON.stringify(rootPlaybookId)}`,
+        );
+      }
+      if (
+        snapshot.mode !== 'engaged.parked' ||
+        snapshot.frames[0]?.playbookId !== rootPlaybookId
+      ) {
+        throw new Error(
+          'Captain session unresolved-effect abandonment root differs from its durable engagement',
+        );
+      }
+      const abandonmentEffects = assertPlaybookCaptainUnresolvedEffects(
+        abandonment.unresolvedEffects,
+      );
+      if (abandonmentEffects.length === 0) {
+        throw new Error(
+          'Captain session unresolved-effect abandonment requires nonempty unresolved effects',
+        );
+      }
+      if (abandonment.phase === 'disposed') {
+        if (!isDeepStrictEqual(unresolvedEffects, abandonmentEffects)) {
+          throw new Error(
+            'Captain session disposed abandonment unresolved effects differ from the record settlement evidence',
+          );
+        }
+        if (Object.hasOwn(record.retainedGenerations ?? {}, rootPlaybookId)) {
+          throw new Error(
+            'Captain session disposed abandonment retained its cleared root generation',
+          );
+        }
+      }
+    }
+  }
+  if (Object.hasOwn(record, 'settledAbandonment')) {
+    const settledAbandonment = requireRecord(
+      record.settledAbandonment,
+      'Captain session record settledAbandonment',
+    );
+    rejectUnknownOrMissingKeys(
+      settledAbandonment,
+      ['phase', 'attemptId', 'rootPlaybookId', 'unresolvedEffects'],
+      'Captain session record settledAbandonment',
+    );
+    if (
+      settledAbandonment.phase !== 'recovered' &&
+      settledAbandonment.phase !== 'final'
+    ) {
+      throw new Error(
+        'Captain session record settledAbandonment.phase must be "recovered" or "final"',
+      );
+    }
+    assertUuid(
+      settledAbandonment.attemptId,
+      'Captain session record settledAbandonment.attemptId',
+    );
+    const rootPlaybookId = requireCanonicalNonblank(
+      settledAbandonment.rootPlaybookId,
+      'Captain session record settledAbandonment.rootPlaybookId',
+    );
+    if (!Object.hasOwn(structural.catalog, rootPlaybookId)) {
+      throw new Error(
+        `Captain session recovered unresolved-effect abandonment names unknown stored playbook ${JSON.stringify(rootPlaybookId)}`,
+      );
+    }
+    const settledEffects = assertPlaybookCaptainUnresolvedEffects(
+      settledAbandonment.unresolvedEffects,
+    );
+    if (
+      settledEffects.length === 0 ||
+      !isDeepStrictEqual(unresolvedEffects, settledEffects)
+    ) {
+      throw new Error(
+        'Captain session settled unresolved-effect abandonment must preserve its nonempty settlement evidence',
+      );
+    }
+    if (
+      snapshot.mode !== 'chat' ||
+      (snapshot.lastAction !== 'runtime' && snapshot.lastAction !== 'dismiss') ||
+      snapshot.lastSettlementStatus !== 'ok' ||
+      Object.hasOwn(record.retainedGenerations ?? {}, rootPlaybookId)
+    ) {
+      throw new Error(
+        'Captain session settled unresolved-effect abandonment must carry a successful host-disposal chat snapshot with its root generation cleared',
+      );
+    }
   }
 
   return record;
+}
+
+function projectPreEffectCaptainSessionRecordForValidation(record) {
+  if (record.state !== 'settled' && record.state !== 'uncertain') {
+    throw new Error('Captain session record state is not supported');
+  }
+  const recordKeys =
+    record.schemaVersion === COMPATIBLE_RETENTION_RECORD_SCHEMA_VERSION
+      ? [...LEGACY_COMMON_RECORD_KEYS, 'retainedGenerations']
+      : LEGACY_COMMON_RECORD_KEYS;
+  exactOptionalKeys(
+    record,
+    record.state === 'uncertain'
+      ? [...recordKeys, 'uncertain']
+      : recordKeys,
+    record.schemaVersion === LEGACY_CAPTAIN_SESSION_RECORD_SCHEMA_VERSION
+      ? ['retainedGenerations']
+      : [],
+    'Captain session record',
+  );
+  validateCaptainSessionStructuralProjectionWithSchemas(
+    record.structuralProjection,
+    'Captain session record structuralProjection',
+    PRE_EFFECT_ARTIFACT_SCHEMAS,
+  );
+  const effectLedger = emptyPlaybookEffectLedger();
+  const migrated = {
+    ...record,
+    schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
+    snapshot: migratePreEffectShellSnapshot(record.snapshot, effectLedger),
+    effectLedger,
+    unresolvedEffects: [],
+    ...(Object.hasOwn(record, 'retainedGenerations')
+      ? {
+          retainedGenerations: migratePreEffectRetainedGenerations(
+            record.retainedGenerations,
+          ),
+        }
+      : {}),
+  };
+  return migrated;
+}
+
+function migratePreEffectShellSnapshot(value, effectLedger) {
+  const snapshot = requireRecord(value, 'legacy Captain shell snapshot');
+  if (snapshot.schemaVersion !== 3) {
+    throw new CaptainSessionRecordSchemaError(
+      snapshot.schemaVersion,
+      `legacy Captain shell snapshot schema ${JSON.stringify(snapshot.schemaVersion)} cannot migrate to schema 4`,
+    );
+  }
+  if (Object.hasOwn(snapshot, 'effectLedger')) {
+    throw new CaptainSessionRecordSchemaError(
+      snapshot.schemaVersion,
+      'legacy Captain shell snapshot must not contain an effect ledger',
+    );
+  }
+  const captain = requireRecord(
+    snapshot.captain,
+    'legacy Captain shell snapshot.captain',
+  );
+  const frames =
+    snapshot.frames === undefined
+      ? undefined
+      : Array.isArray(snapshot.frames)
+        ? snapshot.frames.map((frame, index) => {
+            const captured = requireRecord(
+              frame,
+              `legacy Captain shell snapshot.frames[${index}]`,
+            );
+            return {
+              ...captured,
+              runtime: migratePreEffectRuntimeSnapshot(
+                captured.runtime,
+                `legacy Captain shell snapshot.frames[${index}].runtime`,
+              ),
+            };
+          })
+        : snapshot.frames;
+  return {
+    ...snapshot,
+    schemaVersion: 4,
+    captain: {
+      ...captain,
+      runtime: migratePreEffectRuntimeSnapshot(
+        captain.runtime,
+        'legacy Captain shell snapshot.captain.runtime',
+      ),
+    },
+    effectLedger,
+    ...(frames === undefined ? {} : { frames }),
+  };
+}
+
+function migratePreEffectRuntimeSnapshot(value, path) {
+  const snapshot = requireRecord(value, path);
+  if (snapshot.schemaVersion !== 3) {
+    throw new CaptainSessionRecordSchemaError(
+      snapshot.schemaVersion,
+      `${path} schema ${JSON.stringify(snapshot.schemaVersion)} cannot migrate to schema 4`,
+    );
+  }
+  if (Object.hasOwn(snapshot, 'effectLedger')) {
+    throw new CaptainSessionRecordSchemaError(
+      snapshot.schemaVersion,
+      `${path} must not contain an effect ledger`,
+    );
+  }
+  return {
+    ...snapshot,
+    schemaVersion: 4,
+    effectLedger: emptyPlaybookEffectLedger(),
+  };
+}
+
+function migratePreEffectRetainedGenerations(value) {
+  const retained = requireRecord(
+    value,
+    'legacy Captain session retainedGenerations',
+  );
+  return Object.fromEntries(
+    Object.entries(retained).map(([rootPlaybookId, rawGeneration]) => {
+      const path =
+        'legacy Captain session retainedGenerations' +
+        `[${JSON.stringify(rootPlaybookId)}]`;
+      const generation = requireRecord(rawGeneration, path);
+      if (
+        Object.hasOwn(generation, 'effectLedger') ||
+        Object.hasOwn(generation, 'retainedEffectReconciliation')
+      ) {
+        throw new Error(
+          `${path} must not contain pre-migration effect evidence`,
+        );
+      }
+      if (!Array.isArray(generation.frames)) {
+        return [
+          rootPlaybookId,
+          { ...generation, effectLedger: emptyPlaybookEffectLedger() },
+        ];
+      }
+      return [
+        rootPlaybookId,
+        {
+          ...generation,
+          effectLedger: emptyPlaybookEffectLedger(),
+          frames: generation.frames.map((rawFrame, index) => {
+            const frame = requireRecord(rawFrame, `${path}.frames[${index}]`);
+            return {
+              ...frame,
+              runtime: migratePreEffectRuntimeSnapshot(
+                frame.runtime,
+                `${path}.frames[${index}].runtime`,
+              ),
+            };
+          }),
+        },
+      ];
+    }),
+  );
+}
+
+const EFFECT_AUTHORITY_KEYS = [
+  'playbookId',
+  'artifactSchema',
+  'cwd',
+  'sessionId',
+  'leaseOwnerToken',
+  'canonicalWorktree',
+  'requiredRoleIds',
+  'concurrentRoleSets',
+];
+const EFFECT_BOUNDARY_START_KEYS = [
+  'boundaryId',
+  'playbookId',
+  'runtimeSessionId',
+  'turnId',
+  'callId',
+  'roleId',
+  'sourceStateId',
+  'sourceOutcomeSchema',
+  'dispositions',
+  'canonicalWorktree',
+  'baseline',
+  'correctionBudget',
+];
+const EFFECT_BOUNDARY_IDENTITY_KEYS = [
+  'sequence',
+  'boundaryId',
+  'attemptId',
+  'attemptNumber',
+  'playbookId',
+  'runtimeSessionId',
+  'turnId',
+  'callId',
+  'roleId',
+  'sourceStateId',
+  'sourceOutcomeSchema',
+  'dispositions',
+  'canonicalWorktree',
+  'baseline',
+];
+const EFFECT_BOUNDARY_OPTIONAL_KEYS = [
+  'after',
+  'physicalReceipt',
+  'restored',
+  'finalText',
+  'semanticCandidate',
+  'initialSemanticCandidate',
+  'cohortId',
+  'logicalOperationId',
+];
+const EFFECT_LOGICAL_START_KEYS = [
+  'operationId',
+  'playbookId',
+  'runtimeSessionId',
+  'boundaryIds',
+  'originalBaseline',
+  'checkpointRestorationEligible',
+];
+const EFFECT_LOGICAL_OPTIONAL_KEYS = [
+  'checkpoint',
+  'pendingQuestion',
+  'playerContinuation',
+  'logicalReceipt',
+];
+
+function assertEffectLedgerMatchesCatalog(ledger, catalog) {
+  const cohorts = new Map();
+  for (const boundary of ledger.boundaries) {
+    const entry = catalog[boundary.playbookId];
+    if (
+      entry?.artifactSchema !== 3 ||
+      !entry.requiredRoleIds.includes(boundary.roleId)
+    ) {
+      throw new Error(
+        `Captain session effect boundary ${JSON.stringify(boundary.boundaryId)} does not match its stored schema-3 catalog role`,
+      );
+    }
+    if (boundary.cohortId === undefined) continue;
+    const members = cohorts.get(boundary.cohortId) ?? [];
+    members.push(boundary);
+    cohorts.set(boundary.cohortId, members);
+  }
+  for (const [cohortId, members] of cohorts) {
+    const entry = catalog[members[0].playbookId];
+    const roles = members.map((boundary) => boundary.roleId);
+    if (
+      !members.every(
+        (boundary) => boundary.playbookId === members[0].playbookId,
+      ) ||
+      !entry.concurrentRoleSets.some((candidate) =>
+        isDeepStrictEqual(candidate, roles),
+      )
+    ) {
+      throw new Error(
+        `Captain session effect cohort ${JSON.stringify(cohortId)} is not one stored declared concurrent role set`,
+      );
+    }
+  }
+}
+
+function validateEffectLedgerAuthority(value, record, owner) {
+  const authority = requireRecord(
+    snapshotJsonValue(value, 'effect-ledger write authority'),
+    'effect-ledger write authority',
+  );
+  rejectUnknownOrMissingKeys(
+    authority,
+    EFFECT_AUTHORITY_KEYS,
+    'effect-ledger write authority',
+  );
+  const identity = requireRecord(
+    authority.canonicalWorktree,
+    'effect-ledger write authority.canonicalWorktree',
+  );
+  rejectUnknownOrMissingKeys(
+    identity,
+    ['worktree', 'gitDir'],
+    'effect-ledger write authority.canonicalWorktree',
+  );
+  const entry = record.structuralProjection.catalog[authority.playbookId];
+  if (
+    authority.artifactSchema !== 3 ||
+    authority.sessionId !== record.sessionId ||
+    authority.sessionId !== owner.sessionId ||
+    authority.leaseOwnerToken !== owner.ownerToken ||
+    authority.cwd !== record.cwd ||
+    entry?.artifactSchema !== 3 ||
+    entry.id !== authority.playbookId ||
+    !isDeepStrictEqual(authority.requiredRoleIds, entry.requiredRoleIds) ||
+    !isDeepStrictEqual(
+      authority.concurrentRoleSets,
+      entry.concurrentRoleSets,
+    )
+  ) {
+    throw new Error(
+      'effect-ledger write authority does not match the current Captain session lease and stored schema-3 playbook',
+    );
+  }
+  for (const [key, path] of [
+    ['worktree', 'effect-ledger write authority canonical worktree'],
+    ['gitDir', 'effect-ledger write authority canonical Git directory'],
+  ]) {
+    if (
+      typeof identity[key] !== 'string' ||
+      !isAbsolute(identity[key]) ||
+      resolve(identity[key]) !== identity[key]
+    ) {
+      throw new Error(`${path} must be a normalized absolute path`);
+    }
+  }
+  return authority;
+}
+
+// Exported for the private worktree host-capability constructor in
+// repository-effects.js, so an external host's in-memory ledger applies the
+// exact command semantics the durable Captain record applies.
+export function applyEffectLedgerCommands(
+  ledgerValue,
+  authority,
+  uncertain,
+  commandsValue,
+) {
+  const previous = assertPlaybookEffectLedger(
+    ledgerValue,
+    'Captain session effect ledger',
+  );
+  const commands = requireNonemptyBatch(
+    snapshotJsonValue(commandsValue, 'effect-ledger write commands'),
+    'effect-ledger write commands',
+  );
+  let candidate = previous;
+  for (const [index, commandValue] of commands.entries()) {
+    candidate = applyEffectLedgerCommand(
+      candidate,
+      authority,
+      uncertain,
+      commandValue,
+      `effect-ledger write commands[${index}]`,
+    );
+  }
+  if (isDeepStrictEqual(candidate, previous)) return previous;
+  return validateNextEffectLedger(previous, {
+    ...candidate,
+    revision: previous.revision + 1,
+  });
+}
+
+function assertSettledEffectRecoveryCommands(commands) {
+  if (!Array.isArray(commands) || commands.length === 0) {
+    throw new Error(
+      'settled Captain session effect-ledger recovery requires boundary completion evidence',
+    );
+  }
+  for (const command of commands) {
+    if (
+      command === null ||
+      typeof command !== 'object' ||
+      Array.isArray(command) ||
+      command.kind !== 'replace-boundaries' ||
+      !Array.isArray(command.replacements) ||
+      command.replacements.length === 0
+    ) {
+      throw new Error(
+        'settled Captain session effect-ledger recovery may only complete existing physical boundaries',
+      );
+    }
+    for (const replacement of command.replacements) {
+      const expected = replacement?.expected;
+      const next = replacement?.next;
+      if (
+        expected === null ||
+        typeof expected !== 'object' ||
+        Array.isArray(expected) ||
+        next === null ||
+        typeof next !== 'object' ||
+        Array.isArray(next) ||
+        expected.physicalReceipt !== undefined ||
+        next.physicalReceipt === undefined
+      ) {
+        throw new Error(
+          'settled Captain session effect-ledger recovery requires one new physical receipt for each incomplete boundary',
+        );
+      }
+      const preserved = { ...next };
+      delete preserved.after;
+      delete preserved.physicalReceipt;
+      if (!isDeepStrictEqual(preserved, expected)) {
+        throw new Error(
+          'settled Captain session effect-ledger recovery cannot change boundary semantics or identity',
+        );
+      }
+    }
+  }
+}
+
+function applyEffectLedgerCommand(
+  ledger,
+  authority,
+  uncertain,
+  commandValue,
+  path,
+) {
+  const command = requireRecord(
+    commandValue,
+    path,
+  );
+  if (command.kind === 'start-boundaries') {
+    rejectUnknownOrMissingKeys(
+      command,
+      ['kind', 'boundaries'],
+      path,
+    );
+    return startEffectBoundaries(ledger, authority, uncertain, command.boundaries);
+  }
+  if (command.kind === 'replace-boundaries') {
+    rejectUnknownOrMissingKeys(
+      command,
+      ['kind', 'replacements'],
+      path,
+    );
+    return replaceEffectBoundaries(ledger, authority, command.replacements);
+  }
+  if (command.kind === 'append-logical-operations') {
+    rejectUnknownOrMissingKeys(
+      command,
+      ['kind', 'operations'],
+      path,
+    );
+    return appendEffectLogicalOperations(
+      ledger,
+      authority,
+      command.operations,
+    );
+  }
+  if (command.kind === 'replace-logical-operations') {
+    rejectUnknownOrMissingKeys(
+      command,
+      ['kind', 'replacements'],
+      path,
+    );
+    return replaceEffectLogicalOperations(
+      ledger,
+      authority,
+      command.replacements,
+    );
+  }
+  throw new Error(
+    `${path}.kind ${JSON.stringify(command.kind)} is not supported`,
+  );
+}
+
+function requireNonemptyBatch(value, path) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${path} must be a nonempty array`);
+  }
+  return value;
+}
+
+function startEffectBoundaries(ledger, authority, uncertain, value) {
+  const inputs = requireNonemptyBatch(
+    value,
+    'effect-ledger start command boundaries',
+  ).map((raw, index) => {
+    const path = `effect-ledger start command boundaries[${index}]`;
+    const input = requireRecord(raw, path);
+    exactOptionalKeys(
+      input,
+      EFFECT_BOUNDARY_START_KEYS,
+      ['cohortId', 'logicalOperationId'],
+      path,
+    );
+    assertBoundaryAuthority(input, authority, path);
+    return input;
+  });
+  assertDistinctCommandIdentities(inputs, 'boundaryId', 'boundary start');
+  const existingById = new Map(
+    ledger.boundaries.map((boundary) => [boundary.boundaryId, boundary]),
+  );
+  const existing = inputs.map((input) => existingById.get(input.boundaryId));
+  if (existing.some((boundary) => boundary !== undefined)) {
+    if (
+      existing.every((boundary) => boundary !== undefined) &&
+      existing.every((boundary, index) => {
+        const payload = { ...boundary };
+        const sequence = payload.sequence;
+        delete payload.sequence;
+        delete payload.attemptId;
+        delete payload.attemptNumber;
+        return (
+          sequence === ledger.boundaries.length - inputs.length + index + 1 &&
+          isDeepStrictEqual(payload, inputs[index])
+        );
+      })
+    ) {
+      return ledger;
+    }
+    throw new Error(
+      'effect-ledger boundary start reuses an existing boundary id with different data',
+    );
+  }
+  const cohorts = new Map();
+  for (const input of inputs) {
+    if (input.cohortId === undefined) continue;
+    const members = cohorts.get(input.cohortId) ?? [];
+    members.push(input);
+    cohorts.set(input.cohortId, members);
+  }
+  for (const [cohortId, members] of cohorts) {
+    if (
+      members.length < 2 ||
+      !authority.concurrentRoleSets.some((roles) =>
+        isDeepStrictEqual(
+          roles,
+          members.map((boundary) => boundary.roleId),
+        ),
+      ) ||
+      ledger.boundaries.some((boundary) => boundary.cohortId === cohortId)
+    ) {
+      throw new Error(
+        `effect-ledger boundary cohort ${JSON.stringify(cohortId)} is not one new declared concurrent role set`,
+      );
+    }
+  }
+  let sequence = ledger.boundaries.at(-1)?.sequence ?? 0;
+  const additions = inputs.map((input) => ({
+    sequence: ++sequence,
+    boundaryId: input.boundaryId,
+    attemptId: uncertain.attemptId,
+    attemptNumber: uncertain.attemptNumber,
+    playbookId: input.playbookId,
+    runtimeSessionId: input.runtimeSessionId,
+    turnId: input.turnId,
+    callId: input.callId,
+    roleId: input.roleId,
+    sourceStateId: input.sourceStateId,
+    sourceOutcomeSchema: input.sourceOutcomeSchema,
+    dispositions: input.dispositions,
+    canonicalWorktree: input.canonicalWorktree,
+    baseline: input.baseline,
+    correctionBudget: input.correctionBudget,
+    ...(input.cohortId === undefined ? {} : { cohortId: input.cohortId }),
+    ...(input.logicalOperationId === undefined
+      ? {}
+      : { logicalOperationId: input.logicalOperationId }),
+  }));
+  return {
+    ...ledger,
+    boundaries: [...ledger.boundaries, ...additions],
+  };
+}
+
+function replaceEffectBoundaries(ledger, authority, value) {
+  const replacements = captureReplacements(
+    value,
+    'boundaryId',
+    'effect-ledger boundary replacement command',
+  );
+  const byId = new Map(
+    ledger.boundaries.map((boundary, index) => [
+      boundary.boundaryId,
+      { boundary, index },
+    ]),
+  );
+  let alreadyApplied = true;
+  const nextBoundaries = [...ledger.boundaries];
+  for (const [index, replacement] of replacements.entries()) {
+    const path = `effect-ledger boundary replacement command.replacements[${index}]`;
+    assertBoundaryCommandShape(replacement.expected, `${path}.expected`);
+    assertBoundaryCommandShape(replacement.next, `${path}.next`);
+    assertBoundaryAuthority(replacement.expected, authority, `${path}.expected`);
+    assertBoundaryAuthority(replacement.next, authority, `${path}.next`);
+    assertMonotonicBoundaryReplacement(
+      replacement.expected,
+      replacement.next,
+      path,
+    );
+    const current = byId.get(replacement.expected.boundaryId);
+    if (current === undefined) {
+      throw new Error(`${path} names an absent boundary`);
+    }
+    if (!isDeepStrictEqual(current.boundary, replacement.expected)) {
+      throw new Error(`${path}.expected does not match the durable boundary`);
+    }
+    if (isDeepStrictEqual(current.boundary, replacement.next)) continue;
+    alreadyApplied = false;
+    nextBoundaries[current.index] = replacement.next;
+  }
+  if (alreadyApplied) return ledger;
+  return {
+    ...ledger,
+    boundaries: nextBoundaries,
+  };
+}
+
+function appendEffectLogicalOperations(ledger, authority, value) {
+  const inputs = requireNonemptyBatch(
+    value,
+    'effect-ledger logical-operation append command operations',
+  ).map((raw, index) => {
+    const path = `effect-ledger logical-operation append command operations[${index}]`;
+    const input = requireRecord(raw, path);
+    exactOptionalKeys(
+      input,
+      EFFECT_LOGICAL_START_KEYS,
+      EFFECT_LOGICAL_OPTIONAL_KEYS,
+      path,
+    );
+    assertLogicalOperationAuthority(input, authority, path);
+    return input;
+  });
+  assertDistinctCommandIdentities(
+    inputs,
+    'operationId',
+    'logical-operation append',
+  );
+  const existingById = new Map(
+    ledger.logicalOperations.map((operation) => [
+      operation.operationId,
+      operation,
+    ]),
+  );
+  const existing = inputs.map((input) => existingById.get(input.operationId));
+  if (existing.some((operation) => operation !== undefined)) {
+    if (
+      existing.every((operation) => operation !== undefined) &&
+      existing.every((operation, index) => {
+        const { sequence, ...payload } = operation;
+        return (
+          sequence ===
+            ledger.logicalOperations.length - inputs.length + index + 1 &&
+          isDeepStrictEqual(payload, inputs[index])
+        );
+      })
+    ) {
+      return ledger;
+    }
+    throw new Error(
+      'effect-ledger logical-operation append reuses an existing operation id with different data',
+    );
+  }
+  let sequence = ledger.logicalOperations.at(-1)?.sequence ?? 0;
+  const additions = inputs.map((input) => ({ sequence: ++sequence, ...input }));
+  return {
+    ...ledger,
+    logicalOperations: [...ledger.logicalOperations, ...additions],
+  };
+}
+
+function replaceEffectLogicalOperations(ledger, authority, value) {
+  const replacements = captureReplacements(
+    value,
+    'operationId',
+    'effect-ledger logical-operation replacement command',
+  );
+  const byId = new Map(
+    ledger.logicalOperations.map((operation, index) => [
+      operation.operationId,
+      { operation, index },
+    ]),
+  );
+  let alreadyApplied = true;
+  const nextOperations = [...ledger.logicalOperations];
+  for (const [index, replacement] of replacements.entries()) {
+    const path = `effect-ledger logical-operation replacement command.replacements[${index}]`;
+    assertLogicalOperationCommandShape(
+      replacement.expected,
+      `${path}.expected`,
+    );
+    assertLogicalOperationCommandShape(replacement.next, `${path}.next`);
+    assertLogicalOperationAuthority(
+      replacement.expected,
+      authority,
+      `${path}.expected`,
+    );
+    assertLogicalOperationAuthority(
+      replacement.next,
+      authority,
+      `${path}.next`,
+    );
+    assertMonotonicLogicalReplacement(
+      replacement.expected,
+      replacement.next,
+      path,
+    );
+    const current = byId.get(replacement.expected.operationId);
+    if (current === undefined) {
+      throw new Error(`${path} names an absent logical operation`);
+    }
+    if (!isDeepStrictEqual(current.operation, replacement.expected)) {
+      throw new Error(`${path}.expected does not match the durable logical operation`);
+    }
+    if (isDeepStrictEqual(current.operation, replacement.next)) continue;
+    alreadyApplied = false;
+    nextOperations[current.index] = replacement.next;
+  }
+  if (alreadyApplied) return ledger;
+  return {
+    ...ledger,
+    logicalOperations: nextOperations,
+  };
+}
+
+function captureReplacements(value, identityKey, path) {
+  const replacements = requireNonemptyBatch(value, `${path}.replacements`).map(
+    (raw, index) => {
+      const replacementPath = `${path}.replacements[${index}]`;
+      const replacement = requireRecord(raw, replacementPath);
+      rejectUnknownOrMissingKeys(
+        replacement,
+        ['expected', 'next'],
+        replacementPath,
+      );
+      const expected = requireRecord(
+        replacement.expected,
+        `${replacementPath}.expected`,
+      );
+      const next = requireRecord(replacement.next, `${replacementPath}.next`);
+      if (expected[identityKey] !== next[identityKey]) {
+        throw new Error(
+          `${replacementPath} cannot change ${identityKey}`,
+        );
+      }
+      return { expected, next };
+    },
+  );
+  assertDistinctCommandIdentities(
+    replacements.map(({ expected }) => expected),
+    identityKey,
+    path,
+  );
+  return replacements;
+}
+
+function assertBoundaryAuthority(boundary, authority, path) {
+  if (
+    boundary.playbookId !== authority.playbookId ||
+    !isDeepStrictEqual(
+      boundary.canonicalWorktree,
+      authority.canonicalWorktree,
+    ) ||
+    !authority.requiredRoleIds.includes(boundary.roleId)
+  ) {
+    throw new Error(`${path} does not match its schema-3 host authority`);
+  }
+}
+
+function assertBoundaryCommandShape(boundary, path) {
+  exactOptionalKeys(
+    boundary,
+    [...EFFECT_BOUNDARY_IDENTITY_KEYS, 'correctionBudget'],
+    EFFECT_BOUNDARY_OPTIONAL_KEYS,
+    path,
+  );
+}
+
+function assertLogicalOperationAuthority(operation, authority, path) {
+  if (operation.playbookId !== authority.playbookId) {
+    throw new Error(`${path} does not match its schema-3 host authority`);
+  }
+}
+
+function assertLogicalOperationCommandShape(operation, path) {
+  exactOptionalKeys(
+    operation,
+    ['sequence', ...EFFECT_LOGICAL_START_KEYS],
+    EFFECT_LOGICAL_OPTIONAL_KEYS,
+    path,
+  );
+}
+
+function assertDistinctCommandIdentities(values, key, label) {
+  const identities = values.map((value) => value[key]);
+  if (new Set(identities).size !== identities.length) {
+    throw new Error(`effect-ledger ${label} contains duplicate ${key}`);
+  }
+}
+
+function assertMonotonicBoundaryReplacement(expected, next, path) {
+  for (const key of EFFECT_BOUNDARY_IDENTITY_KEYS) {
+    if (!isDeepStrictEqual(expected[key], next[key])) {
+      throw new Error(`${path}.next cannot change boundary field ${key}`);
+    }
+  }
+  for (const key of [
+    'after',
+    'physicalReceipt',
+    'restored',
+    'finalText',
+    'initialSemanticCandidate',
+  ]) {
+    if (
+      expected[key] !== undefined &&
+      !isDeepStrictEqual(expected[key], next[key])
+    ) {
+      throw new Error(`${path}.next cannot remove or replace boundary field ${key}`);
+    }
+  }
+  if (
+    expected.cohortId !== next.cohortId
+  ) {
+    throw new Error(`${path}.next cannot change boundary field cohortId`);
+  }
+  if (
+    expected.logicalOperationId !== undefined &&
+    expected.logicalOperationId !== next.logicalOperationId
+  ) {
+    throw new Error(
+      `${path}.next cannot remove or replace boundary field logicalOperationId`,
+    );
+  }
+  const expectedBudget = requireRecord(
+    expected.correctionBudget,
+    `${path}.expected.correctionBudget`,
+  );
+  const nextBudget = requireRecord(
+    next.correctionBudget,
+    `${path}.next.correctionBudget`,
+  );
+  if (
+    expectedBudget.limit !== nextBudget.limit ||
+    (expectedBudget.spent === true && nextBudget.spent !== true)
+  ) {
+    throw new Error(`${path}.next cannot replenish its correction budget`);
+  }
+  const candidateChanged =
+    expected.semanticCandidate !== undefined &&
+    !isDeepStrictEqual(
+      expected.semanticCandidate,
+      next.semanticCandidate,
+    );
+  if (expected.semanticCandidate === undefined) {
+    if (next.initialSemanticCandidate !== undefined) {
+      throw new Error(
+        `${path}.next cannot add initialSemanticCandidate without replacing a prior candidate`,
+      );
+    }
+  } else if (!candidateChanged) {
+    if (
+      expected.initialSemanticCandidate === undefined &&
+      next.initialSemanticCandidate !== undefined
+    ) {
+      throw new Error(
+        `${path}.next cannot add initialSemanticCandidate without replacing semanticCandidate`,
+      );
+    }
+  } else if (
+    next.semanticCandidate === undefined ||
+    expected.initialSemanticCandidate !== undefined ||
+    expectedBudget.spent !== true ||
+    nextBudget.spent !== true ||
+    !isDeepStrictEqual(
+      next.initialSemanticCandidate,
+      expected.semanticCandidate,
+    )
+  ) {
+    throw new Error(
+      `${path}.next cannot replace semanticCandidate without its spent one-way correction provenance`,
+    );
+  }
+}
+
+function assertMonotonicLogicalReplacement(expected, next, path) {
+  for (const key of [
+    'sequence',
+    'operationId',
+    'playbookId',
+    'runtimeSessionId',
+    'originalBaseline',
+  ]) {
+    if (!isDeepStrictEqual(expected[key], next[key])) {
+      throw new Error(`${path}.next cannot change logical-operation field ${key}`);
+    }
+  }
+  if (
+    !Array.isArray(expected.boundaryIds) ||
+    !Array.isArray(next.boundaryIds) ||
+    expected.boundaryIds.some(
+      (boundaryId, index) => next.boundaryIds[index] !== boundaryId,
+    )
+  ) {
+    throw new Error(
+      `${path}.next boundaryIds must preserve the existing ordered prefix`,
+    );
+  }
+  if (
+    expected.logicalReceipt !== undefined &&
+    !isDeepStrictEqual(expected.logicalReceipt, next.logicalReceipt)
+  ) {
+    throw new Error(`${path}.next cannot remove or replace logicalReceipt`);
+  }
+}
+
+function validateNextEffectLedger(previous, candidate) {
+  if (!Number.isSafeInteger(previous.revision + 1)) {
+    throw new Error('Captain session effect-ledger revision cannot advance');
+  }
+  const next = assertPlaybookEffectLedger(
+    candidate,
+    'Captain session next effect ledger',
+  );
+  if (!isPlaybookEffectLedgerMonotonicExtension(previous, next)) {
+    throw new Error(
+      'Captain session next effect ledger is not a monotonic extension',
+    );
+  }
+  return next;
 }
 
 function assertReleasedSchema2CaptainSessionRecord(record) {
@@ -1228,12 +5280,7 @@ function assertReleasedSchema2CaptainSessionRecord(record) {
       'settled Captain session updatedAt must follow its creation marker',
     );
   }
-  if (typeof record.cwd !== 'string' || !isAbsolute(record.cwd)) {
-    throw new Error('Captain session record cwd must be an absolute path');
-  }
-  if (resolve(record.cwd) !== record.cwd) {
-    throw new Error('Captain session record cwd must be normalized');
-  }
+  if (!isRecordedAbsolutePath(record.cwd)) throw new Error('Captain session record cwd must be a normalized absolute path');
   requireRecord(record.config, 'Captain session record config');
   requireRecord(record.snapshot, 'Captain session record snapshot');
 
@@ -1323,7 +5370,7 @@ function assertTurnZeroSnapshot(snapshot, path) {
 
 function validateCaptainSessionProjection(
   projection,
-  { path, structural },
+  { path, structural, artifactSchemas },
 ) {
   rejectUnknownOrMissingKeys(
     projection,
@@ -1353,7 +5400,9 @@ function validateCaptainSessionProjection(
       structural
         ? ['id', 'adapter']
         : ['id', 'adapter', 'model', 'effort'],
-      ['instruction', 'permissions'],
+      structural
+        ? ['instruction', 'permissions']
+        : ['instruction', 'permissions', 'fastMode'],
       playerPath,
     );
     assertPlayerId(player.id, `${playerPath}.id`);
@@ -1414,8 +5463,24 @@ function validateCaptainSessionProjection(
     if (typeof item.intent !== 'string') {
       throw new Error(`${itemPath}.intent must be a string`);
     }
-    if (item.artifactSchema !== 2) {
-      throw new Error(`${itemPath}.artifactSchema must be exactly 2`);
+    if (!artifactSchemas.has(item.artifactSchema)) {
+      const expected = artifactSchemas === CURRENT_ARTIFACT_SCHEMAS
+        ? '3'
+        : '2 or 3';
+      throw new Error(`${itemPath}.artifactSchema must be ${expected}`);
+    }
+    if (
+      item.options !== null &&
+      typeof item.options === 'object' &&
+      !Array.isArray(item.options) &&
+      Object.prototype.hasOwnProperty.call(
+        item.options,
+        HOST_CAPABILITIES_OPTION_KEY,
+      )
+    ) {
+      throw new Error(
+        `${itemPath}.options.${HOST_CAPABILITIES_OPTION_KEY} is host-owned and cannot be persisted`,
+      );
     }
     const requiredRoleIds = validateRoleIds(
       item.requiredRoleIds,
@@ -1433,15 +5498,17 @@ function validateCaptainSessionProjection(
     for (const roleId of requiredRoleIds) {
       const bindingPath = `${itemPath}.roles.${roleId}`;
       const binding = requireRecord(roles[roleId], bindingPath);
-      rejectUnknownOrMissingKeys(
+      exactOptionalKeys(
         binding,
         structural
           ? ['playerId']
           : ['playerId', 'model', 'effort'],
+        structural ? [] : ['fastMode'],
         bindingPath,
       );
       assertPlayerId(binding.playerId, `${bindingPath}.playerId`);
       if (!structural) {
+        validateProjectedFastMode(binding, `${bindingPath}.fastMode`);
         validateTuningSelection(binding.model, `${bindingPath}.model`);
         const player = projection.players.find(
           (candidate) => candidate.id === binding.playerId,
@@ -1478,13 +5545,27 @@ function validateCaptainSessionProjection(
   }
 }
 
+// Absence is the canonical provider default, so the key stays optional and
+// the structural projection erases it beside model and effort.
+function validateProjectedFastMode(record, path) {
+  if (
+    Object.hasOwn(record, 'fastMode') &&
+    typeof record.fastMode !== 'boolean'
+  ) {
+    throw new Error(`${path} must be a boolean`);
+  }
+}
+
 function validateProjectedAgent(value, path, { structural, hasId = false }) {
   const agent = requireRecord(value, path);
+  if (!structural) validateProjectedFastMode(agent, `${path}.fastMode`);
   if (!hasId) {
     exactOptionalKeys(
       agent,
       structural ? ['adapter'] : ['adapter', 'model', 'effort'],
-      ['instruction', 'permissions'],
+      structural
+        ? ['instruction', 'permissions']
+        : ['instruction', 'permissions', 'fastMode'],
       path,
     );
   }
@@ -1575,10 +5656,7 @@ function validateRoleIds(value, path) {
   if (
     !Array.isArray(value) ||
     value.some(
-      (roleId) =>
-        typeof roleId !== 'string' ||
-        !ROLE_ID_PATTERN.test(roleId) ||
-        roleId === RESERVED_ID,
+      (roleId) => !isCanonicalLocalRoleId(roleId) || roleId === RESERVED_ID,
     ) ||
     new Set(value).size !== value.length
   ) {
@@ -1628,7 +5706,11 @@ function referencedPlayerIds(catalog) {
   return ids;
 }
 
-function assertSnapshotMatchesStructure(snapshot, structural) {
+function assertSnapshotMatchesStructure(
+  snapshot,
+  structural,
+  artifactSchemas = CURRENT_ARTIFACT_SCHEMAS,
+) {
   if (!isDeepStrictEqual(snapshot.captain.agent, structural.captain)) {
     throw new Error(
       'Captain session snapshot Captain envelope differs from structuralProjection',
@@ -1675,6 +5757,546 @@ function assertSnapshotMatchesStructure(snapshot, structural) {
         `Captain session snapshot frame ${JSON.stringify(frame.playbookId)} role bindings differ from structuralProjection`,
       );
     }
+    const expectedLedger =
+      artifactSchemas === PRE_EFFECT_ARTIFACT_SCHEMAS &&
+      item.artifactSchema === 2
+        ? emptyPlaybookEffectLedger()
+        : snapshot.effectLedger;
+    if (!isDeepStrictEqual(frame.runtime.effectLedger, expectedLedger)) {
+      throw new Error(
+        `Captain session snapshot frame ${JSON.stringify(frame.playbookId)} effect ledger differs from its structural schema authority`,
+      );
+    }
+  }
+}
+
+function validateRetainedGenerationUpdates(value) {
+  const updates = snapshotJsonValue(
+    value,
+    'Captain session retained-generation updates',
+  );
+  if (!Array.isArray(updates)) {
+    throw new Error(
+      'Captain session retained-generation updates must be an array',
+    );
+  }
+  const roots = new Set();
+  for (const [index, value] of updates.entries()) {
+    const path = `Captain session retained-generation updates[${index}]`;
+    const update = requireRecord(value, path);
+    if (update.kind === 'retain') {
+      rejectUnknownOrMissingKeys(
+        update,
+        ['kind', 'rootPlaybookId', 'generation'],
+        path,
+      );
+      requireRecord(update.generation, `${path}.generation`);
+    } else if (update.kind === 'clear') {
+      rejectUnknownOrMissingKeys(
+        update,
+        ['kind', 'rootPlaybookId'],
+        path,
+      );
+    } else {
+      throw new Error(`${path}.kind must be "retain" or "clear"`);
+    }
+    const rootPlaybookId = requireCanonicalNonblank(
+      update.rootPlaybookId,
+      `${path}.rootPlaybookId`,
+    );
+    if (roots.has(rootPlaybookId)) {
+      throw new Error(
+        'Captain session retained-generation updates contain a duplicate root playbook id',
+      );
+    }
+    roots.add(rootPlaybookId);
+  }
+  return updates;
+}
+
+function applyRetainedGenerationUpdates(
+  retainedGenerations,
+  updates,
+  structural,
+) {
+  const next = new Map(Object.entries(retainedGenerations));
+  for (const update of updates) {
+    if (!Object.hasOwn(structural.catalog, update.rootPlaybookId)) {
+      throw new Error(
+        `Captain session retained-generation update names unknown stored playbook ${JSON.stringify(update.rootPlaybookId)}`,
+      );
+    }
+    if (update.kind === 'clear') {
+      next.delete(update.rootPlaybookId);
+    } else {
+      next.set(update.rootPlaybookId, update.generation);
+    }
+  }
+  return Object.fromEntries(next);
+}
+
+function retainedGenerationsMember(record) {
+  return Object.hasOwn(record, 'retainedGenerations')
+    ? { retainedGenerations: record.retainedGenerations }
+    : {};
+}
+
+function settledAbandonmentMember(record) {
+  return Object.hasOwn(record, 'settledAbandonment')
+    ? { settledAbandonment: record.settledAbandonment }
+    : {};
+}
+
+function sortCaptainSessionRecords(records) {
+  return [...records].sort((left, right) => {
+    const byUpdated = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+    if (byUpdated !== 0) return byUpdated;
+    if (right.sessionId === left.sessionId) return 0;
+    return right.sessionId < left.sessionId ? -1 : 1;
+  });
+}
+
+function assertFreshAdoptionTarget(record) {
+  if (record === undefined) {
+    throw new Error('Captain session adoption target does not exist');
+  }
+  if (Object.keys(record.retainedGenerations ?? {}).length !== 0) {
+    throw new Error(
+      'Captain session adoption target already retains generations',
+    );
+  }
+  if (record.snapshot.mode !== 'chat') {
+    throw new Error(
+      'Captain session adoption target must have no live engagement',
+    );
+  }
+  if (record.state !== 'settled') {
+    throw new Error(
+      'Captain session adoption target must be settled at turn zero',
+    );
+  }
+  assertTurnZeroSnapshot(
+    record.snapshot,
+    'Captain session adoption target snapshot',
+  );
+}
+
+function assertAdoptionTransferEnvelope(
+  sourceStructural,
+  targetStructural,
+  retainedGenerations,
+  effectLedger,
+) {
+  assertEffectLedgerMatchesCatalog(effectLedger, targetStructural.catalog);
+  for (const [rootPlaybookId, generation] of Object.entries(
+    retainedGenerations,
+  )) {
+    const sourceRoot = sourceStructural.catalog[rootPlaybookId];
+    const targetRoot = targetStructural.catalog[rootPlaybookId];
+    if (targetRoot === undefined) {
+      throw new Error(
+        `Captain session adoption target has no root playbook ${JSON.stringify(rootPlaybookId)}`,
+      );
+    }
+    const rootEnvelope = (item) => ({
+      from: item.from,
+      manifestCommand: item.manifestCommand,
+      options: item.options,
+      requiredRoleIds: item.requiredRoleIds,
+      concurrentRoleSets: item.concurrentRoleSets,
+    });
+    if (
+      !isDeepStrictEqual(
+        rootEnvelope(sourceRoot),
+        rootEnvelope(targetRoot),
+      )
+    ) {
+      throw new Error(
+        `Captain session adoption target root envelope differs for ${JSON.stringify(rootPlaybookId)}`,
+      );
+    }
+    for (const frame of generation.frames) {
+      const sourceFrame = sourceStructural.catalog[frame.playbookId];
+      const targetFrame = targetStructural.catalog[frame.playbookId];
+      if (targetFrame === undefined) {
+        throw new Error(
+          `Captain session adoption target has no frame playbook ${JSON.stringify(frame.playbookId)}`,
+        );
+      }
+      if (targetFrame.artifactSchema !== sourceFrame.artifactSchema) {
+        throw new Error(
+          `Captain session adoption target artifact schema differs for ${JSON.stringify(frame.playbookId)}`,
+        );
+      }
+    }
+  }
+}
+
+function settledRecordWithRetainedGenerations(
+  record,
+  retainedGenerations,
+  updatedAt,
+  effectLedger = record.effectLedger,
+) {
+  if (record.state !== 'settled') {
+    throw new Error('Captain session adoption exchange requires settled records');
+  }
+  return validateCaptainSessionRecord({
+    schemaVersion: CAPTAIN_SESSION_RECORD_SCHEMA_VERSION,
+    kind: record.kind,
+    state: record.state,
+    sessionId: record.sessionId,
+    createdAt: record.createdAt,
+    updatedAt,
+    cwd: record.cwd,
+    structuralProjection: record.structuralProjection,
+    lastAppliedExecutionProjection: record.lastAppliedExecutionProjection,
+    snapshot: isDeepStrictEqual(record.snapshot.effectLedger, effectLedger)
+      ? record.snapshot
+      : { ...record.snapshot, effectLedger },
+    effectLedger,
+    unresolvedEffects: record.unresolvedEffects,
+    retainedGenerations,
+    ...(Object.hasOwn(record, 'settledAbandonment')
+      ? { settledAbandonment: record.settledAbandonment }
+      : {}),
+  });
+}
+
+function validateRetainedGenerations(
+  value,
+  structural,
+  authoritativeLedger,
+  artifactSchemas = CURRENT_ARTIFACT_SCHEMAS,
+) {
+  const retained = requireRecord(
+    value,
+    'Captain session record retainedGenerations',
+  );
+  const sessionIds = new Set();
+  for (const [rootPlaybookId, value] of Object.entries(retained)) {
+    const path =
+      `Captain session record retainedGenerations` +
+      `[${JSON.stringify(rootPlaybookId)}]`;
+    if (!Object.hasOwn(structural.catalog, rootPlaybookId)) {
+      throw new Error(
+        `Captain session retained generation names unknown stored playbook ${JSON.stringify(rootPlaybookId)}`,
+      );
+    }
+    const generation = requireRecord(value, path);
+    exactOptionalKeys(
+      generation,
+      ['effectLedger', 'frames'],
+      ['retainedEffectReconciliation', 'rootStateDescription'],
+      path,
+    );
+    const generationLedger = assertPlaybookEffectLedger(
+      generation.effectLedger,
+      `${path}.effectLedger`,
+    );
+    if (
+      generationLedger.boundaries.some(
+        ({ physicalReceipt }) => physicalReceipt === undefined,
+      )
+    ) {
+      throw new Error(
+        `${path}.effectLedger contains an incomplete physical boundary`,
+      );
+    }
+    assertEffectLedgerMatchesCatalog(generationLedger, structural.catalog);
+    if (
+      !isPlaybookEffectLedgerMonotonicExtension(
+        generationLedger,
+        authoritativeLedger,
+      )
+    ) {
+      throw new Error(
+        `${path}.effectLedger is not a monotonic checkpoint of the authoritative Captain session effect ledger`,
+      );
+    }
+    const generationReconciliation =
+      generation.retainedEffectReconciliation === undefined
+        ? undefined
+        : requireRecord(
+            generation.retainedEffectReconciliation,
+            `${path}.retainedEffectReconciliation`,
+          );
+    if (generationReconciliation !== undefined) {
+      rejectUnknownOrMissingKeys(
+        generationReconciliation,
+        ['sourceGenerationId'],
+        `${path}.retainedEffectReconciliation`,
+      );
+      assertUuid(
+        generationReconciliation.sourceGenerationId,
+        `${path}.retainedEffectReconciliation.sourceGenerationId`,
+      );
+    }
+    if (generation.rootStateDescription !== undefined) {
+      requireNonblank(
+        generation.rootStateDescription,
+        `${path}.rootStateDescription`,
+      );
+    }
+    if (!Array.isArray(generation.frames) || generation.frames.length === 0) {
+      throw new Error(`${path}.frames must be a non-empty array`);
+    }
+    const frames = generation.frames.map((value, index) =>
+      validateRetainedGenerationFrame(
+        value,
+        index,
+        rootPlaybookId,
+        structural,
+        generationLedger,
+        authoritativeLedger,
+        sessionIds,
+        `${path}.frames[${index}]`,
+        artifactSchemas,
+      ),
+    );
+    const schema3Frames = frames.filter(
+      ({ playbookId }) =>
+        structural.catalog[playbookId].artifactSchema === 3,
+    );
+    const markedFrames = frames.filter(
+      ({ runtime }) =>
+        runtime.retainedEffectReconciliation !== undefined,
+    );
+    const markedCaptureLedger = markedFrames[0]?.runtime.effectLedger;
+    const sourceGenerationId =
+      generationReconciliation?.sourceGenerationId;
+    if (
+      markedCaptureLedger !== undefined &&
+      markedFrames.some(
+        ({ runtime }) =>
+          !isDeepStrictEqual(runtime.effectLedger, markedCaptureLedger),
+      )
+    ) {
+      throw new Error(
+        `${path} schema-3 frames differ from the marked generation capture mirror`,
+      );
+    }
+    if (
+      (sourceGenerationId === undefined && markedFrames.length !== 0) ||
+      (sourceGenerationId !== undefined &&
+        markedFrames.length !== schema3Frames.length) ||
+      (sourceGenerationId !== undefined &&
+        structural.catalog[frames[0].playbookId].artifactSchema === 3 &&
+        frames[0].runtime.retainedEffectReconciliation?.sourceSessionId !==
+          sourceGenerationId)
+    ) {
+      throw new Error(
+        `${path}.retainedEffectReconciliation is inconsistent with its schema-3 frame markers`,
+      );
+    }
+    validateRetainedGenerationPath(frames, rootPlaybookId, path);
+  }
+  return retained;
+}
+
+function validateRetainedGenerationFrame(
+  value,
+  index,
+  rootPlaybookId,
+  structural,
+  generationLedger,
+  authoritativeLedger,
+  sessionIds,
+  path,
+  artifactSchemas = CURRENT_ARTIFACT_SCHEMAS,
+) {
+  const frame = requireRecord(value, path);
+  exactOptionalKeys(
+    frame,
+    [
+      'playbookId',
+      'sessionId',
+      'rootSessionId',
+      'depth',
+      'options',
+      'roleBindings',
+      'runtime',
+    ],
+    ['parentSessionId', 'parentCallId', 'request', 'inputs'],
+    path,
+  );
+  if (frame.request !== undefined) {
+    if (index !== 0) throw new Error(`${path}.request belongs only to the root`);
+    requireNonblank(frame.request, `${path}.request`);
+  }
+  const playbookId = requireCanonicalNonblank(
+    frame.playbookId,
+    `${path}.playbookId`,
+  );
+  const catalogItem = structural.catalog[playbookId];
+  if (catalogItem === undefined) {
+    throw new Error(
+      `${path}.playbookId names unknown stored playbook ${JSON.stringify(playbookId)}`,
+    );
+  }
+  if (frame.inputs !== undefined && (index !== 0 || !Array.isArray(frame.inputs) || frame.inputs.some((input) => typeof input !== 'string' || !input.trim()))) throw new Error(`${path}.inputs belongs only to the root and must contain nonempty strings`);
+  assertUuid(frame.sessionId, `${path}.sessionId`);
+  assertUuid(frame.rootSessionId, `${path}.rootSessionId`);
+  if (sessionIds.has(frame.sessionId)) {
+    throw new Error(
+      'Captain session retained generation frame session ids must be unique',
+    );
+  }
+  sessionIds.add(frame.sessionId);
+  if (!Number.isSafeInteger(frame.depth) || frame.depth !== index) {
+    throw new Error(`${path}.depth must equal its root-to-leaf index`);
+  }
+  if (frame.parentSessionId !== undefined) {
+    assertUuid(frame.parentSessionId, `${path}.parentSessionId`);
+  }
+  if (frame.parentCallId !== undefined) {
+    requireNonblank(frame.parentCallId, `${path}.parentCallId`);
+  }
+  const roleBindings = requireRecord(
+    frame.roleBindings,
+    `${path}.roleBindings`,
+  );
+  rejectUnknownOrMissingKeys(
+    roleBindings,
+    catalogItem.requiredRoleIds,
+    `${path}.roleBindings`,
+  );
+  for (const roleId of catalogItem.requiredRoleIds) {
+    assertPlayerId(roleBindings[roleId], `${path}.roleBindings.${roleId}`);
+  }
+  let runtime;
+  try {
+    runtime = assertPlaybookRuntimeSnapshot(frame.runtime, playbookId, {
+      allowSuspendedCall: true,
+    });
+  } catch (cause) {
+    throw new Error(`${path}.runtime is invalid: ${errorMessage(cause)}`, {
+      cause,
+    });
+  }
+  const runtimeReconciliation = runtime.retainedEffectReconciliation;
+  if (
+    artifactSchemas === PRE_EFFECT_ARTIFACT_SCHEMAS &&
+    catalogItem.artifactSchema === 2 &&
+    (!isDeepStrictEqual(runtime.effectLedger, emptyPlaybookEffectLedger()) ||
+      runtimeReconciliation !== undefined ||
+      runtime.retainedEffectSourceSessionId !== undefined)
+  ) {
+    throw new Error(
+      `${path}.runtime schema-2 effect state must be empty`,
+    );
+  } else if (
+    runtimeReconciliation === undefined &&
+    !isDeepStrictEqual(runtime.effectLedger, generationLedger)
+  ) {
+    throw new Error(
+      `${path}.runtime effect ledger differs from its retained-generation checkpoint`,
+    );
+  } else if (
+    runtimeReconciliation !== undefined &&
+    (!isDeepStrictEqual(runtimeReconciliation.checkpoint, generationLedger) ||
+      isDeepStrictEqual(runtime.effectLedger, generationLedger) ||
+      !isPlaybookEffectLedgerMonotonicExtension(
+        runtime.effectLedger,
+        authoritativeLedger,
+      ))
+  ) {
+    throw new Error(
+      `${path}.runtime retained-effect evidence differs from its generation checkpoint or capture-time authority`,
+    );
+  }
+  if (
+    runtime.state.status !== 'active' ||
+    !runtime.state.quiescent ||
+    runtime.state.stateId === undefined
+  ) {
+    throw new Error(
+      `${path}.runtime must capture one active quiescent pre-terminal state`,
+    );
+  }
+  for (const roleId of Object.keys(runtime.roleResumeTokens)) {
+    if (!Object.hasOwn(roleBindings, roleId)) {
+      throw new Error(
+        `${path}.runtime role token names an unbound role ${JSON.stringify(roleId)}`,
+      );
+    }
+  }
+  for (const question of runtime.pendingBossQuestions) {
+    if (
+      question.asker.kind === 'role' &&
+      !Object.hasOwn(roleBindings, question.asker.roleId)
+    ) {
+      throw new Error(
+        `${path}.runtime pending question names an unbound role ${JSON.stringify(question.asker.roleId)}`,
+      );
+    }
+  }
+  if (index === 0 && playbookId !== rootPlaybookId) {
+    throw new Error(
+      `${path}.playbookId must equal retained root ${JSON.stringify(rootPlaybookId)}`,
+    );
+  }
+  return {
+    ...frame,
+    playbookId,
+    runtime,
+  };
+}
+
+function validateRetainedGenerationPath(frames, rootPlaybookId, path) {
+  const rootSessionId = frames[0].sessionId;
+  const playbookIds = new Set();
+  for (const [index, frame] of frames.entries()) {
+    if (playbookIds.has(frame.playbookId)) {
+      throw new Error(`${path}.frames must not contain a playbook cycle`);
+    }
+    playbookIds.add(frame.playbookId);
+    if (frame.rootSessionId !== rootSessionId) {
+      throw new Error(
+        `${path}.frames[${index}].rootSessionId must equal the root session id`,
+      );
+    }
+    if (index === 0) {
+      if (
+        frame.sessionId !== frame.rootSessionId ||
+        frame.parentSessionId !== undefined ||
+        frame.parentCallId !== undefined
+      ) {
+        throw new Error(
+          `${path}.frames[0] has child-only or inconsistent root identity`,
+        );
+      }
+      continue;
+    }
+    const parent = frames[index - 1];
+    const suspendedCall = parent.runtime.suspendedCall;
+    if (
+      frame.parentSessionId !== parent.sessionId ||
+      frame.parentCallId === undefined
+    ) {
+      throw new Error(
+        `${path}.frames[${index}] does not identify its immediate parent`,
+      );
+    }
+    if (
+      suspendedCall === undefined ||
+      suspendedCall.callId !== frame.parentCallId ||
+      suspendedCall.playbookId !== frame.playbookId ||
+      suspendedCall.childSessionId !== frame.sessionId
+    ) {
+      throw new Error(
+        `${path}.frames[${index - 1}] suspended call does not match its child edge`,
+      );
+    }
+  }
+  const leaf = frames.at(-1).runtime;
+  if (
+    leaf.suspendedCall !== undefined ||
+    !leaf.state.tags.includes('playbook.parked')
+  ) {
+    throw new Error(
+      `Captain session retained generation ${JSON.stringify(rootPlaybookId)} leaf must be parked without a suspended child call`,
+    );
   }
 }
 
@@ -1711,7 +6333,10 @@ async function requireUncertainRecord(record, attemptId) {
   if (record.state !== 'uncertain') {
     throw new Error('Captain session has no uncertain turn');
   }
-  if (record.uncertain.attemptId !== attemptId) {
+  if (
+    attemptId !== undefined &&
+    record.uncertain.attemptId !== attemptId
+  ) {
     throw new Error('Captain session uncertain attempt id changed');
   }
   return record;
@@ -1842,8 +6467,8 @@ function nextTimestamp(value, previous) {
   return new Date(Date.parse(previous) + 1).toISOString();
 }
 
-async function readPrivateRegularFile(path, mode, fs, label) {
-  await assertPrivateRegularPath(path, mode, fs, label);
+async function readPrivateRegularFile(path, mode, fs, label, raw = false) {
+  const before = await assertPrivateRegularPath(path, mode, fs, label);
   const handle = await fs.open(
     path,
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
@@ -1856,7 +6481,12 @@ async function readPrivateRegularFile(path, mode, fs, label) {
     if ((stat.mode & 0o7777) !== mode) {
       throw new Error(`${label} permissions must be ${octal(mode)}`);
     }
-    return await handle.readFile('utf8');
+    if (!sameFileIdentity(before, stat)) throw new Error(`${label} changed during open`);
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    const current = await assertPrivateRegularPath(path, mode, fs, label);
+    if (!sameFileIdentity(after, current) || after.size !== stat.size) throw new Error(`${label} changed during read`);
+    return raw ? bytes : new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } finally {
     await handle.close();
   }
@@ -1958,4 +6588,117 @@ async function assertDirectoryNotLink(path, fs) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Opening is the only permission preparation boundary. Strict readers never
+// change modes, and verified handles ensure tightening cannot follow links.
+async function prepareSessionPermissions(sessionsDir, fs, selectedSessionId, includeSidecars = false) {
+  let initial;
+  try { initial = await fs.lstat(sessionsDir); }
+  catch (cause) { if (cause?.code === 'ENOENT') return; throw cause; }
+  const uid = process.getuid?.();
+  const verify = (stat, directory) => {
+    const required = directory ? 0o700 : 0o600;
+    if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1) || (uid !== undefined && stat.uid !== uid) || (stat.mode & required) !== required) throw new Error('session permission preparation refuses unsafe ownership, links, type, or owner access');
+  };
+  const tighten = async (path, before, directory) => {
+    verify(before, directory);
+    const handle = await fs.open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0) | (directory ? constants.O_DIRECTORY ?? 0 : 0));
+    try {
+      const opened = await handle.stat(); verify(opened, directory);
+      if (!sameFileIdentity(before, opened)) throw new Error('session entry changed during permission preparation');
+      const mode = directory ? 0o700 : 0o600;
+      if ((opened.mode & 0o7777) !== mode) await handle.chmod(mode);
+      const after = await handle.stat(); verify(after, directory);
+      const current = await fs.lstat(path); verify(current, directory);
+      if (!sameFileIdentity(after, current) || (after.mode & 0o7777) !== mode || (current.mode & 0o7777) !== mode) throw new Error('session permission tightening could not be verified');
+    } finally { await handle.close(); }
+  };
+  await tighten(sessionsDir, initial, true);
+  for (const name of await fs.readdir(sessionsDir)) {
+    const eligible = /^[0-9a-f-]{36}\.(?:json|records\.jsonl|hints\.json)$/.test(name)
+      || (includeSidecars && /^[0-9a-f-]{36}\.spex\.json$/.test(name));
+    if (!eligible || (selectedSessionId !== undefined && !name.startsWith(`${selectedSessionId}.`))) continue;
+    const path = join(sessionsDir, name);
+    await tighten(path, await fs.lstat(path), false);
+  }
+}
+
+async function readSessionHistory({ sessionsDir, path, fs, afterSeq = 0 }) {
+  if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error('history afterSeq must be a nonnegative safe integer');
+  const snapshot = await readReplaySnapshot({ sessionsDir, path, fs, afterSeq: 0, forceFullRead: true });
+  const bytes = snapshot.absent ? Buffer.alloc(0) : snapshot.bytes;
+  return Object.freeze({ ...parseSessionHistory(bytes, afterSeq), missing: snapshot.absent === true });
+}
+
+
+function legacyJournalHistory(record, afterSeq, absentHistory) {
+  const entries = [];
+  const timestamp = Date.parse(record.updatedAt);
+  let activeTurn;
+  const emit = (event) => entries.push(Object.freeze({ v: 1, seq: entries.length + 1, record: Object.freeze(event) }));
+  const finish = () => {
+    if (activeTurn !== undefined) emit({ type: 'turn_finished', timestamp, turnId: activeTurn });
+    activeTurn = undefined;
+  };
+  for (const entry of record.snapshot?.journal ?? []) {
+    if (!Number.isSafeInteger(entry.turnId) || entry.turnId <= 0 || typeof entry.payload !== 'string') continue;
+    if (entry.kind === 'boss') {
+      finish(); activeTurn = entry.turnId;
+      emit({ type: 'turn_started', timestamp, turnId: entry.turnId, turn: { id: entry.turnId, prompt: entry.payload } });
+    } else if (entry.kind === 'reply' && entry.turnId === activeTurn) {
+      emit({ type: 'captain_reply', timestamp, turnId: entry.turnId, text: entry.payload });
+    }
+  }
+  finish();
+  return Object.freeze({ ...absentHistory, synthetic: true, lastReadableSeq: entries.length, entries: Object.freeze(entries.filter(({ seq }) => seq > afterSeq)) });
+}
+
+function parseSessionHistory(bytes, afterSeq = 0) {
+  const entries = [], digests = [EMPTY_REPLAY_SHA256];
+  const hash = createHash('sha256');
+  let offset = 0, seq = 0, damage;
+  while (offset < bytes.length) {
+    const newline = bytes.indexOf(10, offset);
+    if (newline < 0) break;
+    let entry;
+    try { entry = parseReplayEnvelope(bytes.subarray(offset, newline), seq + 1); }
+    catch (cause) { damage = { seq: seq + 1, offset, reason: errorMessage(cause) }; break; }
+    hash.update(bytes.subarray(offset, newline + 1));
+    seq += 1; digests.push(hash.copy().digest('hex'));
+    if (seq > afterSeq) entries.push(entry);
+    offset = newline + 1;
+  }
+  return Object.freeze({ entries: Object.freeze(entries), lastReadableSeq: seq, incomplete: damage !== undefined, ...(damage ? { damage } : {}), pendingTail: damage === undefined && offset < bytes.length, digests: Object.freeze(digests), completeBytes: offset });
+}
+
+async function writePrivateJson(path, value, fs) {
+  return writePrivateBytes(path, Buffer.from(`${JSON.stringify(value)}\n`, 'utf8'), fs);
+}
+
+async function writePrivateBytes(path, bytes, fs) {
+  const directory = dirname(path);
+  await assertPrivateDirectory(directory, fs);
+  try { await assertPrivateRegularPath(path, 0o600, fs, 'session data'); }
+  catch (cause) { if (cause?.code !== 'ENOENT') throw cause; }
+  const temporary = join(directory, `.${randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = await fs.open(temporary, 'wx', 0o600);
+    await handle.chmod(0o600);
+    await handle.writeFile(bytes);
+    await handle.sync(); await handle.close(); handle = undefined;
+    await fs.rename(temporary, path);
+    await syncDirectory(directory, fs);
+  } finally {
+    await handle?.close();
+    try { await fs.unlink(temporary); } catch (cause) { if (cause?.code !== 'ENOENT') throw cause; }
+  }
+}
+
+/** One shared decision for discard controls and durable rollback. */
+export function isUncertainTurnDiscardable(record) {
+  return record?.state === 'uncertain' && !record.uncertain.abandonment &&
+    (record.uncertain.progress?.steps.length ?? 0) === 0 &&
+    isDeepStrictEqual(record.effectLedger, record.snapshot.effectLedger);
 }

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
+import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { fromPromise, waitFor, } from 'xstate';
+import { assertPlaybookFailureCause } from './runtime.js';
 // DR-019: the generic linked-runtime factory and its strategy helpers live
 // in the sibling module and are re-exported here so linked artifacts import
 // one shared engine surface.
@@ -36,6 +39,14 @@ function withAbort(promise, signal) {
 // reason is a control-plane failure to surface, never an abort to swallow.
 function isAbortReason(error, signal) {
     return signal.aborted && Object.is(error, signal.reason);
+}
+function createAbortReasonClassifier(...sources) {
+    const captured = Object.freeze(sources.filter((source) => source !== undefined));
+    return Object.freeze({
+        isAbortReason: (error) => captured.some((source) => source instanceof AbortSignal
+            ? isAbortReason(error, source)
+            : source.isAbortReason(error)),
+    });
 }
 const NEVER_ABORTED_SIGNAL = new AbortController().signal;
 /**
@@ -75,7 +86,7 @@ export function registerPlaybookAbortCleanup(signal, cleanup) {
     // the bridge's allSettled drain observes its outcome.
     void cleanup.catch(() => undefined);
 }
-async function drainPlaybookAbortCleanups(signal) {
+async function drainPlaybookAbortCleanups(signal, aborts) {
     const failures = [];
     while (true) {
         const pending = abortCleanups.get(signal);
@@ -85,8 +96,10 @@ async function drainPlaybookAbortCleanups(signal) {
         pending.clear();
         const outcomes = await Promise.allSettled(batch);
         for (const outcome of outcomes) {
-            if (outcome.status === 'rejected')
+            if (outcome.status === 'rejected' &&
+                !aborts.isAbortReason(outcome.reason)) {
                 failures.push(outcome.reason);
+            }
         }
     }
     abortCleanups.delete(signal);
@@ -338,6 +351,7 @@ export function snapshotPlaybookSession(session) {
         callPlaybook: capturedPort(portDescriptors, 'callPlaybook'),
         emitStatus: capturedPort(portDescriptors, 'emitStatus'),
         emitTelemetry: capturedPort(portDescriptors, 'emitTelemetry'),
+        ...(portDescriptors.recordStep === undefined ? {} : { recordStep: capturedPort(portDescriptors, 'recordStep') }),
     });
     const playerSessions = hasPlayerSessions
         ? capturedSessionStore(sessionDescriptors)
@@ -376,7 +390,74 @@ export function hiddenControlEnvelope(prompt) {
         'Now return exactly one JSON object and nothing else.',
     ].join('\n\n');
 }
+/**
+ * DR-063 §2: the marker property the runtime writes on the error it marks as
+ * the FSM failure. It is non-enumerable, so decorating a host-owned error
+ * changes nothing a host can observe by enumeration or serialization.
+ */
+const PLAYBOOK_FAILURE_CAUSE_PROPERTY = 'playbookCause';
+/**
+ * Attach one validated failure cause to an error object, returning it. A cause
+ * the closed validator rejects is dropped rather than published, and an error
+ * that refuses the property keeps its own cause-free identity (DR-063 §1).
+ */
+export function attachPlaybookFailureCause(error, cause) {
+    if (typeof error !== 'object' || error === null)
+        return error;
+    let validated;
+    try {
+        validated = assertPlaybookFailureCause(cause);
+    }
+    catch {
+        return error;
+    }
+    try {
+        Object.defineProperty(error, PLAYBOOK_FAILURE_CAUSE_PROPERTY, {
+            value: validated,
+            enumerable: false,
+            writable: true,
+            configurable: true,
+        });
+    }
+    catch {
+        // A frozen or hostile error keeps no cause; the runtime's own slot still
+        // supplies one at the failed state.
+    }
+    return error;
+}
+/**
+ * DR-063 §2: a normalized error carries `cause` exactly when the underlying
+ * error carries a valid one. An `Error` carries it on the marker property the
+ * runtime writes; an already-normalized record carries it as `cause`, so the
+ * cause survives every re-normalization along the durable round trip.
+ */
+function playbookFailureCauseOf(error) {
+    if (typeof error !== 'object' || error === null)
+        return undefined;
+    let candidate;
+    try {
+        if (Object.hasOwn(error, PLAYBOOK_FAILURE_CAUSE_PROPERTY)) {
+            candidate = error[PLAYBOOK_FAILURE_CAUSE_PROPERTY];
+        }
+        else if (!(error instanceof Error) && Object.hasOwn(error, 'cause')) {
+            candidate = error.cause;
+        }
+    }
+    catch {
+        return undefined;
+    }
+    if (candidate === undefined)
+        return undefined;
+    try {
+        return assertPlaybookFailureCause(candidate);
+    }
+    catch {
+        return undefined;
+    }
+}
 export function normalizeError(error) {
+    const cause = playbookFailureCauseOf(error);
+    const withCause = (normalized) => cause === undefined ? normalized : { ...normalized, cause };
     if (error instanceof Error) {
         let name = 'Error';
         let message = 'Unknown error';
@@ -403,11 +484,11 @@ export function normalizeError(error) {
         catch {
             // A stack is optional at the public boundary.
         }
-        return {
+        return withCause({
             name,
             message,
             ...(stack ? { stack } : {}),
-        };
+        });
     }
     if (typeof error === 'string') {
         return { name: 'Error', message: error };
@@ -415,22 +496,22 @@ export function normalizeError(error) {
     try {
         assertJsonSafe(error);
         if (isRecord(error) && typeof error.message === 'string') {
-            return {
+            return withCause({
                 name: typeof error.name === 'string' && error.name.length > 0
                     ? error.name
                     : 'Error',
                 message: error.message,
                 ...(typeof error.stack === 'string' ? { stack: error.stack } : {}),
-            };
+            });
         }
-        return { name: 'Error', message: JSON.stringify(error) };
+        return withCause({ name: 'Error', message: JSON.stringify(error) });
     }
     catch {
         try {
-            return { name: 'Error', message: String(error) };
+            return withCause({ name: 'Error', message: String(error) });
         }
         catch {
-            return { name: 'Error', message: 'Unknown error' };
+            return withCause({ name: 'Error', message: 'Unknown error' });
         }
     }
 }
@@ -527,8 +608,15 @@ export function normalizePlaybookSnapshot(snapshot, options = {}) {
 // DR-014 §1: deep-detach an XState persisted actor snapshot into strict
 // JSON for a PlaybookRuntimeSnapshot, normalizing any raw Error value
 // (for example FSM context `lastError`) instead of rejecting it.
-export function detachPersistedMachineSnapshot(persisted) {
-    return snapshotJsonValue(withErrorsNormalized(persisted, new Set()), 'persisted machine snapshot');
+// DR-063 §2: a runtime parked in its failure state supplies the `lastError`
+// it publishes live — completed with the cause it decided — and that record
+// replaces the context's own, which a thrown value may have refused to carry.
+export function detachPersistedMachineSnapshot(persisted, completion = {}) {
+    const detached = withErrorsNormalized(persisted, new Set());
+    const lastError = completion.lastError;
+    return snapshotJsonValue(lastError !== undefined && isRecord(detached) && isRecord(detached.context)
+        ? { ...detached, context: { ...detached.context, lastError } }
+        : detached, 'persisted machine snapshot');
 }
 function withErrorsNormalized(value, ancestors) {
     if (value instanceof Error)
@@ -563,12 +651,1023 @@ const SNAPSHOT_SEQUENCE_KEYS = [
     'playerCall',
     'playbookCall',
 ];
+const EFFECT_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const EFFECT_OID_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const EFFECT_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const EFFECT_DISPOSITIONS = new Set([
+    'unchanged',
+    'one-descendant-commit',
+    'deferred',
+]);
+const EFFECT_RECEIPT_CLASSIFICATIONS = new Set([
+    'unchanged',
+    'one-descendant-commit',
+    'multiple-commits',
+    'rewritten-or-non-descendant',
+    'worktree-only-change',
+    'concurrent-or-foreign-change',
+    'observation-ambiguous',
+]);
+function effectUuid(value, path) {
+    const id = requireNonEmptyString(value, path);
+    if (!EFFECT_UUID_PATTERN.test(id)) {
+        throw new TypeError(`${path} must be a canonical UUID`);
+    }
+    return id;
+}
+function effectInteger(value, path, minimum = 0) {
+    if (!Number.isSafeInteger(value) || value < minimum) {
+        throw new TypeError(`${path} must be an integer greater than or equal to ${minimum}`);
+    }
+    return value;
+}
+function jsonValuesEqual(left, right) {
+    if (Object.is(left, right))
+        return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+        return (Array.isArray(left) &&
+            Array.isArray(right) &&
+            left.length === right.length &&
+            left.every((entry, index) => jsonValuesEqual(entry, right[index])));
+    }
+    if (isRecord(left) && isRecord(right)) {
+        const leftKeys = Object.keys(left).sort();
+        const rightKeys = Object.keys(right).sort();
+        return (leftKeys.length === rightKeys.length &&
+            leftKeys.every((key, index) => key === rightKeys[index] &&
+                jsonValuesEqual(left[key], right[key])));
+    }
+    return false;
+}
+function projectionText(projection) {
+    return JSON.stringify(projection);
+}
+function projectionsEqual(left, right) {
+    return (left.projectionDigest === right.projectionDigest &&
+        projectionText(left.projection) === projectionText(right.projection));
+}
+function projectionEntriesEqual(left, right, path) {
+    return (own(right.projection, path) &&
+        JSON.stringify(left.projection[path]) ===
+            JSON.stringify(right.projection[path]));
+}
+const EFFECT_PRE_EXISTING_LISTS = ['absorbed', 'altered', 'lost'];
+const EMPTY_PRE_EXISTING = Object.freeze({
+    absorbed: Object.freeze([]),
+    altered: Object.freeze([]),
+    lost: Object.freeze([]),
+});
+/**
+ * The pre-existing accounting a physical or logical receipt records
+ * (DR-062 §3): sorted unique baseline paths, pairwise disjoint, present
+ * exactly when one list is nonempty.
+ */
+function effectPreExisting(value, path, baseline) {
+    if (!isRecord(value))
+        throw new TypeError(`${path} must be an object`);
+    rejectUnknownKeys(value, EFFECT_PRE_EXISTING_LISTS, path);
+    const claimed = new Set();
+    const lists = EFFECT_PRE_EXISTING_LISTS.map((name) => {
+        const entries = value[name];
+        if (!Array.isArray(entries)) {
+            throw new TypeError(`${path}.${name} must be an array of baseline paths`);
+        }
+        let previous;
+        for (const entry of entries) {
+            if (typeof entry !== 'string' || entry.length === 0) {
+                throw new TypeError(`${path}.${name} must hold nonempty baseline paths`);
+            }
+            const member = entry;
+            if (previous !== undefined && member <= previous) {
+                throw new TypeError(`${path}.${name} must be sorted and unique`);
+            }
+            previous = member;
+            if (!own(baseline.projection, member)) {
+                throw new TypeError(`${path}.${name} names a path outside the baseline projection`);
+            }
+            if (claimed.has(member)) {
+                throw new TypeError(`${path} lists ${JSON.stringify(member)} twice`);
+            }
+            claimed.add(member);
+        }
+        return [name, entries];
+    });
+    if (claimed.size === 0) {
+        throw new TypeError(`${path} must name at least one baseline path`);
+    }
+    return Object.fromEntries(lists);
+}
+function effectObservation(value, path) {
+    if (!isRecord(value))
+        throw new TypeError(`${path} must be an object`);
+    rejectUnknownKeys(value, ['worktree', 'gitDir', 'head', 'projection', 'projectionDigest'], path);
+    requireNonEmptyString(value.worktree, `${path}.worktree`);
+    requireNonEmptyString(value.gitDir, `${path}.gitDir`);
+    const head = requireNonEmptyString(value.head, `${path}.head`);
+    if (!EFFECT_OID_PATTERN.test(head)) {
+        throw new TypeError(`${path}.head must be a canonical Git commit OID`);
+    }
+    if (!isRecord(value.projection)) {
+        throw new TypeError(`${path}.projection must be a path-keyed object`);
+    }
+    for (const key of Object.keys(value.projection)) {
+        if (key.length === 0) {
+            throw new TypeError(`${path}.projection must not contain an empty path`);
+        }
+    }
+    const projectionDigest = requireNonEmptyString(value.projectionDigest, `${path}.projectionDigest`);
+    if (!EFFECT_DIGEST_PATTERN.test(projectionDigest)) {
+        throw new TypeError(`${path}.projectionDigest must be a canonical SHA-256 identity`);
+    }
+    const expectedDigest = `sha256:${createHash('sha256')
+        .update(JSON.stringify(value.projection))
+        .digest('hex')}`;
+    if (projectionDigest !== expectedDigest) {
+        throw new TypeError(`${path}.projectionDigest does not match its projection`);
+    }
+    return value;
+}
+function assertObservationIdentity(observation, identity, path) {
+    if (observation.worktree !== identity.worktree ||
+        observation.gitDir !== identity.gitDir) {
+        throw new TypeError(`${path} does not match its canonical worktree identity`);
+    }
+}
+function effectReceipt(value, path, expectedBaseline, expectedAfter, matchExpectedAfter = false, dispositions) {
+    if (!isRecord(value))
+        throw new TypeError(`${path} must be an object`);
+    rejectUnknownKeys(value, ['classification', 'baseline', 'after', 'commitOid', 'preExisting'], path);
+    if (typeof value.classification !== 'string' ||
+        !EFFECT_RECEIPT_CLASSIFICATIONS.has(value.classification)) {
+        throw new TypeError(`${path}.classification is not supported`);
+    }
+    const classification = value.classification;
+    const baseline = effectObservation(value.baseline, `${path}.baseline`);
+    const after = own(value, 'after')
+        ? effectObservation(value.after, `${path}.after`)
+        : undefined;
+    assertObservationIdentity(after ?? baseline, baseline, `${path}.after`);
+    if (expectedBaseline !== undefined &&
+        !jsonValuesEqual(baseline, expectedBaseline)) {
+        throw new TypeError(`${path}.baseline does not match its boundary baseline`);
+    }
+    if (matchExpectedAfter) {
+        if (expectedAfter !== undefined &&
+            (after === undefined ||
+                !jsonValuesEqual(after, expectedAfter))) {
+            throw new TypeError(`${path}.after does not match its expected observation`);
+        }
+        if (expectedAfter === undefined && after !== undefined) {
+            throw new TypeError(`${path}.after has no matching expected observation`);
+        }
+    }
+    if (classification !== 'observation-ambiguous' && after === undefined) {
+        throw new TypeError(`${path}.after is required for ${classification}`);
+    }
+    const commitOid = own(value, 'commitOid')
+        ? requireNonEmptyString(value.commitOid, `${path}.commitOid`)
+        : undefined;
+    if (classification === 'one-descendant-commit') {
+        if (commitOid === undefined ||
+            !EFFECT_OID_PATTERN.test(commitOid) ||
+            after?.head !== commitOid) {
+            throw new TypeError(`${path}.commitOid must equal the after HEAD for one-descendant-commit`);
+        }
+    }
+    else if (commitOid !== undefined) {
+        throw new TypeError(`${path}.commitOid is permitted only for one-descendant-commit`);
+    }
+    if (classification === 'unchanged' &&
+        after !== undefined &&
+        !jsonValuesEqual(baseline, after)) {
+        throw new TypeError(`${path} classified unchanged observations that differ`);
+    }
+    // DR-062 §3: a receipt records the fate of every baseline entry, so the
+    // accounting and the two observations must agree exactly.
+    if (own(value, 'preExisting') &&
+        classification !== 'one-descendant-commit' &&
+        classification !== 'worktree-only-change' &&
+        classification !== 'observation-ambiguous') {
+        throw new TypeError(`${path}.preExisting is not permitted for ${classification}`);
+    }
+    const preExisting = own(value, 'preExisting')
+        ? effectPreExisting(value.preExisting, `${path}.preExisting`, baseline)
+        : EMPTY_PRE_EXISTING;
+    const consumed = new Set([...preExisting.absorbed, ...preExisting.altered]);
+    if (classification === 'one-descendant-commit' &&
+        after !== undefined &&
+        (baseline.head === after.head ||
+            preExisting.lost.length > 0 ||
+            !Object.keys(after.projection).every((member) => own(baseline.projection, member) &&
+                projectionEntriesEqual(baseline, after, member)) ||
+            !Object.keys(baseline.projection).every((member) => own(after.projection, member) !== consumed.has(member)) ||
+            (consumed.size === 0) !== projectionsEqual(baseline, after))) {
+        throw new TypeError(`${path} one-descendant-commit must change HEAD and account for its complete baseline projection`);
+    }
+    if (classification === 'worktree-only-change' &&
+        after !== undefined &&
+        (baseline.head !== after.head ||
+            projectionsEqual(baseline, after) ||
+            preExisting.absorbed.length > 0 ||
+            preExisting.lost.length > 0 ||
+            !Object.keys(baseline.projection).every((member) => own(after.projection, member) &&
+                projectionEntriesEqual(baseline, after, member) !==
+                    consumed.has(member)))) {
+        throw new TypeError(`${path} worktree-only-change must preserve HEAD, change the projection, and account for every altered baseline entry`);
+    }
+    if ((classification === 'multiple-commits' ||
+        classification === 'rewritten-or-non-descendant') &&
+        after?.head === baseline.head) {
+        throw new TypeError(`${path} ${classification} must change HEAD`);
+    }
+    if ((classification === 'one-descendant-commit' ||
+        classification === 'multiple-commits' ||
+        classification === 'rewritten-or-non-descendant' ||
+        classification === 'worktree-only-change') &&
+        !dispositions?.includes('one-descendant-commit')) {
+        throw new TypeError(`${path}.classification is incompatible with its boundary dispositions`);
+    }
+    if (classification === 'concurrent-or-foreign-change' &&
+        (!dispositions?.every((value) => value === 'unchanged') ||
+            (after !== undefined &&
+                baseline.head === after.head &&
+                projectionsEqual(baseline, after)))) {
+        throw new TypeError(`${path}.classification is incompatible with its boundary dispositions`);
+    }
+    if (classification === 'observation-ambiguous' &&
+        after !== undefined &&
+        baseline.head === after.head &&
+        projectionsEqual(baseline, after)) {
+        throw new TypeError(`${path} observation-ambiguous requires an absent or changed after observation`);
+    }
+    return value;
+}
+/**
+ * A judge candidate is structurally invalid, rather than merely awaiting or
+ * conflicting with effect evidence. Callers use this distinction to spend at
+ * most one durable correction budget before asking another hidden judge.
+ */
+export class PlaybookSemanticCandidateStructureError extends TypeError {
+    constructor(message) {
+        super(`semantic candidate ${message}`);
+        this.name = 'PlaybookSemanticCandidateStructureError';
+    }
+}
+function semanticCandidateStructureError(message) {
+    throw new PlaybookSemanticCandidateStructureError(message);
+}
+function snapshotSemanticCandidate(value, outcomes) {
+    let detached;
+    try {
+        detached = snapshotJsonValue(value, 'semantic candidate');
+    }
+    catch (error) {
+        const detail = error instanceof Error ? `: ${error.message}` : '';
+        semanticCandidateStructureError(`must be detached plain JSON${detail}`);
+    }
+    if (!isRecord(detached)) {
+        semanticCandidateStructureError('must be an object');
+    }
+    const guard = detached.guard;
+    if (typeof guard !== 'string' || guard.length === 0) {
+        semanticCandidateStructureError('must contain a nonempty string guard');
+    }
+    if (!own(outcomes, guard)) {
+        semanticCandidateStructureError(`guard ${JSON.stringify(guard)} is not declared`);
+    }
+    const outcome = outcomes[guard];
+    const semanticFields = Object.entries(outcome.fields)
+        .filter(([, authority]) => authority === 'semantic')
+        .map(([field]) => field);
+    const expected = new Set(['guard', ...semanticFields]);
+    const actual = Object.keys(detached);
+    const missing = [...expected].filter((field) => !actual.includes(field));
+    const extra = actual.filter((field) => !expected.has(field));
+    if (missing.length > 0 || extra.length > 0) {
+        semanticCandidateStructureError('must contain exactly its guard and semantic-owned fields' +
+            (missing.length === 0 ? '' : `; missing ${missing.join(', ')}`) +
+            (extra.length === 0 ? '' : `; extra or wrongly owned ${extra.join(', ')}`));
+    }
+    for (const field of semanticFields) {
+        if (typeof detached[field] !== 'string') {
+            semanticCandidateStructureError(`field ${JSON.stringify(field)} must be a string`);
+        }
+    }
+    return {
+        candidate: detached,
+        outcome,
+    };
+}
+function retainedSemanticEvidence(candidate, finalText) {
+    return Object.freeze({
+        semanticCandidate: candidate,
+        ...(typeof finalText === 'string' ? { finalText } : {}),
+    });
+}
+// ---------------------------------------------------------------------------
+// DR-063 §1: the evidence builder for a repository-decided failure. Every list
+// is sorted, unique, and bounded; `truncated` carries the count the bound
+// omitted. Nothing but repository paths, dispositions, classifications, and
+// revision identities enters a cause.
+// ---------------------------------------------------------------------------
+const FAILURE_PATH_BOUND = 32;
+function boundedFailurePaths(lists) {
+    const bounded = {};
+    let omitted = 0;
+    for (const [member, paths] of Object.entries(lists)) {
+        bounded[member] = paths.slice(0, FAILURE_PATH_BOUND);
+        omitted += Math.max(0, paths.length - FAILURE_PATH_BOUND);
+    }
+    if (omitted > 0)
+        bounded.truncated = omitted;
+    return bounded;
+}
+function sortedUniquePaths(paths) {
+    return [...new Set(paths)].sort();
+}
+/** After-projection entries the baseline did not hold, or holds differently. */
+function newOrChangedProjectionPaths(baseline, after) {
+    return sortedUniquePaths(Object.keys(after.projection).filter((path) => !Object.hasOwn(baseline.projection, path) ||
+        !isDeepStrictEqual(baseline.projection[path], after.projection[path])));
+}
+/** Entries that differ or are missing on either side of the two projections. */
+function divergentProjectionPaths(baseline, after) {
+    return sortedUniquePaths([
+        ...Object.keys(baseline.projection),
+        ...Object.keys(after.projection),
+    ].filter((path) => !Object.hasOwn(baseline.projection, path) ||
+        !Object.hasOwn(after.projection, path) ||
+        !isDeepStrictEqual(baseline.projection[path], after.projection[path])));
+}
+/**
+ * DR-063 §1: the cause of an unresolved repository-disposition mismatch, read
+ * from the disposition the accepted arm required and the receipt the host
+ * proved. The receipt states the failure; nothing here infers one.
+ */
+function playbookRepositoryFailureCause(required, receipt) {
+    const observed = receipt.classification;
+    const baselineHead = receipt.baseline.head;
+    const after = receipt.after;
+    const common = { required, observed, baselineHead };
+    const ambiguous = () => assertPlaybookFailureCause({
+        code: 'attribution-ambiguous',
+        evidence: {
+            ...common,
+            ...(after === undefined ? {} : { afterHead: after.head }),
+        },
+    });
+    const lost = receipt.preExisting?.lost ?? [];
+    if (lost.length > 0) {
+        return assertPlaybookFailureCause({
+            code: 'pre-existing-lost',
+            evidence: {
+                ...common,
+                ...(after === undefined ? {} : { afterHead: after.head }),
+                paths: boundedFailurePaths({ lost: sortedUniquePaths(lost) }),
+            },
+        });
+    }
+    if (observed === 'observation-ambiguous' && after === undefined) {
+        return assertPlaybookFailureCause({
+            code: 'observation-unstable',
+            evidence: common,
+        });
+    }
+    if (after === undefined)
+        return ambiguous();
+    const afterHead = after.head;
+    if (observed === 'multiple-commits') {
+        return assertPlaybookFailureCause({
+            code: 'commits-more-than-one',
+            evidence: { ...common, afterHead },
+        });
+    }
+    if (observed === 'rewritten-or-non-descendant') {
+        return assertPlaybookFailureCause({
+            code: 'history-rewritten',
+            evidence: { ...common, afterHead },
+        });
+    }
+    if (observed === 'concurrent-or-foreign-change') {
+        return assertPlaybookFailureCause({
+            code: 'foreign-change',
+            evidence: {
+                ...common,
+                afterHead,
+                paths: boundedFailurePaths({
+                    changed: divergentProjectionPaths(receipt.baseline, after),
+                }),
+            },
+        });
+    }
+    const uncommitted = newOrChangedProjectionPaths(receipt.baseline, after);
+    const altered = sortedUniquePaths(receipt.preExisting?.altered ?? []);
+    if (observed === 'observation-ambiguous' &&
+        afterHead !== baselineHead &&
+        (uncommitted.length > 0 || altered.length > 0)) {
+        return assertPlaybookFailureCause({
+            code: 'commit-residual',
+            evidence: {
+                ...common,
+                afterHead,
+                ...(receipt.commitOid === undefined
+                    ? {}
+                    : { commitOid: receipt.commitOid }),
+                paths: boundedFailurePaths({ uncommitted, altered }),
+            },
+        });
+    }
+    if (required === 'one-descendant-commit' &&
+        (observed === 'unchanged' || observed === 'worktree-only-change')) {
+        return assertPlaybookFailureCause({
+            code: 'commit-missing',
+            evidence: {
+                ...common,
+                afterHead,
+                paths: boundedFailurePaths({ uncommitted }),
+            },
+        });
+    }
+    return ambiguous();
+}
+function unresolvedSemanticEvidence(reason, evidence, cause = assertPlaybookFailureCause({
+    code: 'runtime-defect',
+    evidence: { reason },
+})) {
+    return Object.freeze({ status: 'unresolved', reason, cause, evidence });
+}
+/**
+ * Reconcile one exact semantic candidate with host-owned effect evidence.
+ * Presentation prose remains opaque: it is retained verbatim and only its
+ * trimmed value is copied into linker-declared presentation fields. No
+ * repository fact is inferred from that prose or from the semantic candidate.
+ */
+export function reconcilePlaybookSemanticEvidence(input) {
+    let report;
+    try {
+        report = snapshotJsonValue(input.semanticCandidate, 'semantic candidate');
+    }
+    catch (error) {
+        semanticCandidateStructureError(`must be detached plain JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (isRecord(report) && Object.keys(report).length === 1 &&
+        typeof report.blocked === 'string' && report.blocked.trim().length > 0) {
+        return unresolvedSemanticEvidence('no-matching-outcome', retainedSemanticEvidence(report, input.finalText), assertPlaybookFailureCause({
+            code: 'runtime-defect',
+            evidence: { reason: `No declared outcome matches: ${report.blocked}` },
+        }));
+    }
+    const { candidate, outcome } = snapshotSemanticCandidate(input.semanticCandidate, input.outcomes);
+    const evidence = retainedSemanticEvidence(candidate, input.finalText);
+    const finalText = typeof input.finalText === 'string' ? input.finalText.trim() : undefined;
+    if (finalText === undefined || finalText.length === 0) {
+        return unresolvedSemanticEvidence('missing-presentation-evidence', evidence);
+    }
+    if (input.receipt === undefined) {
+        return unresolvedSemanticEvidence('missing-repository-receipt', evidence);
+    }
+    let receipt;
+    try {
+        const detachedReceipt = snapshotJsonValue(input.receipt, 'semantic reconciliation receipt');
+        receipt = effectReceipt(detachedReceipt, 'semantic reconciliation receipt', undefined, undefined, false, Object.values(input.outcomes).map(({ repositoryDisposition }) => repositoryDisposition));
+    }
+    catch {
+        return unresolvedSemanticEvidence('invalid-repository-receipt', evidence);
+    }
+    const disposition = outcome.repositoryDisposition;
+    const dispositionMatches = (disposition === 'unchanged' && receipt.classification === 'unchanged') ||
+        (disposition === 'one-descendant-commit' &&
+            receipt.classification === 'one-descendant-commit') ||
+        (disposition === 'deferred' &&
+            candidate.guard === 'needsBossReply' &&
+            Object.entries(input.outcomes).some(([guard, declared]) => guard !== candidate.guard &&
+                declared.repositoryDisposition === 'one-descendant-commit') &&
+            (receipt.classification === 'unchanged' ||
+                receipt.classification === 'worktree-only-change') &&
+            receipt.after !== undefined &&
+            receipt.after.head === receipt.baseline.head);
+    if (!dispositionMatches) {
+        return unresolvedSemanticEvidence('repository-disposition-mismatch', evidence, playbookRepositoryFailureCause(disposition, receipt));
+    }
+    let runtimeFields = Object.freeze({});
+    if (input.runtimeFields !== undefined) {
+        try {
+            const detached = snapshotJsonValue(input.runtimeFields, 'semantic reconciliation runtime fields');
+            if (!isRecord(detached)) {
+                return unresolvedSemanticEvidence('inconsistent-runtime-evidence', evidence);
+            }
+            runtimeFields = detached;
+        }
+        catch {
+            return unresolvedSemanticEvidence('inconsistent-runtime-evidence', evidence);
+        }
+    }
+    const declaredRuntimeFields = Object.entries(outcome.fields)
+        .filter(([, authority]) => authority === 'runtime')
+        .map(([field]) => field);
+    if (Object.keys(runtimeFields).some((field) => !declaredRuntimeFields.includes(field))) {
+        return unresolvedSemanticEvidence('inconsistent-runtime-evidence', evidence);
+    }
+    const output = {};
+    defineEnumerableDataProperty(output, 'guard', candidate.guard);
+    for (const [field, authority] of Object.entries(outcome.fields)) {
+        let value;
+        if (authority === 'semantic') {
+            value = candidate[field];
+        }
+        else if (authority === 'presentation') {
+            value = finalText;
+        }
+        else if (authority === 'effect') {
+            // DR-045: effect injection selects by the accepted arm's declared
+            // repository disposition, never by the field's name. A
+            // one-descendant-commit arm's effect fields carry the qualifying
+            // receipt's exact new-descendant commit OID; an unchanged arm's effect
+            // fields carry the matching unchanged receipt's observed HEAD OID. A
+            // deferred arm declares no effect field, and any shape the validated
+            // receipt cannot prove fails closed as unresolved.
+            value =
+                disposition === 'one-descendant-commit'
+                    ? receipt.commitOid
+                    : disposition === 'unchanged'
+                        ? receipt.after?.head
+                        : undefined;
+            if (value === undefined) {
+                return unresolvedSemanticEvidence('missing-effect-evidence', evidence);
+            }
+        }
+        else {
+            const runtimeValue = runtimeFields[field];
+            if (runtimeValue === undefined) {
+                return unresolvedSemanticEvidence('missing-runtime-evidence', evidence);
+            }
+            if (typeof runtimeValue !== 'string') {
+                return unresolvedSemanticEvidence('inconsistent-runtime-evidence', evidence);
+            }
+            value = runtimeValue;
+        }
+        defineEnumerableDataProperty(output, field, value);
+    }
+    const detachedOutput = snapshotJsonValue(output, 'reconciled semantic output');
+    return Object.freeze({
+        status: disposition === 'deferred' ? 'deferred' : 'resolved',
+        output: detachedOutput,
+        evidence,
+    });
+}
+function effectPendingQuestion(value, path) {
+    if (!isRecord(value))
+        throw new TypeError(`${path} must be an object`);
+    rejectUnknownKeys(value, ['questionId', 'asker', 'question', 'sourceItem'], path);
+    const questionId = requireNonEmptyString(value.questionId, `${path}.questionId`);
+    const question = requireNonEmptyString(value.question, `${path}.question`);
+    if (!isRecord(value.asker)) {
+        throw new TypeError(`${path}.asker must be an object`);
+    }
+    let asker;
+    if (value.asker.kind === 'captain') {
+        rejectUnknownKeys(value.asker, ['kind'], `${path}.asker`);
+        asker = { kind: 'captain' };
+    }
+    else if (value.asker.kind === 'role') {
+        rejectUnknownKeys(value.asker, ['kind', 'roleId'], `${path}.asker`);
+        asker = {
+            kind: 'role',
+            roleId: requireNonEmptyString(value.asker.roleId, `${path}.asker.roleId`),
+        };
+    }
+    else {
+        throw new TypeError(`${path}.asker.kind must be "captain" or "role"`);
+    }
+    return Object.freeze({
+        questionId,
+        asker: Object.freeze(asker),
+        question,
+        ...(own(value, 'sourceItem')
+            ? {
+                sourceItem: requireNonEmptyString(value.sourceItem, `${path}.sourceItem`),
+            }
+            : {}),
+    });
+}
+function effectBoundary(value, index) {
+    const path = `effect ledger boundaries[${index}]`;
+    if (!isRecord(value))
+        throw new TypeError(`${path} must be an object`);
+    rejectUnknownKeys(value, [
+        'sequence',
+        'boundaryId',
+        'attemptId',
+        'attemptNumber',
+        'playbookId',
+        'runtimeSessionId',
+        'turnId',
+        'callId',
+        'roleId',
+        'sourceStateId',
+        'sourceOutcomeSchema',
+        'dispositions',
+        'canonicalWorktree',
+        'baseline',
+        'after',
+        'physicalReceipt',
+        'restored',
+        'finalText',
+        'semanticCandidate',
+        'initialSemanticCandidate',
+        'correctionBudget',
+        'cohortId',
+        'logicalOperationId',
+    ], path);
+    const sequence = effectInteger(value.sequence, `${path}.sequence`, 1);
+    if (sequence !== index + 1) {
+        throw new TypeError('effect ledger boundary sequence must be contiguous from one');
+    }
+    effectUuid(value.boundaryId, `${path}.boundaryId`);
+    effectUuid(value.attemptId, `${path}.attemptId`);
+    effectInteger(value.attemptNumber, `${path}.attemptNumber`, 1);
+    requireNonEmptyString(value.playbookId, `${path}.playbookId`);
+    effectUuid(value.runtimeSessionId, `${path}.runtimeSessionId`);
+    effectInteger(value.turnId, `${path}.turnId`, 1);
+    requireNonEmptyString(value.callId, `${path}.callId`);
+    requireNonEmptyString(value.roleId, `${path}.roleId`);
+    requireNonEmptyString(value.sourceStateId, `${path}.sourceStateId`);
+    if (!own(value, 'sourceOutcomeSchema')) {
+        throw new TypeError(`${path}.sourceOutcomeSchema is required`);
+    }
+    if (!Array.isArray(value.dispositions) || value.dispositions.length === 0) {
+        throw new TypeError(`${path}.dispositions must be a nonempty array`);
+    }
+    for (const [dispositionIndex, disposition] of value.dispositions.entries()) {
+        if (typeof disposition !== 'string' || !EFFECT_DISPOSITIONS.has(disposition)) {
+            throw new TypeError(`${path}.dispositions[${dispositionIndex}] is not supported`);
+        }
+    }
+    if (new Set(value.dispositions).size !== value.dispositions.length) {
+        throw new TypeError(`${path}.dispositions must not contain duplicates`);
+    }
+    if (!isRecord(value.canonicalWorktree)) {
+        throw new TypeError(`${path}.canonicalWorktree must be an object`);
+    }
+    rejectUnknownKeys(value.canonicalWorktree, ['worktree', 'gitDir'], `${path}.canonicalWorktree`);
+    const canonicalWorktree = {
+        worktree: requireNonEmptyString(value.canonicalWorktree.worktree, `${path}.canonicalWorktree.worktree`),
+        gitDir: requireNonEmptyString(value.canonicalWorktree.gitDir, `${path}.canonicalWorktree.gitDir`),
+    };
+    const baseline = effectObservation(value.baseline, `${path}.baseline`);
+    assertObservationIdentity(baseline, canonicalWorktree, `${path}.baseline`);
+    const after = own(value, 'after')
+        ? effectObservation(value.after, `${path}.after`)
+        : undefined;
+    if (after !== undefined) {
+        assertObservationIdentity(after, canonicalWorktree, `${path}.after`);
+    }
+    if (after !== undefined && !own(value, 'physicalReceipt')) {
+        throw new TypeError(`${path}.after requires an atomic physicalReceipt`);
+    }
+    if (own(value, 'physicalReceipt')) {
+        effectReceipt(value.physicalReceipt, `${path}.physicalReceipt`, baseline, after, true, value.dispositions);
+    }
+    if (own(value, 'finalText') && typeof value.finalText !== 'string') {
+        throw new TypeError(`${path}.finalText must be a string`);
+    }
+    if (own(value, 'restored')) {
+        const restored = effectObservation(value.restored, `${path}.restored`);
+        if (!jsonValuesEqual(restored, baseline) ||
+            !isRecord(value.physicalReceipt) || after?.head !== baseline.head ||
+            value.dispositions.some((item) => item !== 'unchanged') ||
+            value.cohortId !== undefined || value.logicalOperationId !== undefined) {
+            throw new TypeError(`${path}.restored requires a standalone read-only call restored exactly without commit movement`);
+        }
+    }
+    if (own(value, 'initialSemanticCandidate')) {
+        if (!own(value, 'semanticCandidate') ||
+            !isRecord(value.correctionBudget) ||
+            value.correctionBudget.spent !== true ||
+            jsonValuesEqual(value.initialSemanticCandidate, value.semanticCandidate)) {
+            throw new TypeError(`${path}.initialSemanticCandidate requires a spent budget and a distinct current semanticCandidate`);
+        }
+    }
+    if (own(value, 'cohortId')) {
+        effectUuid(value.cohortId, `${path}.cohortId`);
+    }
+    if (!isRecord(value.correctionBudget)) {
+        throw new TypeError(`${path}.correctionBudget must be an object`);
+    }
+    rejectUnknownKeys(value.correctionBudget, ['limit', 'spent'], `${path}.correctionBudget`);
+    if (value.correctionBudget.limit !== 1 ||
+        typeof value.correctionBudget.spent !== 'boolean') {
+        throw new TypeError(`${path}.correctionBudget must contain exactly limit 1 and a boolean spent`);
+    }
+    if (own(value, 'logicalOperationId')) {
+        effectUuid(value.logicalOperationId, `${path}.logicalOperationId`);
+    }
+    return value;
+}
+function effectLogicalOperation(value, index, boundaryById) {
+    const path = `effect ledger logicalOperations[${index}]`;
+    if (!isRecord(value))
+        throw new TypeError(`${path} must be an object`);
+    rejectUnknownKeys(value, [
+        'sequence',
+        'operationId',
+        'playbookId',
+        'runtimeSessionId',
+        'boundaryIds',
+        'originalBaseline',
+        'checkpoint',
+        'pendingQuestion',
+        'playerContinuation',
+        'checkpointRestorationEligible',
+        'logicalReceipt',
+    ], path);
+    const sequence = effectInteger(value.sequence, `${path}.sequence`, 1);
+    if (sequence !== index + 1) {
+        throw new TypeError('effect ledger logical-operation sequence must be contiguous from one');
+    }
+    const operationId = effectUuid(value.operationId, `${path}.operationId`);
+    const playbookId = requireNonEmptyString(value.playbookId, `${path}.playbookId`);
+    const runtimeSessionId = effectUuid(value.runtimeSessionId, `${path}.runtimeSessionId`);
+    if (!Array.isArray(value.boundaryIds) || value.boundaryIds.length === 0) {
+        throw new TypeError(`${path}.boundaryIds must be a nonempty array`);
+    }
+    const boundaries = value.boundaryIds.map((boundaryId, boundaryIndex) => {
+        const id = effectUuid(boundaryId, `${path}.boundaryIds[${boundaryIndex}]`);
+        const boundary = boundaryById.get(id);
+        if (boundary === undefined) {
+            throw new TypeError(`${path}.boundaryIds[${boundaryIndex}] is dangling`);
+        }
+        if (boundary.playbookId !== playbookId ||
+            boundary.runtimeSessionId !== runtimeSessionId ||
+            boundary.logicalOperationId !== operationId) {
+            throw new TypeError(`${path}.boundaryIds[${boundaryIndex}] does not belong to this logical operation`);
+        }
+        return boundary;
+    });
+    if (new Set(value.boundaryIds).size !== value.boundaryIds.length) {
+        throw new TypeError(`${path}.boundaryIds must not contain duplicates`);
+    }
+    if (boundaries.some((boundary, boundaryIndex) => boundaryIndex > 0 &&
+        boundaries[boundaryIndex - 1].sequence >= boundary.sequence)) {
+        throw new TypeError(`${path}.boundaryIds must follow physical boundary order`);
+    }
+    const originalBaseline = effectObservation(value.originalBaseline, `${path}.originalBaseline`);
+    if (!jsonValuesEqual(originalBaseline, boundaries[0].baseline)) {
+        throw new TypeError(`${path}.originalBaseline must equal its first boundary baseline`);
+    }
+    for (const [boundaryIndex, boundary] of boundaries.entries()) {
+        assertObservationIdentity(boundary.baseline, originalBaseline, `${path}.boundaryIds[${boundaryIndex}] baseline`);
+        if (boundaryIndex === 0)
+            continue;
+        const previous = boundaries[boundaryIndex - 1];
+        if (previous.physicalReceipt === undefined ||
+            previous.after === undefined ||
+            !jsonValuesEqual(boundary.baseline, previous.after)) {
+            throw new TypeError(`${path}.boundaryIds must form one completed checkpoint chain`);
+        }
+    }
+    const checkpoint = own(value, 'checkpoint')
+        ? effectObservation(value.checkpoint, `${path}.checkpoint`)
+        : undefined;
+    const latestAfter = boundaries.at(-1).after;
+    if (checkpoint !== undefined) {
+        assertObservationIdentity(checkpoint, originalBaseline, `${path}.checkpoint`);
+        if (latestAfter === undefined ||
+            !jsonValuesEqual(checkpoint, latestAfter)) {
+            throw new TypeError(`${path}.checkpoint must equal its latest boundary after`);
+        }
+    }
+    const pendingQuestion = own(value, 'pendingQuestion')
+        ? effectPendingQuestion(value.pendingQuestion, `${path}.pendingQuestion`)
+        : undefined;
+    const bindingCount = [
+        own(value, 'checkpoint'),
+        own(value, 'pendingQuestion'),
+        own(value, 'playerContinuation'),
+    ].filter(Boolean).length;
+    if (bindingCount !== 0 && bindingCount !== 3) {
+        throw new TypeError(`${path} checkpoint, pendingQuestion, and playerContinuation must be all present or all absent`);
+    }
+    if (typeof value.checkpointRestorationEligible !== 'boolean') {
+        throw new TypeError(`${path}.checkpointRestorationEligible must be boolean`);
+    }
+    if (value.checkpointRestorationEligible &&
+        (checkpoint === undefined ||
+            pendingQuestion === undefined ||
+            !own(value, 'playerContinuation'))) {
+        throw new TypeError(`${path}.checkpointRestorationEligible requires checkpoint, pendingQuestion, and playerContinuation`);
+    }
+    if (own(value, 'logicalReceipt')) {
+        if (boundaries.some((boundary) => boundary.physicalReceipt === undefined)) {
+            throw new TypeError(`${path}.logicalReceipt requires every physical boundary receipt`);
+        }
+        effectReceipt(value.logicalReceipt, `${path}.logicalReceipt`, originalBaseline, latestAfter, true, boundaries.at(-1).dispositions);
+    }
+    return value;
+}
+/** Return the canonical empty host-owned effect-ledger mirror. */
+export function emptyPlaybookEffectLedger() {
+    return Object.freeze({
+        schemaVersion: 1,
+        revision: 0,
+        boundaries: Object.freeze([]),
+        logicalOperations: Object.freeze([]),
+    });
+}
+/** Validate, detach, and recursively freeze one effect-ledger mirror. */
+export function assertPlaybookEffectLedger(value, path = 'effect ledger') {
+    const detached = snapshotJsonValue(value, path);
+    if (!isRecord(detached))
+        throw new TypeError(`${path} must be an object`);
+    rejectUnknownKeys(detached, ['schemaVersion', 'revision', 'boundaries', 'logicalOperations'], path);
+    if (detached.schemaVersion !== 1) {
+        throw new TypeError(`${path}.schemaVersion must equal 1`);
+    }
+    const revision = effectInteger(detached.revision, `${path}.revision`);
+    if (!Array.isArray(detached.boundaries)) {
+        throw new TypeError(`${path}.boundaries must be an array`);
+    }
+    if (!Array.isArray(detached.logicalOperations)) {
+        throw new TypeError(`${path}.logicalOperations must be an array`);
+    }
+    const isEmpty = detached.boundaries.length === 0 && detached.logicalOperations.length === 0;
+    if ((revision === 0) !== isEmpty) {
+        throw new TypeError(`${path}.revision must be zero if and only if both ordered ledgers are empty`);
+    }
+    const boundaries = detached.boundaries.map(effectBoundary);
+    const boundaryById = new Map(boundaries.map((boundary) => [boundary.boundaryId, boundary]));
+    if (boundaryById.size !== boundaries.length) {
+        throw new TypeError(`${path}.boundaries must not reuse a boundaryId`);
+    }
+    const cohorts = new Map();
+    for (const boundary of boundaries) {
+        if (boundary.cohortId === undefined)
+            continue;
+        const members = cohorts.get(boundary.cohortId) ?? [];
+        members.push(boundary);
+        cohorts.set(boundary.cohortId, members);
+    }
+    for (const [cohortId, members] of cohorts) {
+        const first = members[0];
+        const commonKeys = [
+            'attemptId',
+            'attemptNumber',
+            'playbookId',
+            'runtimeSessionId',
+            'turnId',
+            'canonicalWorktree',
+            'baseline',
+        ];
+        if (members.length < 2 ||
+            members.some((boundary, index) => boundary.sequence !== first.sequence + index ||
+                !boundary.dispositions.every((disposition) => disposition === 'unchanged') ||
+                !commonKeys.every((key) => jsonValuesEqual(boundary[key], first[key]))) ||
+            new Set(members.map((boundary) => boundary.roleId)).size !==
+                members.length ||
+            new Set(members.map((boundary) => boundary.physicalReceipt === undefined ? 'started' : 'complete')).size !== 1 ||
+            (first.physicalReceipt !== undefined &&
+                members.some((boundary) => !jsonValuesEqual(boundary.physicalReceipt, first.physicalReceipt) ||
+                    !jsonValuesEqual(boundary.after, first.after)))) {
+            throw new TypeError(`effect ledger cohort ${JSON.stringify(cohortId)} is not one contiguous all-unchanged boundary group`);
+        }
+    }
+    const logicalOperations = detached.logicalOperations.map((operation, index) => effectLogicalOperation(operation, index, boundaryById));
+    const operationById = new Map(logicalOperations.map((operation) => [operation.operationId, operation]));
+    if (operationById.size !== logicalOperations.length) {
+        throw new TypeError(`${path}.logicalOperations must not reuse an operationId`);
+    }
+    for (const [index, operation] of logicalOperations.entries()) {
+        const firstBoundary = boundaryById.get(operation.boundaryIds[0]);
+        if (index > 0 &&
+            boundaryById.get(logicalOperations[index - 1].boundaryIds[0])
+                .sequence >= firstBoundary.sequence) {
+            throw new TypeError(`${path}.logicalOperations must follow their first physical boundary order`);
+        }
+    }
+    for (const boundary of boundaries) {
+        if (boundary.logicalOperationId !== undefined &&
+            !operationById.has(boundary.logicalOperationId)) {
+            throw new TypeError(`${path}.boundaries[${boundary.sequence - 1}].logicalOperationId is dangling`);
+        }
+        if (boundary.logicalOperationId !== undefined &&
+            !operationById
+                .get(boundary.logicalOperationId)
+                .boundaryIds.includes(boundary.boundaryId)) {
+            throw new TypeError(`${path}.boundaries[${boundary.sequence - 1}].logicalOperationId has no reciprocal operation reference`);
+        }
+    }
+    return detached;
+}
+function optionalEvidenceExtends(baseline, current, keys) {
+    return keys.every((key) => !own(baseline, key) ||
+        (own(current, key) &&
+            jsonValuesEqual(baseline[key], current[key])));
+}
+/** Whether current preserves every durable fact in baseline and only extends it. */
+export function isPlaybookEffectLedgerMonotonicExtension(baselineValue, currentValue) {
+    let baseline;
+    let current;
+    try {
+        baseline = assertPlaybookEffectLedger(baselineValue, 'baseline effect ledger');
+        current = assertPlaybookEffectLedger(currentValue, 'current effect ledger');
+    }
+    catch {
+        return false;
+    }
+    if (current.revision < baseline.revision ||
+        current.boundaries.length < baseline.boundaries.length ||
+        current.logicalOperations.length < baseline.logicalOperations.length) {
+        return false;
+    }
+    if (current.revision === baseline.revision &&
+        !jsonValuesEqual(baseline, current)) {
+        return false;
+    }
+    const boundaryStableKeys = [
+        'sequence',
+        'boundaryId',
+        'attemptId',
+        'attemptNumber',
+        'playbookId',
+        'runtimeSessionId',
+        'turnId',
+        'callId',
+        'roleId',
+        'sourceStateId',
+        'sourceOutcomeSchema',
+        'dispositions',
+        'canonicalWorktree',
+        'baseline',
+        'cohortId',
+    ];
+    const boundaryEvidenceKeys = [
+        'after',
+        'physicalReceipt',
+        'restored',
+        'finalText',
+        'initialSemanticCandidate',
+    ];
+    for (const [index, prior] of baseline.boundaries.entries()) {
+        const next = current.boundaries[index];
+        if (!boundaryStableKeys.every((key) => jsonValuesEqual(prior[key], next[key])) ||
+            !optionalEvidenceExtends(prior, next, boundaryEvidenceKeys) ||
+            !semanticCandidateExtends(prior, next) ||
+            (prior.logicalOperationId !== undefined &&
+                prior.logicalOperationId !== next.logicalOperationId) ||
+            (prior.correctionBudget.spent && !next.correctionBudget.spent)) {
+            return false;
+        }
+    }
+    const operationStableKeys = [
+        'sequence',
+        'operationId',
+        'playbookId',
+        'runtimeSessionId',
+        'originalBaseline',
+    ];
+    // The current deferred binding is replaceable across authored repeated
+    // questions; only a completed logical receipt becomes immutable evidence.
+    const operationEvidenceKeys = ['logicalReceipt'];
+    for (const [index, prior] of baseline.logicalOperations.entries()) {
+        const next = current.logicalOperations[index];
+        if (!operationStableKeys.every((key) => jsonValuesEqual(prior[key], next[key])) ||
+            next.boundaryIds.length < prior.boundaryIds.length ||
+            !prior.boundaryIds.every((boundaryId, boundaryIndex) => boundaryId === next.boundaryIds[boundaryIndex]) ||
+            !optionalEvidenceExtends(prior, next, operationEvidenceKeys)) {
+            return false;
+        }
+    }
+    return true;
+}
+function semanticCandidateExtends(prior, next) {
+    if (prior.semanticCandidate === undefined) {
+        return (!prior.correctionBudget.spent ||
+            next.initialSemanticCandidate === undefined);
+    }
+    if (next.semanticCandidate !== undefined &&
+        jsonValuesEqual(prior.semanticCandidate, next.semanticCandidate)) {
+        return (prior.initialSemanticCandidate !== undefined ||
+            next.initialSemanticCandidate === undefined);
+    }
+    return (prior.initialSemanticCandidate === undefined &&
+        next.correctionBudget.spent &&
+        next.initialSemanticCandidate !== undefined &&
+        jsonValuesEqual(prior.semanticCandidate, next.initialSemanticCandidate));
+}
 function snapshotSuspendedCall(value, path = 'runtime snapshot suspendedCall') {
     const captured = snapshotJsonValue(value, path);
     if (!isRecord(captured)) {
         throw new TypeError(`${path} must be an object`);
     }
-    rejectUnknownKeys(captured, ['callId', 'stateId', 'playbookId', 'text', 'childSessionId', 'turnId'], path);
+    rejectUnknownKeys(captured, [
+        'callId',
+        'stateId',
+        'playbookId',
+        'text',
+        'childSessionId',
+        'turnId',
+        'effectBoundaryPrefixSequence',
+    ], path);
     const call = {
         callId: requireNonEmptyString(captured.callId, `${path}.callId`),
         stateId: requireNonEmptyString(captured.stateId, `${path}.stateId`),
@@ -583,12 +1682,18 @@ function snapshotSuspendedCall(value, path = 'runtime snapshot suspendedCall') {
         }
         call.turnId = captured.turnId;
     }
+    if (own(captured, 'effectBoundaryPrefixSequence')) {
+        call.effectBoundaryPrefixSequence =
+            captured.effectBoundaryPrefixSequence === null
+                ? null
+                : effectInteger(captured.effectBoundaryPrefixSequence, `${path}.effectBoundaryPrefixSequence`);
+    }
     return Object.freeze(call);
 }
-// DR-014 §1 / DR-031 §5 / DR-032: validate and detach a host-supplied
-// schema-3 runtime snapshot before restore touches any state. A suspended
+// DR-014 §1 / DR-031 §5 / DR-032 / DR-040: validate and detach a host-supplied
+// schema-4 runtime snapshot before restore touches any state. A suspended
 // call is rejected unless the restore path explicitly promises to seed and
-// claim it; older schemas are rejected rather than guessing role identity.
+// claim it; older schemas are rejected by this public restore boundary.
 export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options = {}) {
     const snapshot = snapshotJsonValue(value, 'runtime snapshot');
     if (!isRecord(snapshot)) {
@@ -604,8 +1709,8 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         throw new TypeError('runtime snapshot validation options.allowSuspendedCall must be boolean');
     }
     const allowSuspendedCall = capturedOptions.allowSuspendedCall ?? false;
-    if (snapshot.schemaVersion !== 3) {
-        throw new TypeError(`runtime snapshot schemaVersion ${String(snapshot.schemaVersion)} is not supported (expected 3)`);
+    if (snapshot.schemaVersion !== 4) {
+        throw new TypeError(`runtime snapshot schemaVersion ${String(snapshot.schemaVersion)} is not supported (expected 4)`);
     }
     rejectUnknownKeys(snapshot, [
         'schemaVersion',
@@ -615,6 +1720,11 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         'sequences',
         'state',
         'pendingBossQuestions',
+        'effectLedger',
+        'retainedEffectSourceSessionId',
+        'retainedEffectReconciliation',
+        'failedEffectAttempt',
+        'recoveryCheckpoint',
         'suspendedCall',
     ], 'runtime snapshot');
     let suspendedCall;
@@ -719,6 +1829,87 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         };
         return Object.freeze(question);
     });
+    const effectLedger = assertPlaybookEffectLedger(snapshot.effectLedger, 'runtime snapshot effectLedger');
+    const retainedEffectSourceSessionId = own(snapshot, 'retainedEffectSourceSessionId')
+        ? effectUuid(snapshot.retainedEffectSourceSessionId, 'runtime snapshot retainedEffectSourceSessionId')
+        : undefined;
+    let retainedEffectReconciliation;
+    if (own(snapshot, 'retainedEffectReconciliation')) {
+        if (!isRecord(snapshot.retainedEffectReconciliation)) {
+            throw new TypeError('runtime snapshot retainedEffectReconciliation must be an object');
+        }
+        rejectUnknownKeys(snapshot.retainedEffectReconciliation, ['sourceSessionId', 'checkpoint'], 'runtime snapshot retainedEffectReconciliation');
+        const sourceSessionId = effectUuid(snapshot.retainedEffectReconciliation.sourceSessionId, 'runtime snapshot retainedEffectReconciliation.sourceSessionId');
+        const checkpoint = assertPlaybookEffectLedger(snapshot.retainedEffectReconciliation.checkpoint, 'runtime snapshot retainedEffectReconciliation.checkpoint');
+        if (checkpoint.boundaries.some(({ physicalReceipt }) => physicalReceipt === undefined)) {
+            throw new TypeError('runtime snapshot retainedEffectReconciliation.checkpoint contains an incomplete physical boundary');
+        }
+        if (!isPlaybookEffectLedgerMonotonicExtension(checkpoint, effectLedger)) {
+            throw new TypeError('runtime snapshot retainedEffectReconciliation.checkpoint is not a monotonic prefix of effectLedger');
+        }
+        if (retainedEffectSourceSessionId === undefined ||
+            retainedEffectSourceSessionId !== sourceSessionId) {
+            throw new TypeError('runtime snapshot retainedEffectReconciliation.sourceSessionId must equal retainedEffectSourceSessionId');
+        }
+        retainedEffectReconciliation = Object.freeze({
+            sourceSessionId,
+            checkpoint,
+        });
+    }
+    if (typeof suspendedCall?.effectBoundaryPrefixSequence === 'number' &&
+        suspendedCall.effectBoundaryPrefixSequence >
+            (effectLedger.boundaries.at(-1)?.sequence ?? 0)) {
+        throw new TypeError('runtime snapshot suspendedCall.effectBoundaryPrefixSequence exceeds the effect ledger');
+    }
+    let failedEffectAttempt;
+    if (own(snapshot, 'failedEffectAttempt')) {
+        if (state.stateId !== 'failed') {
+            throw new TypeError('runtime snapshot failedEffectAttempt requires the failed state');
+        }
+        if (!isRecord(snapshot.failedEffectAttempt)) {
+            throw new TypeError('runtime snapshot failedEffectAttempt must be an object');
+        }
+        rejectUnknownKeys(snapshot.failedEffectAttempt, ['boundaryPrefix', 'attemptId'], 'runtime snapshot failedEffectAttempt');
+        const boundaryPrefix = effectInteger(snapshot.failedEffectAttempt.boundaryPrefix, 'runtime snapshot failedEffectAttempt.boundaryPrefix');
+        const lastBoundarySequence = effectLedger.boundaries.at(-1)?.sequence ?? 0;
+        if (boundaryPrefix > lastBoundarySequence) {
+            throw new TypeError('runtime snapshot failedEffectAttempt.boundaryPrefix exceeds the effect ledger');
+        }
+        const attemptId = snapshot.failedEffectAttempt.attemptId === null
+            ? null
+            : effectUuid(snapshot.failedEffectAttempt.attemptId, 'runtime snapshot failedEffectAttempt.attemptId');
+        const causalBoundaries = effectLedger.boundaries.filter(({ sequence }) => sequence > boundaryPrefix);
+        if (attemptId === null && causalBoundaries.length !== 0) {
+            throw new TypeError('runtime snapshot failedEffectAttempt null attemptId requires an empty causal suffix');
+        }
+        if (attemptId !== null &&
+            (causalBoundaries.length === 0 ||
+                causalBoundaries.some(({ attemptId: boundaryAttemptId }) => boundaryAttemptId !== attemptId))) {
+            throw new TypeError('runtime snapshot failedEffectAttempt does not match its causal ledger suffix');
+        }
+        failedEffectAttempt = Object.freeze({ boundaryPrefix, attemptId });
+    }
+    let recoveryCheckpoint;
+    if (own(snapshot, 'recoveryCheckpoint')) {
+        const checkpoint = snapshot.recoveryCheckpoint;
+        if ((state.stateId !== 'failed' && pendingBossQuestions.length === 0) || !isRecord(checkpoint)) {
+            throw new TypeError('runtime recoveryCheckpoint requires an interrupted state and an object');
+        }
+        rejectUnknownKeys(checkpoint, ['stateId', 'prompt', 'machine', 'boundaryPrefix', 'result', 'id', 'delivered'], 'runtime recoveryCheckpoint');
+        const stateId = requireNonEmptyString(checkpoint.stateId, 'recoveryCheckpoint.stateId');
+        const prompt = requireNonEmptyString(checkpoint.prompt, 'recoveryCheckpoint.prompt');
+        const boundaryPrefix = checkpoint.boundaryPrefix;
+        if (!Number.isSafeInteger(boundaryPrefix) || typeof boundaryPrefix !== 'number' ||
+            boundaryPrefix < 0 || boundaryPrefix > effectLedger.boundaries.length ||
+            !isRecord(checkpoint.machine) || checkpoint.machine.status !== 'active' ||
+            checkpoint.machine.value !== stateId) {
+            throw new TypeError('runtime recoveryCheckpoint has an invalid machine or boundary prefix');
+        }
+        if (own(checkpoint, 'delivered') && checkpoint.delivered !== true) {
+            throw new TypeError('recoveryCheckpoint.delivered must be true');
+        }
+        recoveryCheckpoint = Object.freeze({ stateId, prompt, boundaryPrefix, machine: snapshotJsonValue(checkpoint.machine), ...(own(checkpoint, 'id') ? { id: effectUuid(checkpoint.id, 'recoveryCheckpoint.id') } : {}), ...(own(checkpoint, 'result') ? { result: snapshotJsonValue(checkpoint.result) } : {}), ...(checkpoint.delivered === true ? { delivered: true } : {}) });
+    }
     const fields = {
         playbookId,
         machine,
@@ -726,9 +1917,20 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
         sequences: Object.freeze(sequences),
         state,
         pendingBossQuestions: Object.freeze(pendingBossQuestions),
+        effectLedger,
+        ...(retainedEffectSourceSessionId === undefined
+            ? {}
+            : { retainedEffectSourceSessionId }),
+        ...(retainedEffectReconciliation === undefined
+            ? {}
+            : { retainedEffectReconciliation }),
+        ...(failedEffectAttempt === undefined
+            ? {}
+            : { failedEffectAttempt }),
+        ...(recoveryCheckpoint === undefined ? {} : { recoveryCheckpoint }),
     };
     return Object.freeze({
-        schemaVersion: 3,
+        schemaVersion: 4,
         ...fields,
         ...(suspendedCall === undefined ? {} : { suspendedCall }),
     });
@@ -736,13 +1938,30 @@ export function assertPlaybookRuntimeSnapshot(value, expectedPlaybookId, options
 export class NestedPlaybookCallError extends Error {
     result;
     constructor(result) {
-        const fallback = `Child playbook ${result.playbookId} ${result.status}`;
+        // DR-048: a completed child that reached an authored failure terminal is
+        // rejected through the same error path as an abort or an error, so its
+        // message names that final state rather than reporting `ok`.
+        const fallback = result.status === 'ok'
+            ? `Child playbook ${result.playbookId} reached failure terminal ` +
+                `${result.terminal?.stateId ?? 'unknown'}`
+            : `Child playbook ${result.playbookId} ${result.status}`;
         const normalized = result.status === 'ok' ? undefined : result.error;
         super(normalized?.message ?? fallback);
         this.name = normalized?.name ?? 'NestedPlaybookCallError';
         if (normalized?.stack)
             this.stack = normalized.stack;
         this.result = result;
+        // DR-063 §2: the child's failure reaching its parent is `child-failed`,
+        // carrying the child's own cause when its normalized error published one.
+        attachPlaybookFailureCause(this, {
+            code: 'child-failed',
+            evidence: {
+                playbookId: result.playbookId,
+                ...(normalized?.cause === undefined
+                    ? {}
+                    : { cause: normalized.cause }),
+            },
+        });
     }
 }
 function validateState(state, path) {
@@ -833,7 +2052,7 @@ function validateNormalizedError(error, path) {
     if (!isRecord(error)) {
         throw new TypeError(`${path} must be a normalized error`);
     }
-    rejectUnknownKeys(error, ['name', 'message', 'stack'], path);
+    rejectUnknownKeys(error, ['name', 'message', 'stack', 'cause'], path);
     requireNonEmptyString(error.name, `${path}.name`);
     if (typeof error.message !== 'string') {
         throw new TypeError(`${path}.message must be a string`);
@@ -841,6 +2060,30 @@ function validateNormalizedError(error, path) {
     if (error.stack !== undefined && typeof error.stack !== 'string') {
         throw new TypeError(`${path}.stack must be a string`);
     }
+    // DR-063 §2: a normalized error may carry its structured cause, and an
+    // unrecognized shape is not a cause.
+    if (error.cause !== undefined)
+        assertPlaybookFailureCause(error.cause);
+}
+// DR-048: the completed child's compiled terminal record. It is runtime-owned
+// data read from the child's artifact, so a malformed one is a control-plane
+// error rather than an authored child outcome.
+function validateTerminalOutcome(value) {
+    if (!isRecord(value)) {
+        throw new TypeError('playbook result terminal must be an object');
+    }
+    rejectUnknownKeys(value, ['stateId', 'kind', 'description'], 'playbook result terminal');
+    requireNonEmptyString(value.stateId, 'playbook result terminal stateId');
+    if (value.kind !== 'success' && value.kind !== 'failure') {
+        throw new TypeError("playbook result terminal kind must be 'success' or 'failure'");
+    }
+    if (own(value, 'description') && typeof value.description !== 'string') {
+        throw new TypeError('playbook result terminal description must be a string');
+    }
+}
+/** DR-048: a completed child that reached an authored failure terminal. */
+function isFailureTerminal(result) {
+    return result.status === 'ok' && result.terminal?.kind === 'failure';
 }
 export function validatePlaybookCallResult(result, expectedPlaybookId, expectedChildSessionId) {
     const capturedResult = snapshotJsonValue(result, 'playbook result');
@@ -856,8 +2099,11 @@ export function validatePlaybookCallResult(result, expectedPlaybookId, expectedC
         throw new PlaybookCallIdentityError(`playbook result target ${String(capturedResult.playbookId)} does not match ${expectedPlaybookId}`);
     }
     if (capturedResult.status === 'ok') {
-        rejectUnknownKeys(capturedResult, ['status', 'playbookId', 'childSessionId', 'state', 'output'], 'playbook result');
+        rejectUnknownKeys(capturedResult, ['status', 'playbookId', 'childSessionId', 'state', 'output', 'terminal'], 'playbook result');
         requireNonEmptyString(capturedResult.childSessionId, 'playbook result childSessionId');
+        if (own(capturedResult, 'terminal')) {
+            validateTerminalOutcome(capturedResult.terminal);
+        }
     }
     else {
         rejectUnknownKeys(capturedResult, ['status', 'playbookId', 'childSessionId', 'state', 'error'], 'playbook result');
@@ -951,8 +2197,9 @@ function resultFromThrown(playbookId, childSessionId, error, aborted) {
     return snapshotJsonValue(result, 'playbook result');
 }
 function outputOrThrow(result) {
-    if (result.status === 'ok')
+    if (result.status === 'ok' && !isFailureTerminal(result)) {
         return result.output;
+    }
     throw new NestedPlaybookCallError(result);
 }
 export function createNestedPlaybookBridge(options) {
@@ -961,22 +2208,26 @@ export function createNestedPlaybookBridge(options) {
     let disposed = false;
     const usedCallIds = new Set();
     const pendingListeners = new Set();
-    const reportBackgroundError = (error) => {
+    const reportBackgroundError = (error, aborts) => {
+        if (aborts?.isAbortReason(error))
+            return;
         try {
-            options.onBackgroundError?.(error);
+            options.onBackgroundError?.(error, aborts);
         }
         catch {
             // Background observers are a terminal sink and cannot own cleanup.
         }
     };
-    const reportControlPlaneError = (error) => {
+    const reportControlPlaneError = (error, aborts) => {
+        if (aborts?.isAbortReason(error))
+            return;
         try {
-            options.onControlPlaneError?.(error);
+            options.onControlPlaneError?.(error, aborts);
         }
         catch (callbackError) {
             // Observability callbacks must never prevent terminal cleanup of the
             // invocation they are observing.
-            reportBackgroundError(callbackError);
+            reportBackgroundError(callbackError, aborts);
         }
     };
     const rejectControlPlane = (error) => {
@@ -1013,45 +2264,38 @@ export function createNestedPlaybookBridge(options) {
     };
     const clear = (active) => {
         detachAbortListener(active);
-        active.resumeSignal = undefined;
         if (current === active)
             current = undefined;
     };
-    // The applicable signals for a call's abort classification: its
-    // invocation-lifetime combined signal and — while a resume is being
-    // settled — the resume boundary's own signal (slc/link.md §Abort).
-    const isCallAbortReason = (error, active) => isAbortReason(error, active.signal) ||
-        (active.resumeSignal !== undefined &&
-            isAbortReason(error, active.resumeSignal));
     // A failure causally identical to an applicable abort reason is the
     // cancellation's own evidence, never a control-plane error.
-    const reportNonAbortControlError = (error, active) => {
-        if (!isCallAbortReason(error, active))
-            reportControlPlaneError(error);
+    const reportNonAbortControlError = (error, aborts) => {
+        reportControlPlaneError(error, aborts);
     };
-    const emitFinish = async (active, result) => {
+    const emitFinish = async (active, result, aborts) => {
         await options.emitFinished({
             callId: active.callId,
             stateId: active.input.stateId,
             playbookId: active.input.playbookId,
             text: active.input.text,
             result,
-        });
-        await options.drain();
+        }, aborts);
+        await options.drain(aborts);
     };
     const finishImmediate = async (active, result, controlError, resultAfterAbortCleanup) => {
+        const aborts = active.aborts;
         let effectiveResult = result;
         let cleanupControlError;
         if (result.status === 'aborted' || active.signal.aborted) {
             try {
-                await drainPlaybookAbortCleanups(active.signal);
+                await drainPlaybookAbortCleanups(active.signal, aborts);
             }
             catch (error) {
                 // A cleanup rejection identical to an applicable abort reason is
                 // the cancellation's own evidence — no latch, no result override.
-                if (!isCallAbortReason(error, active)) {
+                if (!aborts.isAbortReason(error)) {
                     cleanupControlError = error;
-                    reportControlPlaneError(error);
+                    reportControlPlaneError(error, aborts);
                     effectiveResult = resultFromThrown(active.input.playbookId, active.childSessionId, error, false);
                 }
             }
@@ -1061,10 +2305,10 @@ export function createNestedPlaybookBridge(options) {
         }
         let finishControlError;
         try {
-            await emitFinish(active, effectiveResult);
+            await emitFinish(active, effectiveResult, aborts);
         }
         catch (error) {
-            reportNonAbortControlError(error, active);
+            reportNonAbortControlError(error, aborts);
             finishControlError = error;
         }
         finally {
@@ -1072,6 +2316,7 @@ export function createNestedPlaybookBridge(options) {
             // emission fails, do not leave a permanently unresumable call in the
             // bridge and prevent disposal or a later invocation.
             clear(active);
+            options.bindActorSettlement?.(aborts);
         }
         if (controlError !== undefined)
             throw controlError;
@@ -1081,7 +2326,7 @@ export function createNestedPlaybookBridge(options) {
             throw finishControlError;
         return outputOrThrow(effectiveResult);
     };
-    const settlePending = async (active, result, controlError) => {
+    const settlePending = async (active, result, controlError, aborts = active.aborts) => {
         if (active.phase === 'settling' && active.settlement) {
             await active.settlement;
             return;
@@ -1095,24 +2340,23 @@ export function createNestedPlaybookBridge(options) {
             let cleanupControlError;
             if (result.status === 'aborted' || active.signal.aborted) {
                 if (result.status !== 'aborted' && active.signal.aborted) {
-                    effectiveResult = resultFromThrown(active.input.playbookId, active.childSessionId, active.signal.reason ??
-                        new Error('Nested playbook invocation aborted'), true);
+                    effectiveResult = resultFromThrown(active.input.playbookId, active.childSessionId, active.signal.reason, true);
                 }
                 try {
-                    await drainPlaybookAbortCleanups(active.signal);
+                    await drainPlaybookAbortCleanups(active.signal, aborts);
                 }
                 catch (cleanupError) {
                     // A cleanup rejection identical to an applicable abort reason is
                     // the cancellation's own evidence — no latch, no result override.
-                    if (!isCallAbortReason(cleanupError, active)) {
+                    if (!aborts.isAbortReason(cleanupError)) {
                         cleanupControlError = cleanupError;
-                        reportControlPlaneError(cleanupError);
+                        reportControlPlaneError(cleanupError, aborts);
                         effectiveResult = resultFromThrown(active.input.playbookId, active.childSessionId, cleanupError, false);
                     }
                 }
             }
             try {
-                await emitFinish(active, effectiveResult);
+                await emitFinish(active, effectiveResult, aborts);
             }
             catch (error) {
                 // A finish event is the durable return boundary. If it cannot be
@@ -1122,21 +2366,22 @@ export function createNestedPlaybookBridge(options) {
                 // rejection that is an applicable abort reason — the invocation's
                 // or the settling resume's — evidences cancellation, not a
                 // control-plane failure (slc/link.md §Abort).
-                if (!isCallAbortReason(error, active)) {
-                    reportControlPlaneError(error);
-                }
+                reportControlPlaneError(error, aborts);
                 clear(active);
+                options.bindActorSettlement?.(aborts);
                 active.deferred.reject(error);
                 throw error;
             }
             clear(active);
+            options.bindActorSettlement?.(aborts);
             if (controlError !== undefined) {
                 active.deferred.reject(controlError);
             }
             else if (cleanupControlError !== undefined) {
                 active.deferred.reject(cleanupControlError);
             }
-            else if (effectiveResult.status === 'ok') {
+            else if (effectiveResult.status === 'ok' &&
+                !isFailureTerminal(effectiveResult)) {
                 active.deferred.resolve(effectiveResult.output);
             }
             else {
@@ -1165,6 +2410,7 @@ export function createNestedPlaybookBridge(options) {
         active.restoreRolledBack = true;
         clear(active);
         usedCallIds.delete(active.callId);
+        options.bindActorSettlement?.(active.aborts);
         active.deferred.reject(error);
         return active;
     };
@@ -1175,9 +2421,9 @@ export function createNestedPlaybookBridge(options) {
         const abortListener = () => {
             if (active.phase !== 'suspended')
                 return;
-            const result = resultFromThrown(active.input.playbookId, active.childSessionId, active.signal.reason ?? new Error('Nested playbook invocation aborted'), true);
+            const result = resultFromThrown(active.input.playbookId, active.childSessionId, active.signal.reason, true);
             void settlePending(active, result).catch((error) => {
-                reportBackgroundError(error);
+                reportBackgroundError(error, active.aborts);
             });
         };
         active.abortListener = abortListener;
@@ -1191,7 +2437,7 @@ export function createNestedPlaybookBridge(options) {
                 listener(pendingCall);
             }
             catch (error) {
-                reportBackgroundError(error);
+                reportBackgroundError(error, active.aborts);
             }
         }
         if (active.signal.aborted)
@@ -1261,8 +2507,11 @@ export function createNestedPlaybookBridge(options) {
             }
             const controller = new AbortController();
             let callSignal;
+            let callAborts;
             try {
-                callSignal = combineAbortSignals(invocationSignal, options.getBoundarySignal?.(), controller.signal);
+                const boundarySignal = options.getBoundarySignal?.();
+                callSignal = combineAbortSignals(invocationSignal, boundarySignal, controller.signal);
+                callAborts = createAbortReasonClassifier(invocationSignal, boundarySignal, controller.signal);
             }
             catch (error) {
                 failRestoreMode(mode, error);
@@ -1278,6 +2527,7 @@ export function createNestedPlaybookBridge(options) {
                 finished: deferred(),
                 controller,
                 signal: callSignal,
+                aborts: callAborts,
                 phase: 'restoring',
                 childSessionId: seed.childSessionId,
             };
@@ -1292,8 +2542,7 @@ export function createNestedPlaybookBridge(options) {
                     active.phase !== 'restoring') {
                     return;
                 }
-                rollbackRestoredCall(mode, active.signal.reason ??
-                    new Error('Restored nested playbook invocation aborted'));
+                rollbackRestoredCall(mode, active.signal.reason);
             };
             active.abortListener = restoreAbortListener;
             active.signal.addEventListener('abort', restoreAbortListener, {
@@ -1330,8 +2579,11 @@ export function createNestedPlaybookBridge(options) {
         usedCallIds.add(callId);
         const controller = new AbortController();
         let callSignal;
+        let callAborts;
         try {
-            callSignal = combineAbortSignals(invocationSignal, options.getBoundarySignal?.(), controller.signal);
+            const boundarySignal = options.getBoundarySignal?.();
+            callSignal = combineAbortSignals(invocationSignal, boundarySignal, controller.signal);
+            callAborts = createAbortReasonClassifier(invocationSignal, boundarySignal, controller.signal);
         }
         catch (error) {
             return rejectControlPlane(error);
@@ -1343,6 +2595,7 @@ export function createNestedPlaybookBridge(options) {
             finished: deferred(),
             controller,
             signal: callSignal,
+            aborts: callAborts,
             phase: 'starting',
         };
         current = active;
@@ -1351,37 +2604,37 @@ export function createNestedPlaybookBridge(options) {
             // for their entering state. Yield through the runtime's global queue so
             // that transition/status telemetry is enqueued before call.started.
             try {
-                await options.drain();
+                await options.drain(active.aborts);
             }
             catch (error) {
-                reportNonAbortControlError(error, active);
+                reportNonAbortControlError(error, active.aborts);
                 clear(active);
                 throw error;
             }
             try {
-                await options.emitStarted({ callId, ...normalizedInput });
+                await options.emitStarted({ callId, ...normalizedInput }, active.aborts);
             }
             catch (error) {
                 // A start-sink rejection identical to the applicable abort
                 // reason is the cancellation itself: the pair finishes
                 // `aborted` and nothing is reported (slc/link.md §Abort).
-                const controlError = isCallAbortReason(error, active)
+                const controlError = active.aborts.isAbortReason(error)
                     ? undefined
                     : error;
                 if (controlError !== undefined) {
-                    reportControlPlaneError(controlError);
+                    reportControlPlaneError(controlError, active.aborts);
                 }
                 return await finishImmediate(active, resultFromThrown(normalizedInput.playbookId, undefined, error, controlError === undefined), controlError);
             }
             try {
-                await options.drain();
+                await options.drain(active.aborts);
             }
             catch (error) {
-                const controlError = isCallAbortReason(error, active)
+                const controlError = active.aborts.isAbortReason(error)
                     ? undefined
                     : error;
                 if (controlError !== undefined) {
-                    reportControlPlaneError(controlError);
+                    reportControlPlaneError(controlError, active.aborts);
                 }
                 return await finishImmediate(active, resultFromThrown(normalizedInput.playbookId, undefined, error, controlError === undefined), controlError);
             }
@@ -1406,7 +2659,7 @@ export function createNestedPlaybookBridge(options) {
                     throw error;
                 });
                 const openingCleanup = starting.then(() => undefined, (error) => {
-                    if (isAbortReason(error, active.signal))
+                    if (active.aborts.isAbortReason(error))
                         return;
                     throw error;
                 });
@@ -1423,11 +2676,12 @@ export function createNestedPlaybookBridge(options) {
                 rawStart = await withAbort(starting, active.signal);
             }
             catch (error) {
-                const controlError = isAbortReason(error, active.signal)
+                const controlError = active.aborts.isAbortReason(error)
                     ? undefined
                     : error;
-                if (controlError !== undefined)
-                    reportControlPlaneError(controlError);
+                if (controlError !== undefined) {
+                    reportControlPlaneError(controlError, active.aborts);
+                }
                 const result = resultFromThrown(normalizedInput.playbookId, undefined, error, controlError === undefined && active.signal.aborted);
                 return await finishImmediate(active, result, controlError, controlError === undefined && active.signal.aborted
                     ? () => resultFromThrown(normalizedInput.playbookId, startSettled
@@ -1513,6 +2767,9 @@ export function createNestedPlaybookBridge(options) {
         actorLogic,
         getPendingCall: () => pendingIdentity(current),
         getSuspendedCall: () => suspendedIdentity(current),
+        checkpointCall: (child) => current && current.callId === child.callId && current.input.playbookId === child.playbookId
+            ? { ...child, stateId: current.input.stateId, text: current.input.text, ...(current.turnId === undefined ? {} : { turnId: current.turnId }) }
+            : undefined,
         prepareRestore(call) {
             // Capture the complete host-owned descriptor before observing or
             // mutating bridge state, so a rejected preparation cannot leave state.
@@ -1557,8 +2814,7 @@ export function createNestedPlaybookBridge(options) {
             }
             const active = mode.active;
             if (active.signal.aborted) {
-                const error = active.signal.reason ??
-                    new Error('Restored nested playbook invocation aborted');
+                const error = active.signal.reason;
                 rollbackRestoredCall(mode, error);
                 restoreMode = undefined;
                 throw error;
@@ -1586,7 +2842,7 @@ export function createNestedPlaybookBridge(options) {
                     listener(pendingCall);
                 }
                 catch (error) {
-                    reportBackgroundError(error);
+                    reportBackgroundError(error, current?.aborts);
                 }
             }
             return () => pendingListeners.delete(listener);
@@ -1620,16 +2876,11 @@ export function createNestedPlaybookBridge(options) {
             // (slc/link.md §Nested playbook bridge). Identity and validation
             // control errors above still win — they are the caller's defects.
             if (signal.aborted) {
-                throw signal.reason ?? new Error('playbook resume aborted');
+                throw signal.reason;
             }
-            active.resumeSignal = signal;
-            options.bindResumeSignal?.(signal);
-            try {
-                await settlePending(active, validatedResult);
-            }
-            finally {
-                active.resumeSignal = undefined;
-            }
+            const resumeAborts = createAbortReasonClassifier(active.aborts, signal);
+            options.bindResumeSignal?.(signal, resumeAborts);
+            await settlePending(active, validatedResult, undefined, resumeAborts);
         },
         abortPending,
         async dispose() {

@@ -13,12 +13,14 @@ import { pathToFileURL } from 'node:url';
 export function liveModels(): { claude: string; codex: string } {
   return {
     claude:
-      process.env.PLAYBOOK_ACCEPTANCE_CLAUDE_MODEL ?? 'claude-opus-4-8',
-    codex: process.env.PLAYBOOK_ACCEPTANCE_CODEX_MODEL ?? 'gpt-5.5',
+      process.env.PLAYBOOK_ACCEPTANCE_CLAUDE_MODEL ?? 'claude-opus-5-5',
+    codex: process.env.PLAYBOOK_ACCEPTANCE_CODEX_MODEL ?? 'gpt-6-sol',
   };
 }
 
-export function liveConfig(): string {
+export function liveConfig(
+  options: { readonly reviewerInstruction?: string } = {},
+): string {
   const { claude: claudeModel, codex: codexModel } = liveModels();
   // DR-021: agent settings are inline per captain and player; a config
   // carrying a `profiles` map is rejected by the launcher.
@@ -44,9 +46,23 @@ export function liveConfig(): string {
     '    adapter: codex',
     `    model: ${JSON.stringify(codexModel)}`,
     '    effort: xhigh',
+    ...(options.reviewerInstruction === undefined
+      ? []
+      : [`    instruction: ${JSON.stringify(options.reviewerInstruction)}`]),
     '    permissions:',
     '      mode: auto',
     "      writablePaths: ['.git']",
+    // DR-044: the DEV planner binds its one Analyst role to a player distinct
+    // from the coder and reviewer, so planning context never bleeds into the
+    // implementation or review conversations that share a player id.
+    // Planning is the light hop; the implementing and reviewing players keep
+    // their higher effort.
+    '  acceptance.dev.analyst:',
+    '    adapter: claude',
+    `    model: ${JSON.stringify(claudeModel)}`,
+    '    effort: high',
+    '    permissions:',
+    '      mode: auto',
     'playbooks:',
     '  code:',
     '    from: "@sublang/playbook/code/registry"',
@@ -57,6 +73,9 @@ export function liveConfig(): string {
     '  decide:',
     '    from: "@sublang/playbook/decide/registry"',
     '    roles: { coder: acceptance.dev.coder, reviewer: acceptance.dev.reviewer }',
+    '  dev:',
+    '    from: "@sublang/playbook/dev/registry"',
+    '    roles: { analyst: acceptance.dev.analyst }',
     '',
   ].join('\n');
 }
@@ -68,15 +87,18 @@ export function liveRetuneOverlay(): string {
   return [
     'captain:',
     '  effort: low',
+    '  fastMode: false',
     'players:',
     '  acceptance.dev.coder:',
     '    effort: high',
+    '    fastMode: true',
     '  acceptance.dev.reviewer:',
     '    effort: high',
+    '    fastMode: false',
     'playbooks:',
     '  decide:',
     '    roles:',
-    '      reviewer: { player: acceptance.dev.reviewer, model: false, effort: false }',
+    '      reviewer: { player: acceptance.dev.reviewer, model: false, effort: false, fastMode: true }',
     '',
   ].join('\n');
 }

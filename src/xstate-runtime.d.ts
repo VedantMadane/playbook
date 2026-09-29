@@ -1,6 +1,14 @@
 import { type AnyActorRef, type PromiseActorLogic, type SnapshotFrom } from 'xstate';
-import type { CaptainResult, JsonValue, NormalizedError, PlaybookCallRequest, PlaybookCallResult, PlaybookCallStart, PlaybookPendingCall, PlaybookRuntimeSnapshot, PlaybookSession, PlaybookState, PlaybookSuspendedCall, PlayerResult } from './runtime.js';
+import type { CaptainResult, JsonValue, NormalizedError, PlaybookFailureCause, PlaybookCallRequest, PlaybookCallResult, PlaybookCallStart, PlaybookPendingCall, PlaybookEffectLedger, PlaybookRepositoryDisposition, PlaybookRuntimeSnapshot, PlaybookSession, PlaybookState, PlaybookSuspendedCall, PlayerResult } from './runtime.js';
 export * from './xstate-playbook-runtime.js';
+/**
+ * Immutable cancellation provenance for one runtime operation. The captured
+ * signal identities do not change when a mutable runtime advances to another
+ * public boundary, while each signal's eventual reason remains observable.
+ */
+interface AbortReasonClassifier {
+    isAbortReason(error: unknown): boolean;
+}
 /**
  * Compose invocation-lifetime and imperative-boundary cancellation without
  * installing a second forwarding listener in each generated runtime.
@@ -19,6 +27,12 @@ export declare function snapshotJsonValue(value: unknown, path?: string): JsonVa
 /** Validate session causality and detach its immutable identity from the host. */
 export declare function snapshotPlaybookSession(session: PlaybookSession): PlaybookSession;
 export declare function hiddenControlEnvelope(prompt: string): string;
+/**
+ * Attach one validated failure cause to an error object, returning it. A cause
+ * the closed validator rejects is dropped rather than published, and an error
+ * that refuses the property keeps its own cause-free identity (DR-063 §1).
+ */
+export declare function attachPlaybookFailureCause<E>(error: E, cause: unknown): E;
 export declare function normalizeError(error: unknown): NormalizedError;
 export interface PlaybookStateMetadata {
     stateId: string;
@@ -30,7 +44,67 @@ export interface SnapshotNormalizationOptions {
     pendingCall?: PlaybookPendingCall;
 }
 export declare function normalizePlaybookSnapshot(snapshot: unknown, options?: SnapshotNormalizationOptions): PlaybookState;
-export declare function detachPersistedMachineSnapshot(persisted: unknown): JsonValue;
+export declare function detachPersistedMachineSnapshot(persisted: unknown, completion?: {
+    readonly lastError?: NormalizedError;
+}): JsonValue;
+/** Authority for one governed delegated-player output field (DR-040 §1). */
+export type PlaybookSemanticFieldAuthority = 'presentation' | 'semantic' | 'effect' | 'runtime';
+/** One already-validated state-local governed outcome declaration. */
+export interface PlaybookSemanticOutcomeSpec {
+    readonly fields: Readonly<Record<string, PlaybookSemanticFieldAuthority>>;
+    readonly repositoryDisposition: PlaybookRepositoryDisposition;
+}
+/** Evidence available when one governed semantic candidate is reconciled. */
+export interface PlaybookSemanticEvidenceInput {
+    readonly outcomes: Readonly<Record<string, PlaybookSemanticOutcomeSpec>>;
+    readonly semanticCandidate: unknown;
+    readonly finalText?: unknown;
+    readonly receipt?: unknown;
+    readonly runtimeFields?: unknown;
+}
+/** The exact detached actor output admitted to FSM delivery. */
+export type PlaybookReconciledSemanticOutput = Readonly<Record<string, string>> & {
+    readonly guard: string;
+};
+/** Retained presentation and semantic evidence, kept separate from output. */
+export interface PlaybookRetainedSemanticEvidence {
+    readonly finalText?: string;
+    readonly semanticCandidate: Readonly<Record<string, string>>;
+}
+export type PlaybookSemanticReconciliationReason = 'no-matching-outcome' | 'missing-presentation-evidence' | 'missing-repository-receipt' | 'invalid-repository-receipt' | 'repository-disposition-mismatch' | 'missing-effect-evidence' | 'missing-runtime-evidence' | 'inconsistent-runtime-evidence';
+/** A fail-closed semantic/effect reconciliation decision. */
+export type PlaybookSemanticReconciliation = {
+    readonly status: 'resolved' | 'deferred';
+    readonly output: PlaybookReconciledSemanticOutput;
+    readonly evidence: PlaybookRetainedSemanticEvidence;
+} | {
+    readonly status: 'unresolved';
+    readonly reason: PlaybookSemanticReconciliationReason;
+    /** DR-063 §1: why it stays unresolved, as a closed structured cause. */
+    readonly cause: PlaybookFailureCause;
+    readonly evidence: PlaybookRetainedSemanticEvidence;
+};
+/**
+ * A judge candidate is structurally invalid, rather than merely awaiting or
+ * conflicting with effect evidence. Callers use this distinction to spend at
+ * most one durable correction budget before asking another hidden judge.
+ */
+export declare class PlaybookSemanticCandidateStructureError extends TypeError {
+    constructor(message: string);
+}
+/**
+ * Reconcile one exact semantic candidate with host-owned effect evidence.
+ * Presentation prose remains opaque: it is retained verbatim and only its
+ * trimmed value is copied into linker-declared presentation fields. No
+ * repository fact is inferred from that prose or from the semantic candidate.
+ */
+export declare function reconcilePlaybookSemanticEvidence(input: PlaybookSemanticEvidenceInput): PlaybookSemanticReconciliation;
+/** Return the canonical empty host-owned effect-ledger mirror. */
+export declare function emptyPlaybookEffectLedger(): PlaybookEffectLedger;
+/** Validate, detach, and recursively freeze one effect-ledger mirror. */
+export declare function assertPlaybookEffectLedger(value: unknown, path?: string): PlaybookEffectLedger;
+/** Whether current preserves every durable fact in baseline and only extends it. */
+export declare function isPlaybookEffectLedgerMonotonicExtension(baselineValue: unknown, currentValue: unknown): boolean;
 export interface PlaybookRuntimeSnapshotValidationOptions {
     /**
      * Opt in only when the restore path will prepare and confirm the suspended
@@ -59,12 +133,14 @@ export interface NestedPlaybookBridgeOptions {
     /** Active public runtime boundary whose abort also owns a new child call. */
     getBoundarySignal?(): AbortSignal | undefined;
     callPlaybook(request: PlaybookCallRequest, signal: AbortSignal): Promise<PlaybookCallStart>;
-    emitStarted(event: PlaybookCallStarted): Promise<void>;
-    emitFinished(event: PlaybookCallFinished): Promise<void>;
-    drain(): Promise<void>;
-    bindResumeSignal?(signal: AbortSignal): void;
-    onControlPlaneError?(error: unknown): void;
-    onBackgroundError?(error: unknown): void;
+    emitStarted(event: PlaybookCallStarted, aborts?: AbortReasonClassifier): Promise<void>;
+    emitFinished(event: PlaybookCallFinished, aborts?: AbortReasonClassifier): Promise<void>;
+    drain(aborts?: AbortReasonClassifier): Promise<void>;
+    bindResumeSignal?(signal: AbortSignal, aborts?: AbortReasonClassifier): void;
+    /** Bind provenance to the root transition caused by this child result. */
+    bindActorSettlement?(aborts: AbortReasonClassifier): void;
+    onControlPlaneError?(error: unknown, aborts?: AbortReasonClassifier): void;
+    onBackgroundError?(error: unknown, aborts?: AbortReasonClassifier): void;
 }
 export declare class NestedPlaybookCallError extends Error {
     readonly result: PlaybookCallResult;
@@ -85,6 +161,7 @@ export interface NestedPlaybookBridge<TInput extends NestedPlaybookInput = Neste
     confirmRestore(): void;
     /** Complete durable identity; undefined until a normal or restored call suspends. */
     getSuspendedCall(): PlaybookSuspendedCall | undefined;
+    checkpointCall(child: PlaybookPendingCall): PlaybookSuspendedCall | undefined;
     resume(input: {
         callId: string;
         result: PlaybookCallResult;

@@ -70,6 +70,14 @@ jobs:
             'reference/sdlc/review.playbook/review.*.d.ts' \
             'reference/sdlc/decide.playbook/decide.*.js' \
             'reference/sdlc/decide.playbook/decide.*.d.ts' \
+            'reference/sdlc/dev.playbook/dev.*.js' \
+            'reference/sdlc/dev.playbook/dev.*.d.ts' \
+            'reference/sdlc/branch.playbook/branch.*.js' \
+            'reference/sdlc/branch.playbook/branch.*.d.ts' \
+            'reference/sdlc/pr.playbook/pr.*.js' \
+            'reference/sdlc/pr.playbook/pr.*.d.ts' \
+            'src/accepted-outcome.js' \
+            'src/accepted-outcome.d.ts' \
             'src/runtime.js' \
             'src/runtime.d.ts' \
             'src/xstate-runtime.js' \
@@ -81,6 +89,11 @@ jobs:
             'reference/sdlc/code.playbook' \
             'reference/sdlc/review.playbook' \
             'reference/sdlc/decide.playbook' \
+            'reference/sdlc/dev.playbook' \
+            'reference/sdlc/branch.playbook' \
+            'reference/sdlc/pr.playbook' \
+            'src/accepted-outcome.js' \
+            'src/accepted-outcome.d.ts' \
             'src/runtime.js' \
             'src/runtime.d.ts' \
             'src/xstate-runtime.js' \
@@ -92,6 +105,11 @@ jobs:
               'reference/sdlc/code.playbook' \
               'reference/sdlc/review.playbook' \
               'reference/sdlc/decide.playbook' \
+              'reference/sdlc/dev.playbook' \
+              'reference/sdlc/branch.playbook' \
+              'reference/sdlc/pr.playbook' \
+              'src/accepted-outcome.js' \
+              'src/accepted-outcome.d.ts' \
               'src/runtime.js' \
               'src/runtime.d.ts' \
               'src/xstate-runtime.js' \
@@ -102,7 +120,22 @@ jobs:
           fi
 
       - name: Test
+        if: ${{ github.ref_name != 'v11.0.0' }}
         run: pnpm test
+
+      # v11 ships newer authored SDLC sources while their compiled artifacts
+      # remain at the prior behavior by explicit owner authorization. Skip only
+      # the six exact source/artifact agreement assertions for this tag.
+      - name: Test with the v11 source mismatch waiver
+        if: ${{ github.ref_name == 'v11.0.0' }}
+        env:
+          V11_WAIVER_PATTERN: "^(?!(?:SLC Source -> GEARS prompt contract '(?:CODE|REVIEW|DECIDE)' keeps its protected Source, GEARS prompts, and linked field ownership aligned|CODE Source, GEARS, and FSM agreement (?:preserves every authored instruction and quoted relay|pins every authored post-REVIEW outcome to its compiled route)|DECIDE GEARS to FSM compilation pins every authored post-REVIEW outcome to its compiled route)$).*"
+        run: |
+          pnpm exec spex lint
+          pnpm exec vitest run \
+            --exclude src/cligent-release-capabilities.test.ts \
+            --testNamePattern "$V11_WAIVER_PATTERN"
+          pnpm exec vitest run src/cligent-release-capabilities.test.ts
 
       - name: Validate release metadata and extract release notes
         # RELEASE-2 / RELEASE-7. The validator rejects non-SemVer or

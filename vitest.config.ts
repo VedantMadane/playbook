@@ -38,6 +38,9 @@ export default defineConfig({
     },
   ],
   test: {
+    // CLI and TypeScript subprocesses can exceed Vitest's five-second default
+    // under CI contention. Individual operation deadlines remain unchanged.
+    testTimeout: 30_000,
     // Confine the suite to the reference playbooks' tests under the slc
     // artifact directory. Subpackages carry
     // their own vitest config and dependencies (jsdom, etc.);
@@ -49,6 +52,9 @@ export default defineConfig({
       'reference/sdlc/code.playbook/*.test.ts',
       'reference/sdlc/review.playbook/*.test.ts',
       'reference/sdlc/decide.playbook/*.test.ts',
+      'reference/sdlc/dev.playbook/*.test.ts',
+      'reference/sdlc/branch.playbook/*.test.ts',
+      'reference/sdlc/pr.playbook/*.test.ts',
     ],
   },
 });

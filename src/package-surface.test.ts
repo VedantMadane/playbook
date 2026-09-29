@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -22,7 +23,23 @@ import { checkCligentReleaseCapabilities } from '../scripts/cligent-release-capa
 
 const packageRootUrl = new URL('../', import.meta.url);
 const repoRoot = fileURLToPath(packageRootUrl);
-const SLC_SPECS = ['link.md', 'gears2fsm.md', 'text2gears.md', 'optimize.md'];
+// Tests that shell out (npm pack, pnpm, node probes) or build a whole
+// consumer type-check program exceed Vitest's five-second default on a
+// loaded CI runner, so every such case gets one generous explicit budget.
+const SUBPROCESS_TIMEOUT_MS = 120_000;
+const SLC_ASSETS = [
+  'link.md',
+  'gears2fsm.md',
+  'text2gears.md',
+  'optimize.md',
+  'prefix.md',
+  'prefix-prompts.mjs',
+  'materialize-link.mjs',
+  'scaffold-fsm.mjs',
+  'experiments/fsm-scaffold-guidance.md',
+  'slc.pin-inputs.json',
+  'workflow-contracts.json',
+];
 const CLIGENT_DEP = '@sublang/cligent';
 const LOCAL_OVERRIDE = new URL('../pnpm-workspace.yaml', import.meta.url);
 const CAPTAIN_BASE = 'reference/sdlc/captain.playbook/';
@@ -45,7 +62,14 @@ const CAPTAIN_GENERATED_BUNDLE = [
   `${CAPTAIN_BASE}.slc-verify/verify-coverage.js`,
   `${CAPTAIN_BASE}.slc-verify/verify-coverage.d.ts`,
 ] as const;
-const BUNDLED_WORKFLOW_IDS = ['code', 'review', 'decide'] as const;
+const BUNDLED_WORKFLOW_IDS = [
+  'code',
+  'review',
+  'decide',
+  'dev',
+  'branch',
+  'pr',
+] as const;
 const REQUIRED_WORKFLOW_ARTIFACT_SUFFIXES = [
   'gears.md',
   'fsm.ts',
@@ -160,6 +184,7 @@ const pkg = JSON.parse(
   peerDependencies?: Record<string, string>;
   peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   pnpm?: { overrides?: Record<string, string> };
+  scripts: Record<string, string>;
 };
 
 const lockfile = parseYaml(
@@ -187,9 +212,9 @@ describe('runtime dependency specifiers (RELEASE-19)', () => {
     expect(
       declaredFloor[0] > 0 ||
         (declaredFloor[0] === 0 &&
-          (declaredFloor[1] > 22 ||
-            (declaredFloor[1] === 22 && declaredFloor[2] >= 0))),
-      `${CLIGENT_DEP} declares ${packageSpecifier}, below the 0.22.0 capability floor`,
+          (declaredFloor[1] > 28 ||
+            (declaredFloor[1] === 28 && declaredFloor[2] >= 0))),
+      `${CLIGENT_DEP} declares ${packageSpecifier}, below the 0.28.0 floor serving the seeded models (DR-074)`,
     ).toBe(true);
     // A pnpm override rewrites the importer's recorded specifier as well as
     // its resolution, so both checks admit the link only while the local
@@ -212,9 +237,9 @@ describe('runtime dependency specifiers (RELEASE-19)', () => {
       expect(
         resolvedFloor[0] > 0 ||
           (resolvedFloor[0] === 0 &&
-            (resolvedFloor[1] > 22 ||
-              (resolvedFloor[1] === 22 && resolvedFloor[2] >= 0))),
-        `${CLIGENT_DEP} pins ${lockEntry.version.split('(')[0]}, below the 0.22.0 capability floor`,
+            (resolvedFloor[1] > 28 ||
+              (resolvedFloor[1] === 28 && resolvedFloor[2] >= 0))),
+        `${CLIGENT_DEP} pins ${lockEntry.version.split('(')[0]}, below the 0.28.0 floor serving the seeded models (DR-074)`,
       ).toBe(true);
     }
   });
@@ -404,7 +429,7 @@ describe('runtime dependency specifiers (RELEASE-19)', () => {
         }
       }
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   it('pins the complete cligent release capabilities', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'playbook-cligent-release-'));
@@ -418,6 +443,8 @@ describe('runtime dependency specifiers (RELEASE-19)', () => {
       expect(result.proven).toEqual([
         'CaptainContext.emitReply',
         'CaptainRunResult.resumeToken',
+        'CaptainRunResult.errorCode',
+        'PlayerRunResult.errorCode',
         'Captain.prepareDispose',
         'CaptainContext.callPlayer options',
         'CaptainContext.callCaptain options',
@@ -428,10 +455,12 @@ describe('runtime dependency specifiers (RELEASE-19)', () => {
         'CallCaptainOptions.settings',
         'AgentCallSettings.model',
         'AgentCallSettings.effort',
+        'AgentCallSettings.fastMode',
         'AgentCallSettings.instruction',
         'AgentCallSettings.permissions',
         'AgentCallSettingsError',
         'isAgentCallSettingsError',
+        'assertFastModeSupported',
         'launchManagedTmuxPlay signature',
         'ManagedTmuxPlayLaunchContext.workDirOwnedByLauncher',
         'runManagedTmuxPlaySession signature',
@@ -442,6 +471,7 @@ describe('runtime dependency specifiers (RELEASE-19)', () => {
         'loadTmuxPlayConfig segmented player id',
         'loadTmuxPlayConfig empty player roster',
         'createTmuxPlayRuntime empty player roster',
+        'assertFastModeSupported runtime semantics',
         'launchManagedTmuxPlay runtime export',
         'runManagedTmuxPlaySession runtime export',
       ]);
@@ -449,7 +479,7 @@ describe('runtime dependency specifiers (RELEASE-19)', () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 });
 
 describe('adapter SDK declarations (RELEASE-27)', () => {
@@ -479,17 +509,16 @@ describe('GEARS grammar provenance (RELEASE-23)', () => {
     '@sublang/spex/scaffold/i18n/zh/specs/meta.md',
   ];
 
-  it('declares @sublang/spex on a caret range no lower than 2.1.1', () => {
+  it('declares and locks @sublang/spex no lower than 3.0.0', () => {
     const specifier = pkg.dependencies[SPEX_DEP];
     const lockEntry = lockfile.importers['.'].dependencies[SPEX_DEP];
 
     expect(specifier).toMatch(/^\^\d+\.\d+\.\d+$/);
-    const [major, minor, patch] = specifier.slice(1).split('.').map(Number);
-    expect(
-      major > 2 ||
-        (major === 2 && (minor > 1 || (minor === 1 && patch >= 1))),
-    ).toBe(true);
+    const [major] = specifier.slice(1).split('.').map(Number);
+    expect(major).toBeGreaterThanOrEqual(3);
     expect(lockEntry.specifier).toBe(specifier);
+    const [lockedMajor] = lockEntry.version.split('.').map(Number);
+    expect(lockedMajor).toBeGreaterThanOrEqual(3);
   });
 
   it('resolves both GEARS definition localizations from the repo root', () => {
@@ -510,23 +539,82 @@ describe('GEARS grammar provenance (RELEASE-23)', () => {
       { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     expect(out).toBe('OK');
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
+});
+
+describe('normal test gate (RELEASE-32)', () => {
+  it('fails on Spex lint before starting Vitest', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'playbook-test-gate-'));
+    const bin = join(scratch, 'node_modules', '.bin');
+    const callLog = join(scratch, 'calls.log');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(
+      join(scratch, 'package.json'),
+      JSON.stringify({ private: true, scripts: pkg.scripts }),
+    );
+    writeFileSync(
+      join(bin, 'spex'),
+      [
+        '#!/usr/bin/env node',
+        "const { appendFileSync } = require('node:fs');",
+        "appendFileSync(process.env.GATE_LOG, 'spex ' + process.argv.slice(2).join(' ') + '\\n');",
+        'process.exit(Number(process.env.SPEX_EXIT));',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(bin, 'vitest'),
+      [
+        '#!/usr/bin/env node',
+        "const { appendFileSync } = require('node:fs');",
+        "appendFileSync(process.env.GATE_LOG, 'vitest ' + process.argv.slice(2).join(' ') + '\\n');",
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    const runGate = (spexExit: number): void => {
+      execFileSync('pnpm', ['test'], {
+        cwd: scratch,
+        env: {
+          ...process.env,
+          GATE_LOG: callLog,
+          SPEX_EXIT: String(spexExit),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    };
+
+    try {
+      expect(() => runGate(1)).toThrow();
+      expect(readFileSync(callLog, 'utf8')).toBe('spex lint\n');
+
+      writeFileSync(callLog, '');
+      runGate(0);
+      const calls = readFileSync(callLog, 'utf8').trimEnd().split('\n');
+      const lintIndex = calls.indexOf('spex lint');
+      const vitestIndex = calls.findIndex((call) => call.startsWith('vitest '));
+      expect(lintIndex).toBeGreaterThanOrEqual(0);
+      expect(vitestIndex).toBeGreaterThan(lintIndex);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }, SUBPROCESS_TIMEOUT_MS);
 });
 
 describe('public slc/* surface (RELEASE-17)', () => {
   // RELEASE-17 and the README name `import.meta.resolve` specifically.
   // vitest does not provide it (`__vite_ssr_import_meta__.resolve is not
   // a function`), so exercise the real Node API in a subprocess whose
-  // package scope is this package — resolving each spec through the
+  // package scope is this package — resolving each asset through the
   // published `./slc/*` export exactly as a consumer would.
-  it('resolves every published slc spec via import.meta.resolve', () => {
+  it('resolves every published slc asset via import.meta.resolve', () => {
     const script = `
       import { readFileSync } from 'node:fs';
       import { fileURLToPath } from 'node:url';
-      for (const name of ${JSON.stringify(SLC_SPECS)}) {
+      for (const name of ${JSON.stringify(SLC_ASSETS)}) {
         const url = import.meta.resolve('@sublang/playbook/slc/' + name);
         if (readFileSync(fileURLToPath(url), 'utf8').length === 0) {
-          throw new Error('empty spec: ' + name);
+          throw new Error('empty asset: ' + name);
         }
       }
       process.stdout.write('OK');
@@ -537,7 +625,7 @@ describe('public slc/* surface (RELEASE-17)', () => {
       { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     expect(out).toContain('OK');
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 });
 
 describe('public XState runtime surface (RELEASE-15)', () => {
@@ -551,11 +639,13 @@ describe('public XState runtime surface (RELEASE-15)', () => {
         defaultBuildCaptainJudgePrompt,
         normalizeError,
         normalizePlaybookSnapshot,
+        renderGovernedOutcomeContract,
         snapshotJsonValue,
         snapshotPlaybookSession,
         validateCaptainResult,
         validatePlayerResult,
         waitForPlaybookQuiescence,
+        emptyPlaybookEffectLedger,
         RUNTIME_ABI,
         SUPPORTED_ARTIFACT_SCHEMAS,
       } from '@sublang/playbook/xstate-runtime';
@@ -567,6 +657,7 @@ describe('public XState runtime surface (RELEASE-15)', () => {
         defaultBuildCaptainJudgePrompt,
         normalizeError,
         normalizePlaybookSnapshot,
+        renderGovernedOutcomeContract,
         snapshotJsonValue,
         snapshotPlaybookSession,
         validateCaptainResult,
@@ -596,15 +687,16 @@ describe('public XState runtime surface (RELEASE-15)', () => {
       }
       // DR-022: the engine compatibility self-report ships on the same
       // public engine subpath the factory does.
-      if (!Number.isSafeInteger(RUNTIME_ABI)) {
-        throw new Error('missing RUNTIME_ABI');
+      if (RUNTIME_ABI !== 1) {
+        throw new Error('unexpected RUNTIME_ABI');
       }
       if (
         !Array.isArray(SUPPORTED_ARTIFACT_SCHEMAS) ||
-        SUPPORTED_ARTIFACT_SCHEMAS.length === 0 ||
-        !SUPPORTED_ARTIFACT_SCHEMAS.every(Number.isSafeInteger)
+        !Object.isFrozen(SUPPORTED_ARTIFACT_SCHEMAS) ||
+        SUPPORTED_ARTIFACT_SCHEMAS.length !== 1 ||
+        SUPPORTED_ARTIFACT_SCHEMAS[0] !== 3
       ) {
-        throw new Error('missing SUPPORTED_ARTIFACT_SCHEMAS');
+        throw new Error('unexpected SUPPORTED_ARTIFACT_SCHEMAS');
       }
       // DR-029 / PBRT-52: every runtime the shipped shared factory
       // constructs implements the optional control-surface pair together.
@@ -621,11 +713,24 @@ describe('public XState runtime surface (RELEASE-15)', () => {
         }),
         {
           label: 'probe',
-          compat: { artifactSchema: 2, runtimeAbi: RUNTIME_ABI },
+          compat: { artifactSchema: 3, runtimeAbi: RUNTIME_ABI },
           snapshotOptions: (value) => value ?? {},
           roleStates: {},
+          outcomeAuthority: { governedPlayerStates: {} },
         },
-      )({});
+      )({
+        configuredOptions: {},
+        hostCapabilities: {
+          repository: {
+            runExclusive() { throw new Error('unused'); },
+            runDeferred() { throw new Error('unused'); },
+          },
+          effectLedger: {
+            snapshot: () => emptyPlaybookEffectLedger(),
+            writeAhead: async () => emptyPlaybookEffectLedger(),
+          },
+        },
+      });
       if (
         typeof probeRuntime.describe !== 'function' ||
         typeof probeRuntime.apply !== 'function'
@@ -640,7 +745,7 @@ describe('public XState runtime surface (RELEASE-15)', () => {
       { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     expect(out).toBe('OK');
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 });
 
 describe('canonical Captain compiler bundle (CAPPLAY-11)', () => {
@@ -651,6 +756,80 @@ describe('canonical Captain compiler bundle (CAPPLAY-11)', () => {
         `canonical Captain bundle missing ${artifact}`,
       ).toBe(true);
     }
+  });
+});
+
+describe('artifact schema cutover (RELEASE-15)', () => {
+  it('keeps every shipped runtime and registry sibling on schema 3', () => {
+    // A materialized module declares its spec as JSON, with the key quoted.
+    const schemaDeclaration = /"?artifactSchema"?:\s*3/;
+    const legacyDeclaration =
+      /"?artifactSchema"?:\s*2|SchemaV2|RegistryEntryV2/;
+
+    for (const id of BUNDLED_WORKFLOW_IDS) {
+      const base = `reference/sdlc/${id}.playbook/`;
+      const runtimeSource = readFileSync(
+        join(repoRoot, `${base}${id}.playbook.ts`),
+        'utf8',
+      );
+      const runtimeJavaScript = readFileSync(
+        join(repoRoot, `${base}${id}.playbook.js`),
+        'utf8',
+      );
+      const runtimeDeclaration = readFileSync(
+        join(repoRoot, `${base}${id}.playbook.d.ts`),
+        'utf8',
+      );
+      for (const [kind, contents] of [
+        ['TypeScript', runtimeSource],
+        ['JavaScript', runtimeJavaScript],
+      ] as const) {
+        expect(
+          contents,
+          `${id} ${kind} runtime omits its artifact-schema-3 contract`,
+        ).toMatch(schemaDeclaration);
+        expect(
+          contents,
+          `${id} ${kind} runtime retains artifact schema 2`,
+        ).not.toMatch(legacyDeclaration);
+      }
+      expect(runtimeDeclaration).not.toMatch(legacyDeclaration);
+      expect(runtimeDeclaration).toMatch(
+        /XStatePlaybookRuntimeFactory<[\s\S]*, 3>;/,
+      );
+
+      for (const extension of ['ts', 'js', 'd.ts'] as const) {
+        const registry = readFileSync(
+          join(repoRoot, `${base}${id}.registry.${extension}`),
+          'utf8',
+        );
+        expect(
+          registry,
+          `${id} registry.${extension} omits artifact schema 3`,
+        ).toMatch(schemaDeclaration);
+        expect(registry).not.toMatch(legacyDeclaration);
+      }
+    }
+
+    for (const extension of ['ts', 'js'] as const) {
+      const captain = readFileSync(
+        join(repoRoot, `${CAPTAIN_BASE}captain.playbook.${extension}`),
+        'utf8',
+      );
+      expect(
+        captain,
+        `Captain ${extension} runtime omits artifact schema 3`,
+      ).toMatch(schemaDeclaration);
+      expect(captain).not.toMatch(legacyDeclaration);
+    }
+    const captainDeclaration = readFileSync(
+      join(repoRoot, `${CAPTAIN_BASE}captain.playbook.d.ts`),
+      'utf8',
+    );
+    expect(captainDeclaration).toContain(
+      'createPlaybookRuntime(options: PlaybookRuntimeOptions)',
+    );
+    expect(captainDeclaration).not.toMatch(legacyDeclaration);
   });
 });
 
@@ -680,6 +859,9 @@ describe('packed tarball contents (RELEASE-18)', () => {
     for (const artifact of [
       'src/runtime.js',
       'src/runtime.d.ts',
+      'src/accepted-outcome.ts',
+      'src/accepted-outcome.js',
+      'src/accepted-outcome.d.ts',
       'src/xstate-runtime.js',
       'src/xstate-runtime.d.ts',
       'src/xstate-playbook-runtime.js',
@@ -723,10 +905,10 @@ describe('packed tarball contents (RELEASE-18)', () => {
         doc,
       );
     }
-    for (const name of SLC_SPECS) {
-      expect(packed, `tarball missing slc/${name}`).toContain(`slc/${name}`);
-    }
-  });
+    expect(packed.filter((path) => path.startsWith('slc/')).sort()).toEqual(
+      SLC_ASSETS.map((name) => `slc/${name}`).sort(),
+    );
+  }, SUBPROCESS_TIMEOUT_MS);
 
   // RELEASE-20: every Markdown file the tarball ships must be link-closed
   // over the packed file list — each relative link target and reference
@@ -770,7 +952,7 @@ describe('packed tarball contents (RELEASE-18)', () => {
     const failures: string[] = [];
     let scanned = 0;
     for (const doc of [...packed].filter((path) => path.endsWith('.md'))) {
-      // release-28 step 7 pins packed bytes to repository bytes, so the
+      // release-28 step 8 pins packed bytes to repository bytes, so the
       // repository copy is the packed content.
       for (const { line, target } of linksOf(
         readFileSync(join(repoRoot, doc), 'utf8'),
@@ -794,9 +976,13 @@ describe('packed tarball contents (RELEASE-18)', () => {
         // but not from verification (meta-33): the exempted target must be
         // a repository file, and its fragment a real anchor of that file.
         if (doc.startsWith('slc/') && dest.startsWith('specs/')) {
-          if (!existsSync(join(repoRoot, dest))) {
+          const repositoryTarget = join(repoRoot, dest);
+          if (
+            !existsSync(repositoryTarget) ||
+            !statSync(repositoryTarget).isFile()
+          ) {
             failures.push(
-              `${where} exempted slc→specs citation target missing from the repository: ${dest}`,
+              `${where} exempted slc→specs citation target is not a repository file: ${dest}`,
             );
           } else if (
             fragment !== '' &&
@@ -831,15 +1017,20 @@ describe('packed tarball contents (RELEASE-18)', () => {
     expect(failures).toEqual([]);
     // Guard against a vacuous pass: the packed docs really carry links.
     expect(scanned).toBeGreaterThan(50);
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   // RELEASE-20: repository-only content is cited from packed docs by
   // absolute repository URL on the repository's main line — a deliberate
   // living pointer. `linksOf` collects relative links only, so those URLs
   // escape both the closure above and scripts/check-links.mjs (meta-33);
-  // this scan verifies each one against the repository tree: the branch
-  // segment is exactly `main`, the path is a repository file, and a
-  // fragment on a Markdown target names an anchor that file renders.
+  // this scan verifies each one against the repository tree: `blob` and
+  // `tree` links both name this repository and exactly `main`, their path has
+  // the right file/directory kind, and a fragment on a Markdown target names
+  // an anchor that file renders. Other repositories remain ordinary external
+  // citations; a foreign owner/repository naming a local path is a malformed
+  // living pointer rather than an escape from this check.
+  // The dry-pack plus full Markdown/anchor scan exceeds Vitest's five-second
+  // default on slower Node 20 CI runners, so budget only this heavy case.
   it('resolves every living-pointer URL in packed markdown against the repository', () => {
     const npmCache = mkdtempSync(join(tmpdir(), 'playbook-npm-cache-'));
     let out: string;
@@ -883,8 +1074,8 @@ describe('packed tarball contents (RELEASE-18)', () => {
     };
     const blankCodeSpans = (text: string): string =>
       text.replace(CODE_SPAN, (span) => span.replace(/[^\n]/g, ' '));
-    const LIVING_POINTER =
-      /https:\/\/github\.com\/sublang-ai\/playbook\/blob\/([^/]+)\/([^#)\s]+)(#[^)\s]*)?/g;
+    const GITHUB_CONTENT_POINTER =
+      /https:\/\/github\.com\/([^/)\s]+)\/([^/)\s]+)\/(blob|tree)\/([^/]+)\/([^#)\s]+)(#[^)\s]*)?/g;
     const decode = (part: string): string => {
       try {
         return decodeURIComponent(part);
@@ -893,31 +1084,56 @@ describe('packed tarball contents (RELEASE-18)', () => {
       }
     };
     const failures: string[] = [];
+    const forms = new Set<string>();
     let scanned = 0;
     for (const doc of packedDocs) {
-      // release-28 step 7 pins packed bytes to repository bytes, so the
+      // release-28 step 8 pins packed bytes to repository bytes, so the
       // repository copy is the packed content.
       const body = blankCodeSpans(
         blankFences(readFileSync(join(repoRoot, doc), 'utf8')),
       );
-      for (const match of body.matchAll(LIVING_POINTER)) {
-        scanned += 1;
-        const [url, branch, pathPart, fragmentPart] = match;
+      for (const match of body.matchAll(GITHUB_CONTENT_POINTER)) {
+        const [url, owner, repository, form, branch, pathPart, fragmentPart] =
+          match;
         const line = body.slice(0, match.index).split('\n').length;
         const where = `${doc}:${line} (${url})`;
+        const dest = posix.normalize(decode(pathPart));
+        const safePath = !dest.startsWith('..') && !posix.isAbsolute(dest);
+        const repositoryTarget = join(repoRoot, dest);
+        const targetExists = safePath && existsSync(repositoryTarget);
+        const isThisRepository =
+          owner === 'sublang-ai' && repository === 'playbook';
+        if (!isThisRepository) {
+          if (targetExists) {
+            failures.push(
+              `${where} points at local path ${dest} through ${owner}/${repository}, not sublang-ai/playbook`,
+            );
+          }
+          continue;
+        }
+        scanned += 1;
+        forms.add(form);
         if (branch !== 'main') {
           failures.push(
             `${where} pins branch ${branch}, not the main living pointer`,
           );
           continue;
         }
-        const dest = posix.normalize(decode(pathPart));
-        if (dest.startsWith('..') || posix.isAbsolute(dest)) {
+        if (!safePath) {
           failures.push(`${where} escapes the repository: ${dest}`);
           continue;
         }
-        if (!existsSync(join(repoRoot, dest))) {
-          failures.push(`${where} targets no repository file: ${dest}`);
+        if (!targetExists) {
+          failures.push(`${where} targets no repository path: ${dest}`);
+          continue;
+        }
+        const target = statSync(repositoryTarget);
+        if (form === 'blob' && !target.isFile()) {
+          failures.push(`${where} blob target is not a file: ${dest}`);
+          continue;
+        }
+        if (form === 'tree' && !target.isDirectory()) {
+          failures.push(`${where} tree target is not a directory: ${dest}`);
           continue;
         }
         const fragment =
@@ -933,7 +1149,10 @@ describe('packed tarball contents (RELEASE-18)', () => {
     expect(failures).toEqual([]);
     // Guard against a vacuous pass: packed docs really carry living pointers.
     expect(scanned).toBeGreaterThan(10);
-  });
+    // Both URL forms occur in the packed docs; pin both parser branches so a
+    // blob-only matcher cannot silently wave through a broken tree pointer.
+    expect([...forms].sort()).toEqual(['blob', 'tree']);
+  }, SUBPROCESS_TIMEOUT_MS);
 });
 
 describe('public CLI and registry surface (RELEASE-21)', () => {
@@ -943,22 +1162,28 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
   const CODE_BASE = 'reference/sdlc/code.playbook/';
   const REVIEW_BASE = 'reference/sdlc/review.playbook/';
   const DECIDE_BASE = 'reference/sdlc/decide.playbook/';
+  const DEV_BASE = 'reference/sdlc/dev.playbook/';
+  const BRANCH_BASE = 'reference/sdlc/branch.playbook/';
+  const PR_BASE = 'reference/sdlc/pr.playbook/';
 
   it('declares the playbook bin and registry exports, not the retired surfaces', () => {
-    expect(manifest.bin).toHaveProperty('playbook');
-    expect(manifest.bin).not.toHaveProperty('playbook-code');
+    expect(manifest.bin).toEqual({
+      playbook: 'reference/sdlc/code.playbook/bin/playbook.js',
+    });
     expect(manifest.exports).toHaveProperty('./runtime');
     expect(manifest.exports).toHaveProperty('./xstate-runtime');
     expect(manifest.exports).toHaveProperty('./code/registry');
     expect(manifest.exports).toHaveProperty('./review/registry');
     expect(manifest.exports).toHaveProperty('./decide/registry');
+    expect(manifest.exports).toHaveProperty('./dev/registry');
+    expect(manifest.exports).toHaveProperty('./branch/registry');
+    expect(manifest.exports).toHaveProperty('./pr/registry');
     expect(manifest.exports).toHaveProperty('./captain/playbook');
     expect(manifest.exports).not.toHaveProperty('./discuss/playbook');
     expect(manifest.exports).not.toHaveProperty('./discuss/registry');
     expect(manifest.exports).not.toHaveProperty('./captain/registry');
     expect(manifest.exports).not.toHaveProperty('./code/tmux-play');
     expect(manifest.exports).not.toHaveProperty('./interactive-session');
-    expect(manifest.bin).not.toHaveProperty('playbook-managed-session');
   });
 
   // RELEASE-20: the semver-stable unit of a public subpath is the module's
@@ -992,7 +1217,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
   // a subpath added to `package.json` go red until it is recorded.
   const UNPINNABLE_SUBPATHS: Record<string, string> = {
     './slc/*':
-      'a wildcard directory mapping to authored specs, not a module with an export set',
+      'compiler assets and CLI tools; module exports are internal per RELEASE-16',
   };
 
   const publicSubpaths = (): string[] =>
@@ -1001,17 +1226,25 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       .sort();
 
   const PUBLIC_MODULE_EXPORTS: Record<string, readonly string[]> = {
-    './runtime': [],
+    // DR-063 §1: the closed failure-code list and its validator are the
+    // contract module's own value exports.
+    './runtime': ['PLAYBOOK_FAILURE_CODES', 'assertPlaybookFailureCause'],
     './xstate-runtime': [
+      'ABORTED_FAILURE_CAUSE',
       'BOSS_REPLY_ERRORS',
       'NestedPlaybookCallError',
+      'PlaybookSemanticCandidateStructureError',
       'RUNTIME_ABI',
       'SUPPORTED_ARTIFACT_SCHEMAS',
       'activePlaybookStateMetadata',
       'adjudicatePlayerOutput',
       'assertJsonSafe',
+      'assertPlaybookEffectLedger',
       'assertPlaybookRuntimeSnapshot',
+      'attachPlaybookFailureCause',
       'combineAbortSignals',
+      'composePlayerContinuation',
+      'createFailureCauseRetention',
       'createNestedPlaybookBridge',
       'createPlayerBridge',
       'createXStatePlaybookRuntime',
@@ -1021,20 +1254,29 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'defaultComposePlayerPrompt',
       'defaultExtractRequiredFields',
       'detachPersistedMachineSnapshot',
+      'effectAuthorizedPreExistingBlock',
+      'emptyPlaybookEffectLedger',
       'extractJsonValue',
+      'governedSettlementCause',
       'hiddenControlEnvelope',
+      'isPlaybookEffectLedgerMonotonicExtension',
       'normalizeError',
       'normalizeErrorCompact',
       'normalizeErrorFull',
       'normalizePlaybookSnapshot',
       'parseJudgeJson',
       'pendingBossQuestionFromContext',
+      'playerFailureCause',
       'registerPlaybookAbortCleanup',
+      'reconcilePlaybookSemanticEvidence',
+      'renderGovernedOutcomeContract',
       'resumableStateIdsFromMachine',
+      'runtimeDefectCause',
       'snapshotJsonValue',
       'snapshotPlaybookSession',
       'stateDescriptionsFromMachine',
       'stripCodeFence',
+      'terminalOutcomesFromMachine',
       'validateCaptainResult',
       'validatePlaybookCallResult',
       'validatePlaybookCallStart',
@@ -1042,7 +1284,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'waitForPlaybookQuiescence',
     ],
     './captain/playbook': ['_internal', 'createPlaybookRuntime', 'default'],
-    './code/playbook': ['_internal', 'default'],
+    './code/playbook': ['_internal', 'default', 'validateOptions'],
     './code/registry': [
       'codeCopyPasteGuardNames',
       'codePlaybookRegistryEntry',
@@ -1053,11 +1295,36 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'validateCodeOptions',
     ],
     './playbook-captain': [
+      '_internal',
+      'assertPlaybookCaptainUnresolvedEffects',
       'assertPlaybookCaptainShellSnapshot',
+      'projectUnresolvedEffects',
       'createPlaybookCaptainShell',
       'default',
     ],
-    './review/playbook': ['_internal', 'default'],
+    './session-store': [
+      'RECORDS_STREAM_VERSION',
+      'assertCaptainSessionExecutionCompatible',
+      'attachSessionHints',
+      'createSessionStore',
+      'isUncertainTurnDiscardable',
+      'defaultSessionsDir',
+      'openSessionStore',
+      'projectCaptainSessionStructure',
+      'validateCaptainSessionExecutionProjection',
+      'validateCaptainSessionStructuralProjection',
+      'validateSessionContext',
+      'validateSessionManifest',
+    ],
+    './host-capabilities': [
+      'REPOSITORY_RECEIPT_CLASSIFICATIONS',
+      'captureRepositoryReceipt',
+      'classifyRepositoryReceipt',
+      'createFailClosedHostCapabilities',
+      'createWorktreeHostCapabilities',
+      'observeGitRepository',
+    ],
+    './review/playbook': ['_internal', 'default', 'validateOptions'],
     './review/registry': [
       'default',
       'reviewCopyPasteGuardNames',
@@ -1067,7 +1334,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'reviewSummaryPolicy',
       'validateReviewOptions',
     ],
-    './decide/playbook': ['_internal', 'createPlaybookRuntime', 'default'],
+    './decide/playbook': ['_internal', 'default', 'validateOptions'],
     './decide/registry': [
       'decideCopyPasteGuardNames',
       'decidePlaybookRegistryEntry',
@@ -1076,6 +1343,50 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'decideSummaryPolicy',
       'default',
       'validateDecideOptions',
+    ],
+    './dev/playbook': ['_internal', 'default', 'validateOptions'],
+    './dev/registry': [
+      'default',
+      'devCopyPasteGuardNames',
+      'devPlaybookRegistryEntry',
+      'devSavedCountsLine',
+      'devStateCountLabels',
+      'devSummaryPolicy',
+      'validateDevOptions',
+    ],
+    './branch/playbook': ['_internal', 'default', 'validateOptions'],
+    './branch/registry': [
+      'branchCopyPasteGuardNames',
+      'branchPlaybookRegistryEntry',
+      'branchSavedCountsLine',
+      'branchStateCountLabels',
+      'branchSummaryPolicy',
+      'default',
+      'validateBranchOptions',
+    ],
+    './pr/playbook': ['_internal', 'default', 'validateOptions'],
+    './pr/registry': [
+      'default',
+      'prCopyPasteGuardNames',
+      'prPlaybookRegistryEntry',
+      'prSavedCountsLine',
+      'prStateCountLabels',
+      'prSummaryPolicy',
+      'validatePrOptions',
+    ],
+    './session-host': [
+      'composeGenericConfig',
+      'createCaptainSessionHost',
+      'discardSessionUncertain',
+      'driveHeadlessCaptainTurn',
+      'executionConfigFromPlan',
+      'installRetainedGenerationsForLaunch',
+      'loadLaunchPlan',
+      'normalizeLaunchPlan',
+      'openSessionHost',
+      'projectTmuxConfig',
+      'resolveLaunchSessionsDir',
+      'validateFrozenExecutionConfig',
     ],
   };
 
@@ -1087,34 +1398,61 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'CaptainResult',
       'JsonValue',
       'NormalizedError',
+      'PlaybookAdoptionContext',
       'PlaybookCallRequest',
       'PlaybookCallResult',
       'PlaybookCallStart',
+      'PLAYBOOK_FAILURE_CODES',
       'PlaybookControlAction',
+      'PlaybookControlActionReason',
       'PlaybookControlReceipt',
+      'PlaybookControlStanding',
       'PlaybookControlView',
+      'PlaybookEffectBoundary',
+      'PlaybookEffectBoundaryStart',
+      'PlaybookEffectLedger',
+      'PlaybookEffectLedgerCapability',
+      'PlaybookEffectLedgerCommand',
+      'PlaybookEffectLedgerCommandBatch',
+      'PlaybookEffectLogicalOperation',
+      'PlaybookFailureCause',
+      'PlaybookFailureCode',
+      'PlaybookFailureErrorEvidence',
+      'PlaybookFailureEvidence',
+      'PlaybookFailurePaths',
+      'PlaybookRecoveryCheckpoint',
+      'PlaybookRecoveryOffer',
       'PlaybookPendingBossQuestion',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
+      'PlaybookRetainedGenerationMetadata',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
       'PlaybookRuntimeSnapshot',
       'PlaybookRoleBinding',
+      'PlaybookRepositoryDisposition',
+      'PlaybookRepositoryObservation',
+      'PlaybookRepositoryPreExistingChanges',
+      'PlaybookRepositoryReceipt',
       'PlaybookSession',
+      'PlaybookStepRecord',
       'PlaybookState',
       'PlaybookStateValue',
       'PlaybookSuspendedCall',
+      'PlaybookTerminalOutcome',
       'PlaybookTraceEvent',
       'PlaybookTraceType',
       'PlayerCallOptions',
       'PlayerResult',
       'PlayerSessionStore',
+      'assertPlaybookFailureCause',
     ],
     // Reached through the one resolved wildcard in the package: this file
     // re-exports the engine module whole, so the engine's declarations are
     // part of this subpath's semver-stable surface and are recorded here.
     './xstate-runtime': [
+      'ABORTED_FAILURE_CAUSE',
       'BOSS_REPLY_ERRORS',
       'JudgePurpose',
       'NestedPlaybookBridge',
@@ -1126,9 +1464,18 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallFinished',
       'PlaybookCallStarted',
       'PlaybookCaptainInput',
+      'PlaybookFailureCauseRetention',
       'PlaybookPendingBossQuestionContext',
       'PlaybookPlayerInput',
       'PlaybookRuntimeSnapshotValidationOptions',
+      'PlaybookReconciledSemanticOutput',
+      'PlaybookRetainedSemanticEvidence',
+      'PlaybookSemanticCandidateStructureError',
+      'PlaybookSemanticEvidenceInput',
+      'PlaybookSemanticFieldAuthority',
+      'PlaybookSemanticOutcomeSpec',
+      'PlaybookSemanticReconciliation',
+      'PlaybookSemanticReconciliationReason',
       'PlaybookScriptInput',
       'PlaybookStateMetadata',
       'PlayerAdjudicationSpec',
@@ -1143,15 +1490,28 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'XStateCaptainCallOptions',
       'XStateCaptainStrategy',
       'XStateCaptainStrategyRun',
+      'XStateGovernedOutcomeSpec',
+      'XStateOutcomeAuthoritySpec',
+      'XStateOutcomeFieldAuthority',
+      'XStatePlaybookRuntimeConstruction',
+      'XStatePlaybookRuntimeFactory',
+      'XStatePlaybookRuntimeFactoryOptions',
+      'XStatePlaybookRuntimeSpecV3',
       'XStatePromptIdentity',
       'XStateRoleStateStatus',
       'XStatePlaybookRuntimeCompat',
       'XStatePlaybookRuntimeSpec',
+      'XStateRepositoryCapability',
+      'XStateRepositoryDisposition',
       'activePlaybookStateMetadata',
       'adjudicatePlayerOutput',
       'assertJsonSafe',
+      'assertPlaybookEffectLedger',
       'assertPlaybookRuntimeSnapshot',
+      'attachPlaybookFailureCause',
       'combineAbortSignals',
+      'composePlayerContinuation',
+      'createFailureCauseRetention',
       'createNestedPlaybookBridge',
       'createPlayerBridge',
       'createXStatePlaybookRuntime',
@@ -1161,20 +1521,29 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'defaultComposePlayerPrompt',
       'defaultExtractRequiredFields',
       'detachPersistedMachineSnapshot',
+      'effectAuthorizedPreExistingBlock',
+      'emptyPlaybookEffectLedger',
       'extractJsonValue',
+      'governedSettlementCause',
       'hiddenControlEnvelope',
+      'isPlaybookEffectLedgerMonotonicExtension',
       'normalizeError',
       'normalizeErrorCompact',
       'normalizeErrorFull',
       'normalizePlaybookSnapshot',
       'parseJudgeJson',
       'pendingBossQuestionFromContext',
+      'playerFailureCause',
       'registerPlaybookAbortCleanup',
+      'reconcilePlaybookSemanticEvidence',
+      'renderGovernedOutcomeContract',
       'resumableStateIdsFromMachine',
+      'runtimeDefectCause',
       'snapshotJsonValue',
       'snapshotPlaybookSession',
       'stateDescriptionsFromMachine',
       'stripCodeFence',
+      'terminalOutcomesFromMachine',
       'validateCaptainResult',
       'validatePlaybookCallResult',
       'validatePlaybookCallStart',
@@ -1221,7 +1590,6 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
     './code/playbook': [
       'CaptainCallOptions',
       'CaptainResult',
-      'CodePlaybookOptions',
       'JsonValue',
       'NormalizedError',
       'PlaybookCallRequest',
@@ -1229,11 +1597,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1245,6 +1615,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerSessionStore',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './code/registry': [
       'CodeOptions',
@@ -1259,13 +1630,109 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'validateCodeOptions',
     ],
     './playbook-captain': [
+      '_internal',
       'PlaybookCaptainDeps',
+      'ProgressChange',
+      'InterruptedReport',
+      'PlaybookCaptainFrameSnapshot',
       'PlaybookCaptainRegistryEntry',
+      'PlaybookCaptainRegistryEntryV3',
+      'PlaybookCaptainRuntimeProfile',
+      'PlaybookCaptainRetainedGeneration',
+      'PlaybookCaptainRetentionUpdate',
+      'PlaybookCaptainSettlement',
       'PlaybookCaptainShell',
       'PlaybookCaptainShellSnapshot',
+      'PlaybookCaptainUnresolvedEffect',
+      'PlaybookCaptainUnresolvedEffectReference',
+      'PlaybookHostConstructionCapabilities',
+      'assertPlaybookCaptainUnresolvedEffects',
       'assertPlaybookCaptainShellSnapshot',
+      'projectUnresolvedEffects',
       'createPlaybookCaptainShell',
       'default',
+    ],
+    './session-store': [
+      'LeaseReplayStreamReadResult',
+      'PlaybookSessionLease',
+      'PlaybookSessionLifecycle',
+      'PlaybookSessionListResult',
+      'PlaybookSessionStore',
+      'PlaybookSessionSummary',
+      'RECORDS_STREAM_VERSION',
+      'ReplayJsonValue',
+      'ReplayRecord',
+      'ReplayStreamEntry',
+      'ReplayStreamReadOptions',
+      'ReplayStreamReadResult',
+      'ReplayStreamStatus',
+      'SessionContext',
+      'SessionEffectLedger',
+      'SessionExecutionProjection',
+      'SessionFreshBoundary',
+      'SessionGraph',
+      'SessionHints',
+      'SessionHistory',
+      'SessionManifest',
+      'SessionRecovery',
+      'SessionStep',
+      'SessionProgressChange',
+      'SessionReplayCheckpoint',
+      'SessionRetentionUpdate',
+      'SessionSnapshot',
+      'SessionStructuralProjection',
+      'SessionUnresolvedEffect',
+      'SessionValidation',
+      'SharedSessionStore',
+      'SkippedPlaybookSession',
+      'StoredSessionManifest',
+      'assertCaptainSessionExecutionCompatible',
+      'attachSessionHints',
+      'createSessionStore',
+      'isUncertainTurnDiscardable',
+      'defaultSessionsDir',
+      'openSessionStore',
+      'projectCaptainSessionStructure',
+      'validateCaptainSessionExecutionProjection',
+      'validateCaptainSessionStructuralProjection',
+      'validateSessionContext',
+      'validateSessionManifest',
+    ],
+    // DR-046: the worktree host-capability facade. Its ledger, receipt,
+    // observation, and question types are re-declared name for name from
+    // `./runtime` so the declaration stays self-contained.
+    './host-capabilities': [
+      'EffectBoundarySeed',
+      'HostCapabilities',
+      'JsonValue',
+      'PlaybookEffectBoundary',
+      'PlaybookEffectBoundaryStart',
+      'PlaybookEffectLedger',
+      'PlaybookEffectLedgerCapability',
+      'PlaybookEffectLedgerCommand',
+      'PlaybookEffectLedgerCommandBatch',
+      'PlaybookEffectLogicalOperation',
+      'PlaybookPendingBossQuestion',
+      'PlaybookRepositoryDisposition',
+      'PlaybookRepositoryObservation',
+      'PlaybookRepositoryPreExistingChanges',
+      'PlaybookRepositoryReceipt',
+      'REPOSITORY_RECEIPT_CLASSIFICATIONS',
+      'RepositoryCapability',
+      'RepositoryCompletionEvidence',
+      'RepositoryExclusiveCompletion',
+      'RepositoryExclusiveResult',
+      'RepositoryIdentity',
+      'RepositoryReceiptClassification',
+      'RepositoryReceiptOptions',
+      'WorktreeHostCapabilities',
+      'WorktreeHostCapabilitiesOptions',
+      'WorktreeRepositoryCapability',
+      'captureRepositoryReceipt',
+      'classifyRepositoryReceipt',
+      'createFailClosedHostCapabilities',
+      'createWorktreeHostCapabilities',
+      'observeGitRepository',
     ],
     './review/playbook': [
       'CaptainCallOptions',
@@ -1277,11 +1744,13 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallStart',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
       'PlaybookRuntime',
       'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
       'PlaybookRuntimeSnapshot',
       'PlaybookSession',
       'PlaybookState',
@@ -1291,9 +1760,9 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerCallOptions',
       'PlayerResult',
       'PlayerSessionStore',
-      'ReviewPlaybookOptions',
       '_internal',
       'default',
+      'validateOptions',
     ],
     './review/registry': [
       'PlaybookSummaryPolicy',
@@ -1315,9 +1784,9 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlaybookCallRequest',
       'PlaybookCallResult',
       'PlaybookCallStart',
-      'PlaybookControlAction',
       'PlaybookControlReceipt',
       'PlaybookControlView',
+      'PlaybookHostCapabilities',
       'PlaybookPendingCall',
       'PlaybookPorts',
       'PlaybookRunResult',
@@ -1334,8 +1803,8 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'PlayerResult',
       'PlayerSessionStore',
       '_internal',
-      'createPlaybookRuntime',
       'default',
+      'validateOptions',
     ],
     './decide/registry': [
       'DecideOptions',
@@ -1348,6 +1817,150 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'decideSummaryPolicy',
       'default',
       'validateDecideOptions',
+    ],
+    './dev/playbook': [
+      'CaptainCallOptions',
+      'CaptainResult',
+      'JsonValue',
+      'NormalizedError',
+      'PlaybookCallRequest',
+      'PlaybookCallResult',
+      'PlaybookCallStart',
+      'PlaybookControlReceipt',
+      'PlaybookControlView',
+      'PlaybookHostCapabilities',
+      'PlaybookPendingCall',
+      'PlaybookPorts',
+      'PlaybookRunResult',
+      'PlaybookRuntime',
+      'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
+      'PlaybookRuntimeSnapshot',
+      'PlaybookSession',
+      'PlaybookState',
+      'PlaybookStateValue',
+      'PlaybookTraceEvent',
+      'PlaybookTraceType',
+      'PlayerCallOptions',
+      'PlayerResult',
+      'PlayerSessionStore',
+      '_internal',
+      'default',
+      'validateOptions',
+    ],
+    './dev/registry': [
+      'DevOptions',
+      'DevPlaybookRegistryEntry',
+      'PlaybookSummaryPolicy',
+      'default',
+      'devCopyPasteGuardNames',
+      'devPlaybookRegistryEntry',
+      'devSavedCountsLine',
+      'devStateCountLabels',
+      'devSummaryPolicy',
+      'validateDevOptions',
+    ],
+    './branch/playbook': [
+      'CaptainCallOptions',
+      'CaptainResult',
+      'JsonValue',
+      'NormalizedError',
+      'PlaybookCallRequest',
+      'PlaybookCallResult',
+      'PlaybookCallStart',
+      'PlaybookControlReceipt',
+      'PlaybookControlView',
+      'PlaybookHostCapabilities',
+      'PlaybookPendingCall',
+      'PlaybookPorts',
+      'PlaybookRunResult',
+      'PlaybookRuntime',
+      'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
+      'PlaybookRuntimeSnapshot',
+      'PlaybookSession',
+      'PlaybookState',
+      'PlaybookStateValue',
+      'PlaybookTraceEvent',
+      'PlaybookTraceType',
+      'PlayerCallOptions',
+      'PlayerResult',
+      'PlayerSessionStore',
+      '_internal',
+      'default',
+      'validateOptions',
+    ],
+    './branch/registry': [
+      'BranchOptions',
+      'BranchPlaybookRegistryEntry',
+      'PlaybookSummaryPolicy',
+      'branchCopyPasteGuardNames',
+      'branchPlaybookRegistryEntry',
+      'branchSavedCountsLine',
+      'branchStateCountLabels',
+      'branchSummaryPolicy',
+      'default',
+      'validateBranchOptions',
+    ],
+    './pr/playbook': [
+      'CaptainCallOptions',
+      'CaptainResult',
+      'JsonValue',
+      'NormalizedError',
+      'PlaybookCallRequest',
+      'PlaybookCallResult',
+      'PlaybookCallStart',
+      'PlaybookControlReceipt',
+      'PlaybookControlView',
+      'PlaybookHostCapabilities',
+      'PlaybookPendingCall',
+      'PlaybookPorts',
+      'PlaybookRunResult',
+      'PlaybookRuntime',
+      'PlaybookRuntimeFactory',
+      'PlaybookRuntimeOptions',
+      'PlaybookRuntimeSnapshot',
+      'PlaybookSession',
+      'PlaybookState',
+      'PlaybookStateValue',
+      'PlaybookTraceEvent',
+      'PlaybookTraceType',
+      'PlayerCallOptions',
+      'PlayerResult',
+      'PlayerSessionStore',
+      '_internal',
+      'default',
+      'validateOptions',
+    ],
+    './pr/registry': [
+      'PlaybookSummaryPolicy',
+      'PrOptions',
+      'PrPlaybookRegistryEntry',
+      'default',
+      'prCopyPasteGuardNames',
+      'prPlaybookRegistryEntry',
+      'prSavedCountsLine',
+      'prStateCountLabels',
+      'prSummaryPolicy',
+      'validatePrOptions',
+    ],
+    './session-host': [
+      'OpenSessionHostOptions',
+      'SessionHost',
+      'SessionHostController',
+      'SessionHostOptions',
+      'composeGenericConfig',
+      'createCaptainSessionHost',
+      'discardSessionUncertain',
+      'driveHeadlessCaptainTurn',
+      'executionConfigFromPlan',
+      'installRetainedGenerationsForLaunch',
+      'loadLaunchPlan',
+      'normalizeLaunchPlan',
+      'openSessionHost',
+      'projectTmuxConfig',
+      'resolveLaunchSessionsDir',
+      'validateFrozenExecutionConfig',
     ],
   };
 
@@ -1480,6 +2093,291 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
     },
   );
 
+  it('publishes a self-contained strict session-store declaration', () => {
+    const declaration = declarationSourceOf('./session-store');
+    expect(declaration).not.toMatch(/^\s*import\b/m);
+    expect(declaration).not.toMatch(/\bfrom\s+['"]/);
+
+    const scratch = mkdtempSync(join(tmpdir(), 'playbook-session-types-'));
+    try {
+      mkdirSync(join(scratch, 'node_modules', '@sublang'), { recursive: true });
+      symlinkSync(
+        repoRoot,
+        join(scratch, 'node_modules', '@sublang', 'playbook'),
+        'junction',
+      );
+      writeFileSync(join(scratch, 'package.json'), '{"type":"module"}\n');
+      const fixture = join(scratch, 'consumer.ts');
+      writeFileSync(
+        fixture,
+        `// @ts-expect-error the facade has no default export
+import sessionStoreDefault, {
+  RECORDS_STREAM_VERSION,
+  defaultSessionsDir,
+  openSessionStore,
+  type LeaseReplayStreamReadResult,
+  type PlaybookSessionLease,
+  type PlaybookSessionStore,
+  type ReplayStreamReadOptions,
+  type ReplayStreamStatus,
+} from '@sublang/playbook/session-store';
+
+void sessionStoreDefault;
+interface ObservedRecord {
+  readonly type: 'player_event';
+  readonly event: { readonly text: string };
+}
+declare const observed: ObservedRecord;
+declare const lease: PlaybookSessionLease;
+
+const version: 1 = RECORDS_STREAM_VERSION;
+const sessionsDir: string = defaultSessionsDir();
+const store: PlaybookSessionStore = openSessionStore(sessionsDir);
+const appendResult: Promise<void> = lease.append(observed, 'coder');
+const options: ReplayStreamReadOptions = { afterSeq: undefined };
+const status: ReplayStreamStatus = lease.streamStatus();
+
+async function consume(): Promise<void> {
+  const summary = await store.read(lease.sessionId);
+  const schemaVersion: number = summary.schemaVersion;
+  const sessionId: string = summary.sessionId;
+  const state: 'settled' | 'uncertain' | 'history-only' = summary.state;
+  const cwd: string = summary.cwd;
+  const updatedAt: string = summary.updatedAt;
+  // @ts-expect-error the facade cannot expose the canonical snapshot
+  summary.snapshot;
+  // @ts-expect-error the facade cannot expose provider credentials
+  summary.resumeToken;
+
+  const followed = await store.readStream(sessionId, options);
+  const readable: number = followed.lastReadableSeq;
+  // @ts-expect-error a lease-free reader cannot claim durability
+  followed.lastDurableSeq;
+  // @ts-expect-error a lease-free reader cannot claim incompleteness
+  followed.incomplete;
+
+  const bound: LeaseReplayStreamReadResult = await lease.readStream();
+  const durable: number = bound.lastDurableSeq;
+  const incomplete: boolean = bound.incomplete;
+  void [schemaVersion, state, cwd, updatedAt, readable, durable, incomplete];
+}
+
+// @ts-expect-error callers cannot supply an envelope sequence
+lease.append(observed, 'coder', 2);
+// @ts-expect-error primitive records are outside the declaration boundary
+lease.append('player_event');
+void [version, store, appendResult, status, consume];
+`,
+      );
+      const program = ts.createProgram([fixture], {
+        module: ts.ModuleKind.NodeNext,
+        moduleResolution: ts.ModuleResolutionKind.NodeNext,
+        target: ts.ScriptTarget.ES2022,
+        strict: true,
+        noEmit: true,
+        skipLibCheck: false,
+        types: ['node'],
+        typeRoots: [join(repoRoot, 'node_modules', '@types')],
+      });
+      expect(
+        ts.getPreEmitDiagnostics(program).map((diagnostic) =>
+          ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '),
+        ),
+      ).toEqual([]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }, SUBPROCESS_TIMEOUT_MS);
+
+  // DR-046 / playbook-cli-87: the host-capabilities declaration is
+  // self-contained and strict — a consumer with `skipLibCheck: false` and only
+  // Node's globals must compile the exact declared usage and be refused every
+  // member the facade deliberately omits.
+  it('publishes a self-contained strict host-capabilities declaration', () => {
+    const declaration = declarationSourceOf('./host-capabilities');
+    expect(declaration).not.toMatch(/^\s*import\b/m);
+    expect(declaration).not.toMatch(/\bfrom\s+['"]/);
+    expect(declaration).not.toMatch(/\/\/\/\s*<reference/);
+
+    const scratch = mkdtempSync(join(tmpdir(), 'playbook-host-capability-types-'));
+    try {
+      mkdirSync(join(scratch, 'node_modules', '@sublang'), { recursive: true });
+      symlinkSync(
+        repoRoot,
+        join(scratch, 'node_modules', '@sublang', 'playbook'),
+        'junction',
+      );
+      writeFileSync(join(scratch, 'package.json'), '{"type":"module"}\n');
+      const fixture = join(scratch, 'consumer.ts');
+      writeFileSync(
+        fixture,
+        `// @ts-expect-error the facade has no default export
+import hostCapabilitiesDefault, {
+  REPOSITORY_RECEIPT_CLASSIFICATIONS,
+  captureRepositoryReceipt,
+  classifyRepositoryReceipt,
+  createFailClosedHostCapabilities,
+  createWorktreeHostCapabilities,
+  observeGitRepository,
+  type EffectBoundarySeed,
+  type HostCapabilities,
+  type PlaybookEffectLedger,
+  type PlaybookRepositoryObservation,
+  type PlaybookRepositoryReceipt,
+  type RepositoryCompletionEvidence,
+  type RepositoryExclusiveCompletion,
+  type WorktreeHostCapabilities,
+} from '@sublang/playbook/host-capabilities';
+
+void hostCapabilitiesDefault;
+declare const seed: EffectBoundarySeed;
+declare const signal: AbortSignal;
+interface Outcome {
+  readonly baselineHead: string;
+  readonly gitDir: string;
+}
+
+const classifications: readonly string[] = REPOSITORY_RECEIPT_CLASSIFICATIONS;
+const closed: HostCapabilities = createFailClosedHostCapabilities();
+// @ts-expect-error a fail-closed capability observes no worktree
+closed.repository.observe;
+
+async function consume(): Promise<void> {
+  const capabilities: WorktreeHostCapabilities =
+    await createWorktreeHostCapabilities({
+      cwd: '/repo',
+      playbookId: 'workflow',
+      requiredRoleIds: ['coder'],
+      concurrentRoleSets: [],
+      effectLedger: {
+        schemaVersion: 1,
+        revision: 0,
+        boundaries: [],
+        logicalOperations: [],
+      },
+    });
+  const worktree: string = capabilities.repository.identity.worktree;
+  const observation: PlaybookRepositoryObservation =
+    await capabilities.repository.observe();
+  const head: string = observation.head;
+  const ledger: PlaybookEffectLedger = capabilities.effectLedger.snapshot();
+  const revision: number = ledger.revision;
+  const result = await capabilities.repository.runExclusive({
+    signal,
+    effectBoundary: seed,
+    operation: async ({ baseline, identity }): Promise<Outcome> => ({
+      baselineHead: baseline.head,
+      gitDir: identity.gitDir,
+    }),
+    completeEffectBoundary: (
+      completion: RepositoryExclusiveCompletion<Outcome>,
+    ): RepositoryCompletionEvidence => {
+      const spent: boolean = completion.boundary.correctionBudget.spent;
+      const detail: string =
+        completion.operation.status === 'fulfilled'
+          ? completion.operation.value.gitDir
+          : String(completion.operation.reason);
+      void [spent, detail, completion.outcomeReceipt.classification];
+      return { finalText: 'done', semanticCandidate: { guard: 'done' } };
+    },
+  });
+  const commitOid: string | undefined = result.receipt.commitOid;
+  const value: Outcome | undefined =
+    result.operation.status === 'fulfilled' ? result.operation.value : undefined;
+  const parked = await capabilities.repository.runDeferred({
+    mode: 'park',
+    operationId: '00000000-0000-4000-8000-000000000001',
+  });
+  const parkedStatus: 'parked' | 'restored' | 'checkpoint-mismatch' | 'ineligible' =
+    parked.status;
+  const widened: HostCapabilities = capabilities;
+  const captured: PlaybookRepositoryReceipt = await captureRepositoryReceipt(
+    observation,
+    { allowedDispositions: ['unchanged'] },
+  );
+  const classified: PlaybookRepositoryReceipt = await classifyRepositoryReceipt(
+    observation,
+    observation,
+    { allowedDispositions: ['one-descendant-commit', 'deferred'] },
+  );
+  const observed: PlaybookRepositoryObservation =
+    await observeGitRepository('/repo');
+  // @ts-expect-error a receipt classification is not a declared disposition
+  await captureRepositoryReceipt(observation, { allowedDispositions: ['multiple-commits'] });
+  const claim = await capabilities.repository.acquire({ signal });
+  await claim.assertOwner();
+  await claim.release();
+  // @ts-expect-error the facade carries no cohort transaction
+  capabilities.repository.runCohort;
+  // @ts-expect-error the facade carries no session lease
+  await createWorktreeHostCapabilities({ cwd: '/repo', playbookId: 'workflow', requiredRoleIds: ['coder'], sessionLease: {} });
+  void [worktree, head, revision, commitOid, value, parkedStatus, widened, captured, classified, observed];
+}
+void [classifications, closed, consume];
+`,
+      );
+      const program = ts.createProgram([fixture], {
+        module: ts.ModuleKind.NodeNext,
+        moduleResolution: ts.ModuleResolutionKind.NodeNext,
+        target: ts.ScriptTarget.ES2022,
+        strict: true,
+        noEmit: true,
+        skipLibCheck: false,
+        types: ['node'],
+        typeRoots: [join(repoRoot, 'node_modules', '@types')],
+      });
+      expect(
+        ts.getPreEmitDiagnostics(program).map((diagnostic) =>
+          ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '),
+        ),
+      ).toEqual([]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }, SUBPROCESS_TIMEOUT_MS);
+
+  it('publishes unresolved-effect as an exact state-only run result', () => {
+    const runtimeDeclaration = declarationSourceOf('./runtime');
+    const runResult = runtimeDeclaration.match(
+      /export type PlaybookRunResult\s*=([\s\S]*?\n};)\n/,
+    )?.[1];
+    expect(runResult).toBeDefined();
+    const unresolvedEffect = runResult!.match(
+      /\{[^{}]*outcome:\s*'unresolved-effect';[^{}]*\}/,
+    )?.[0];
+    expect(unresolvedEffect?.replace(/\s+/g, '')).toBe(
+      "{outcome:'unresolved-effect';state:PlaybookState;}",
+    );
+    expect(unresolvedEffect).not.toMatch(
+      /stateDescription|output|pendingCall|error|effectLedger|receipt|unresolvedEffects|semanticCandidate/,
+    );
+  });
+
+  it('publishes exact bounded unresolved-effect Captain settlements', () => {
+    const declaration = declarationSourceOf('./playbook-captain');
+    const evidence = declaration.match(
+      /export interface PlaybookCaptainUnresolvedEffect\s*\{([\s\S]*?)\n\}/,
+    )?.[1];
+    expect(evidence).toBeDefined();
+    expect(evidence!.replace(/\s+/g, '')).toBe(
+      "readonlyclassification:'one-descendant-commit'|'multiple-commits'|'rewritten-or-non-descendant'|'worktree-only-change'|'concurrent-or-foreign-change'|'observation-ambiguous'|'incomplete';readonlybaselineHead:string;readonlyafterHead?:string;readonlycommitOid?:string;",
+    );
+    expect(evidence).not.toMatch(
+      /path|projection|digest|boundary|operation|call|session|player|semantic|budget|prose/i,
+    );
+
+    const settlement = declaration.match(
+      /export interface PlaybookCaptainSettlement\s*\{([\s\S]*?)\n\}/,
+    )?.[1];
+    expect(settlement).toBeDefined();
+    expect(settlement).toMatch(
+      /readonly unresolvedEffects:\s*readonly PlaybookCaptainUnresolvedEffect\[\];/,
+    );
+    expect(declaration).toMatch(
+      /export declare function assertPlaybookCaptainUnresolvedEffects\(value: unknown[^)]*\): readonly PlaybookCaptainUnresolvedEffect\[\];/,
+    );
+  });
+
   it('declares validated Captain shell snapshots recursively readonly', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'playbook-snapshot-types-'));
     try {
@@ -1526,16 +2424,249 @@ if (snapshot.mode === 'engaged.parked') {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
+
+  it('discriminates schema-gated factory and registry construction types', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'playbook-schema-types-'));
+    try {
+      mkdirSync(join(scratch, 'node_modules', '@sublang'), { recursive: true });
+      symlinkSync(
+        repoRoot,
+        join(scratch, 'node_modules', '@sublang', 'playbook'),
+        'junction',
+      );
+      const fixture = join(scratch, 'consumer.ts');
+      writeFileSync(
+        fixture,
+        `import {
+  createXStatePlaybookRuntime,
+  type XStatePlaybookRuntimeSpec,
+  type XStatePlaybookRuntimeSpecV3,
+  type XStateRepositoryCapability,
+} from '@sublang/playbook/xstate-runtime';
+import type {
+  PlaybookCaptainRegistryEntryV3,
+  PlaybookCaptainRuntimeProfile,
+  PlaybookHostConstructionCapabilities,
+} from '@sublang/playbook/playbook-captain';
+import type {
+  PlaybookEffectBoundaryStart,
+  PlaybookEffectLedgerCapability,
+  PlaybookPorts,
+} from '@sublang/playbook/runtime';
+import { codePlaybookRegistryEntry } from '@sublang/playbook/code/registry';
+import type { PlaybookHostCapabilities as CodePlaybookHostCapabilities } from '@sublang/playbook/code/playbook';
+import { reviewPlaybookRegistryEntry } from '@sublang/playbook/review/registry';
+import type { PlaybookHostCapabilities as ReviewPlaybookHostCapabilities } from '@sublang/playbook/review/playbook';
+import { decidePlaybookRegistryEntry } from '@sublang/playbook/decide/registry';
+import type { PlaybookHostCapabilities as DecideModuleHostCapabilities } from '@sublang/playbook/decide/playbook';
+type DecidePlaybookHostCapabilities = PlaybookHostConstructionCapabilities &
+  DecideModuleHostCapabilities;
+import { devPlaybookRegistryEntry } from '@sublang/playbook/dev/registry';
+import type { PlaybookHostCapabilities as DevPlaybookHostCapabilities } from '@sublang/playbook/dev/playbook';
+import { branchPlaybookRegistryEntry } from '@sublang/playbook/branch/registry';
+import type { PlaybookHostCapabilities as BranchPlaybookHostCapabilities } from '@sublang/playbook/branch/playbook';
+import { prPlaybookRegistryEntry } from '@sublang/playbook/pr/registry';
+import type { PlaybookHostCapabilities as PrPlaybookHostCapabilities } from '@sublang/playbook/pr/playbook';
+import type {
+  HostCapabilities as FacadeHostCapabilities,
+  WorktreeHostCapabilities,
+} from '@sublang/playbook/host-capabilities';
+
+interface Options { readonly mode: string }
+interface Capabilities {
+  readonly observe: () => string;
+  readonly effectLedger: PlaybookEffectLedgerCapability;
+}
+declare const machine: any;
+declare const boundaryStart: PlaybookEffectBoundaryStart;
+declare const effectLedger: PlaybookEffectLedgerCapability;
+declare const repository: XStateRepositoryCapability;
+declare const canonicalSpec: XStatePlaybookRuntimeSpec<Options>;
+declare const v3Spec: XStatePlaybookRuntimeSpecV3<Options>;
+
+// @ts-expect-error a start command cannot carry completion evidence
+boundaryStart.finalText;
+
+type ExclusiveOperation = Parameters<XStateRepositoryCapability['runExclusive']>[0]['operation'];
+const exclusiveOperation: ExclusiveOperation = async ({ baseline, identity }) => {
+  const head: string = baseline.head;
+  void head;
+  void identity;
+};
+declare const resumeShapedOperation: (resume?: string | false) => Promise<void>;
+// @ts-expect-error repository context cannot bind to a resume-token parameter
+const invalidExclusiveOperation: ExclusiveOperation = resumeShapedOperation;
+void exclusiveOperation;
+void invalidExclusiveOperation;
+
+const canonicalFactory = createXStatePlaybookRuntime<Options, Capabilities>(machine, canonicalSpec);
+canonicalFactory({ configuredOptions: { mode: 'safe' }, hostCapabilities: { observe: () => 'head', repository, effectLedger } });
+const canonicalFactorySchema: 3 = canonicalFactory.compat.artifactSchema;
+// @ts-expect-error the schema-3-only factory rejects raw configured options
+canonicalFactory({ mode: 'safe' });
+
+const v3Factory = createXStatePlaybookRuntime<Options, Capabilities>(machine, v3Spec);
+v3Factory({ configuredOptions: { mode: 'safe' }, hostCapabilities: { observe: () => 'head', repository, effectLedger } });
+const v3FactorySchema: 3 = v3Factory.compat.artifactSchema;
+// @ts-expect-error schema 3 requires the disjoint construction object
+v3Factory({ mode: 'safe' });
+// @ts-expect-error schema 3 requires repository serialization around governed calls
+v3Factory({ configuredOptions: { mode: 'safe' }, hostCapabilities: { observe: () => 'head', effectLedger } });
+// @ts-expect-error live host capabilities must use an object type
+createXStatePlaybookRuntime<Options, number>(machine, v3Spec);
+
+const inferredV3Factory = createXStatePlaybookRuntime(machine, v3Spec);
+inferredV3Factory({ configuredOptions: { mode: 'safe' }, hostCapabilities: { repository, effectLedger } });
+// @ts-expect-error inferred schema 3 still rejects raw configured options
+inferredV3Factory({ mode: 'safe' });
+// @ts-expect-error inferred schema 3 still requires an object capability
+inferredV3Factory({ configuredOptions: { mode: 'safe' }, hostCapabilities: 1 });
+
+// DR-046: the self-contained facade declarations are assignable, member for
+// member, to the engine's own construction and capability contracts.
+declare const facadeCapabilities: WorktreeHostCapabilities;
+declare const facadeClosed: FacadeHostCapabilities;
+inferredV3Factory({ configuredOptions: { mode: 'safe' }, hostCapabilities: facadeCapabilities });
+inferredV3Factory({ configuredOptions: { mode: 'safe' }, hostCapabilities: facadeClosed });
+const facadeRepository: XStateRepositoryCapability = facadeCapabilities.repository;
+const facadeLedger: PlaybookEffectLedgerCapability = facadeCapabilities.effectLedger;
+void [facadeRepository, facadeLedger];
+
+// @ts-expect-error schema 3 requires outcome authority metadata
+const wrongV3: XStatePlaybookRuntimeSpecV3<Options> = { snapshotOptions: () => ({ mode: 'safe' }), compat: { artifactSchema: 3, runtimeAbi: 1 } };
+void wrongV3;
+
+declare const configuredOptions: unknown;
+declare const hostCapabilities: PlaybookHostConstructionCapabilities;
+declare const decideHostCapabilities: DecidePlaybookHostCapabilities;
+// The materialized modules type authority as opaque; each registry entry takes
+// the Captain's construction capabilities alongside it (CODE, REVIEW, DEV,
+// and BRANCH for the governed worktree, PR for the script working directory).
+declare const codeHostCapabilities: PlaybookHostConstructionCapabilities &
+  CodePlaybookHostCapabilities;
+declare const reviewHostCapabilities: PlaybookHostConstructionCapabilities &
+  ReviewPlaybookHostCapabilities;
+declare const devHostCapabilities: PlaybookHostConstructionCapabilities &
+  DevPlaybookHostCapabilities;
+declare const branchHostCapabilities: PlaybookHostConstructionCapabilities &
+  BranchPlaybookHostCapabilities;
+declare const prHostCapabilities: PlaybookHostConstructionCapabilities &
+  PrPlaybookHostCapabilities;
+declare const ports: PlaybookPorts;
+declare const v3Entry: PlaybookCaptainRegistryEntryV3;
+// @ts-expect-error live construction capabilities are not runtime ports
+ports.hostCapabilities;
+const v3Profile: PlaybookCaptainRuntimeProfile = v3Entry.runtimeProfile;
+// @ts-expect-error schema 3 registry construction requires capabilities
+v3Entry.createRuntime(configuredOptions);
+v3Entry.createRuntime(configuredOptions, hostCapabilities);
+const codeSchema: 3 = codePlaybookRegistryEntry.artifactSchema;
+const codeProfile: PlaybookCaptainRuntimeProfile = codePlaybookRegistryEntry.runtimeProfile;
+const codeEntry: PlaybookCaptainRegistryEntryV3 = codePlaybookRegistryEntry;
+const codeCapabilities: PlaybookHostConstructionCapabilities = codeHostCapabilities;
+codePlaybookRegistryEntry.createRuntime({}, codeHostCapabilities);
+// @ts-expect-error CODE is schema 3 and requires current-host capabilities
+codePlaybookRegistryEntry.createRuntime({});
+const reviewSchema: 3 = reviewPlaybookRegistryEntry.artifactSchema;
+const reviewProfile: PlaybookCaptainRuntimeProfile = reviewPlaybookRegistryEntry.runtimeProfile;
+const reviewEntry: PlaybookCaptainRegistryEntryV3 = reviewPlaybookRegistryEntry;
+const reviewCapabilities: PlaybookHostConstructionCapabilities = reviewHostCapabilities;
+reviewPlaybookRegistryEntry.createRuntime({}, reviewHostCapabilities);
+// @ts-expect-error REVIEW is schema 3 and requires current-host capabilities
+reviewPlaybookRegistryEntry.createRuntime({});
+const decideSchema: 3 = decidePlaybookRegistryEntry.artifactSchema;
+const decideProfile: PlaybookCaptainRuntimeProfile = decidePlaybookRegistryEntry.runtimeProfile;
+const decideEntry: PlaybookCaptainRegistryEntryV3 = decidePlaybookRegistryEntry;
+const decideCapabilities: PlaybookHostConstructionCapabilities = decideHostCapabilities;
+decidePlaybookRegistryEntry.createRuntime({}, decideHostCapabilities);
+// @ts-expect-error DECIDE is schema 3 and requires current-host capabilities
+decidePlaybookRegistryEntry.createRuntime({});
+const devSchema: 3 = devPlaybookRegistryEntry.artifactSchema;
+const devProfile: PlaybookCaptainRuntimeProfile = devPlaybookRegistryEntry.runtimeProfile;
+const devEntry: PlaybookCaptainRegistryEntryV3 = devPlaybookRegistryEntry;
+const devCapabilities: PlaybookHostConstructionCapabilities = devHostCapabilities;
+devPlaybookRegistryEntry.createRuntime({}, devHostCapabilities);
+// @ts-expect-error DEV is schema 3 and requires current-host capabilities
+devPlaybookRegistryEntry.createRuntime({});
+const branchSchema: 3 = branchPlaybookRegistryEntry.artifactSchema;
+const branchProfile: PlaybookCaptainRuntimeProfile = branchPlaybookRegistryEntry.runtimeProfile;
+const branchEntry: PlaybookCaptainRegistryEntryV3 = branchPlaybookRegistryEntry;
+const branchCapabilities: PlaybookHostConstructionCapabilities = branchHostCapabilities;
+branchPlaybookRegistryEntry.createRuntime({}, branchHostCapabilities);
+// @ts-expect-error BRANCH is schema 3 and requires current-host capabilities
+branchPlaybookRegistryEntry.createRuntime({});
+const prSchema: 3 = prPlaybookRegistryEntry.artifactSchema;
+const prProfile: PlaybookCaptainRuntimeProfile = prPlaybookRegistryEntry.runtimeProfile;
+const prEntry: PlaybookCaptainRegistryEntryV3 = prPlaybookRegistryEntry;
+const prCapabilities: PlaybookHostConstructionCapabilities = prHostCapabilities;
+prPlaybookRegistryEntry.createRuntime({}, prHostCapabilities);
+// @ts-expect-error PR is schema 3 and requires current-host capabilities
+prPlaybookRegistryEntry.createRuntime({});
+void canonicalFactorySchema;
+void v3FactorySchema;
+void v3Profile;
+void codeSchema;
+void codeProfile;
+void codeEntry;
+void codeCapabilities;
+void reviewSchema;
+void reviewProfile;
+void reviewEntry;
+void reviewCapabilities;
+void decideSchema;
+void decideProfile;
+void decideEntry;
+void decideCapabilities;
+void devSchema;
+void devProfile;
+void devEntry;
+void devCapabilities;
+void branchSchema;
+void branchProfile;
+void branchEntry;
+void branchCapabilities;
+void prSchema;
+void prProfile;
+void prEntry;
+void prCapabilities;
+`,
+      );
+      const program = ts.createProgram([fixture], {
+        module: ts.ModuleKind.NodeNext,
+        moduleResolution: ts.ModuleResolutionKind.NodeNext,
+        target: ts.ScriptTarget.ES2022,
+        strict: true,
+        noEmit: true,
+        skipLibCheck: true,
+        types: ['node'],
+        typeRoots: [join(repoRoot, 'node_modules', '@types')],
+      });
+      expect(
+        ts.getPreEmitDiagnostics(program).map((diagnostic) =>
+          ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '),
+        ),
+      ).toEqual([]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }, SUBPROCESS_TIMEOUT_MS);
 
   it.each(BUNDLED_WORKFLOW_IDS)(
     '%s visibly re-exports PlayerSessionStore from the shared contract',
     (id) => {
       const dts = declarationSourceOf(`./${id}/playbook`);
-      const imported = dts.match(
-        /import type \{([\s\S]*?)\} from '@sublang\/playbook\/runtime';/,
+      // A materialized module re-exports straight from the shared contract
+      // in one `export type { … } from` statement.
+      const direct = dts.match(
+        /^export type \{([^}]*)\} from '@sublang\/playbook\/runtime';$/m,
       );
-      const reexported = dts.match(/^export type \{([\s\S]*?)\};$/m);
+      const imported =
+        direct ??
+        dts.match(
+          /import type \{([\s\S]*?)\} from '@sublang\/playbook\/runtime';/,
+        );
+      const reexported = direct ?? dts.match(/^export type \{([\s\S]*?)\};$/m);
       const names = (body: string | undefined): string[] =>
         (body ?? '')
           .split(',')
@@ -1721,9 +2852,15 @@ if (snapshot.mode === 'engaged.parked') {
       `${CODE_BASE}bin/launch-config.js`,
       `${CODE_BASE}bin/run.js`,
       `${CODE_BASE}bin/interactive-session.js`,
+      `${CODE_BASE}bin/replay-observer.js`,
       `${CODE_BASE}bin/session-store.js`,
       `${CODE_BASE}bin/provision.js`,
       `${CODE_BASE}bin/adapter-sdk.js`,
+      `${CODE_BASE}bin/repository-effects.js`,
+      `${CODE_BASE}session-store.js`,
+      `${CODE_BASE}session-store.d.ts`,
+      `${CODE_BASE}host-capabilities.js`,
+      `${CODE_BASE}host-capabilities.d.ts`,
       `${CODE_BASE}code.registry.js`,
       `${CODE_BASE}code.registry.d.ts`,
       `${REVIEW_BASE}review.playbook.js`,
@@ -1734,6 +2871,18 @@ if (snapshot.mode === 'engaged.parked') {
       `${DECIDE_BASE}decide.playbook.d.ts`,
       `${DECIDE_BASE}decide.registry.js`,
       `${DECIDE_BASE}decide.registry.d.ts`,
+      `${DEV_BASE}dev.playbook.js`,
+      `${DEV_BASE}dev.playbook.d.ts`,
+      `${DEV_BASE}dev.registry.js`,
+      `${DEV_BASE}dev.registry.d.ts`,
+      `${BRANCH_BASE}branch.playbook.js`,
+      `${BRANCH_BASE}branch.playbook.d.ts`,
+      `${BRANCH_BASE}branch.registry.js`,
+      `${BRANCH_BASE}branch.registry.d.ts`,
+      `${PR_BASE}pr.playbook.js`,
+      `${PR_BASE}pr.playbook.d.ts`,
+      `${PR_BASE}pr.registry.js`,
+      `${PR_BASE}pr.registry.d.ts`,
     ]) {
       expect(packed, `tarball missing ${artifact}`).toContain(artifact);
     }
@@ -1744,5 +2893,5 @@ if (snapshot.mode === 'engaged.parked') {
     ]) {
       expect(packed, `tarball still ships ${removed}`).not.toContain(removed);
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 });

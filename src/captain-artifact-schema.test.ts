@@ -5,10 +5,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
 
-import createCaptainPlaybookRuntime from '../reference/sdlc/captain.playbook/captain.playbook.js';
+import createCaptainPlaybookRuntime, {
+  _internal,
+} from '../reference/sdlc/captain.playbook/captain.playbook.js';
 import { SUPPORTED_ARTIFACT_SCHEMAS } from './xstate-runtime.js';
 
-it('loads the roleless Captain as an artifact-schema-2 module', () => {
+it('loads the roleless Captain as an artifact-schema-3 module', () => {
   const source = readFileSync(
     fileURLToPath(
       new URL(
@@ -18,13 +20,16 @@ it('loads the roleless Captain as an artifact-schema-2 module', () => {
     ),
     'utf8',
   );
-  expect(SUPPORTED_ARTIFACT_SCHEMAS).toEqual([2]);
+  expect(SUPPORTED_ARTIFACT_SCHEMAS).toEqual([3]);
   expect(typeof createCaptainPlaybookRuntime).toBe('function');
   // DR-022 / slc/link.md: the compat declaration is the link-time literal.
   // Importing the loading engine's RUNTIME_ABI would make the factory's
   // skew check compare that engine with itself.
-  expect(source).toContain('compat: { artifactSchema: 2, runtimeAbi: 1 }');
+  expect(source).toContain('compat: { artifactSchema: 3, runtimeAbi: 1 }');
   expect(source).not.toContain('  RUNTIME_ABI,');
+  expect(source).toContain(
+    'outcomeAuthority: { governedPlayerStates: {} }',
+  );
   // slc/link.md §Output / playbook-cli-35: the Captain is the one module
   // the front ends import statically, so its factory call defers to the
   // first runtime request. That property is proven behaviorally — not by
@@ -32,5 +37,9 @@ it('loads the roleless Captain as an artifact-schema-2 module', () => {
   // factory leaves import and `run --help` alive while the first runtime
   // request dies as the prefixed setup diagnostic.
   expect(source).toContain('roleStates: {}');
+  expect([..._internal.UNFINISHED_FINAL_STATE_IDS]).toEqual([]);
+  expect(source).toContain(
+    'unfinishedFinalStateIds: UNFINISHED_FINAL_STATE_IDS',
+  );
   expect(source).not.toContain('playerStates:');
 });

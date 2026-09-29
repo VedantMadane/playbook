@@ -1,5 +1,5 @@
 import type { AnyStateMachine, EventObject, PromiseActorLogic } from 'xstate';
-import type { CaptainResult, JsonValue, PlaybookPorts, PlaybookRuntimeFactory, PlaybookSession, PlaybookState, PlayerResult } from './runtime.js';
+import type { CaptainResult, JsonValue, PlaybookEffectBoundary, PlaybookEffectBoundaryStart, PlaybookEffectLedger, PlaybookEffectLedgerCapability, NormalizedError, PlaybookFailureCause, PlaybookPendingBossQuestion, PlaybookPorts, PlaybookRepositoryReceipt, PlaybookRuntimeFactory, PlaybookSession, PlaybookState, PlayerResult } from './runtime.js';
 export interface PlaybookPendingBossQuestionContext {
     questionId: string;
     resumeStateId: string;
@@ -52,9 +52,29 @@ export type JudgePurpose = 'boss-input-classification' | 'player-output-adjudica
  */
 export interface RuntimeBoundaryCalls {
     callPlayer(input: PlaybookPlayerInput, roleId: string, prompt: string, signal: AbortSignal): Promise<PlayerResult>;
+    /**
+     * Return the host-acknowledged adjudication performed while a governed
+     * repository claim was still held. The value is consumable once.
+     */
+    takeGovernedPlayerOutput?(result: PlayerResult): GovernedPlayerSettlement | undefined;
+    recordGovernedPlayerOutput?(result: PlayerResult, output: PlaybookActorOutput): void;
+    /**
+     * DR-063 §2: decorate the failure the bridge builds for a non-`ok` result
+     * with the cause the boundary decided at the call itself, where the role,
+     * the resolved player, and the reported error are known.
+     */
+    markPlayerResultFailure?(error: Error, result?: PlayerResult): Error;
     callJudge(purpose: JudgePurpose, stateId: string | undefined, prompt: string, signal: AbortSignal): Promise<string>;
     callCaptain?(input: PlaybookCaptainInput, prompt: string, signal: AbortSignal, callOptions?: XStateCaptainCallOptions): Promise<CaptainResult>;
 }
+/** Host-acknowledged outcome of one governed player reconciliation. */
+type GovernedPlayerSettlement = {
+    readonly status: 'resolved';
+    readonly output: PlaybookActorOutput;
+} | {
+    readonly status: 'unresolved';
+    readonly error: unknown;
+};
 /**
  * Presentation selection for one traced direct-Captain call
  * (slc/link.md §Captain adjudication). `'visible'` (the default) is the
@@ -95,6 +115,154 @@ export declare const BOSS_REPLY_ERRORS: {
     readonly missingQuestion: "needsBossReply outcome missing 'question' field";
     readonly unregisteredState: (stateId: string) => string;
 };
+export declare const ABORTED_FAILURE_CAUSE: PlaybookFailureCause;
+export declare function runtimeDefectCause(reason: string): PlaybookFailureCause;
+export declare function playerFailureCause(input: {
+    readonly roleId: string;
+    readonly playerId?: string;
+    readonly error: unknown;
+}): PlaybookFailureCause;
+/**
+ * DR-063 §1: the cause of an unresolved governed settlement. A reconciled
+ * mismatch supplies its own receipt-read cause; the reasons a runtime owns map
+ * to adjudication, abort, and runtime-defect codes. Exported so linked
+ * machinery of an artifact's own decides the same reasons.
+ */
+export declare function governedSettlementCause(reason: string, error: unknown, aborted: boolean, supplied: PlaybookFailureCause | undefined): PlaybookFailureCause;
+/**
+ * DR-063 §2: the causes decided for thrown values that cannot carry the
+ * marker — a string, a frozen error — and for the record a machine keeps in
+ * place of the thrown value, kept by identity for as long as the failure
+ * stands, so every surface that reads the FSM's own `lastError` publishes the
+ * cause decided for exactly that failure, whatever turn reads it. A value
+ * that carries the marker answers from it; the map is bounded, since only
+ * values that lack the marker need an entry.
+ */
+export interface PlaybookFailureCauseRetention {
+    retain(error: unknown, cause: PlaybookFailureCause): void;
+    causeOf(error: unknown): PlaybookFailureCause | undefined;
+}
+export declare function createFailureCauseRetention(): PlaybookFailureCauseRetention;
+interface XStateRepositoryOperationSettlement<T> {
+    readonly status: 'fulfilled';
+    readonly value: T;
+}
+interface XStateRepositoryOperationRejection {
+    readonly status: 'rejected';
+    readonly reason: unknown;
+}
+interface XStateRepositoryExclusiveCompletion<T> {
+    readonly boundary: PlaybookEffectBoundary;
+    readonly operation: XStateRepositoryOperationSettlement<T> | XStateRepositoryOperationRejection;
+    readonly receipt: PlaybookRepositoryReceipt;
+    /** Physical receipt for an ordinary call; cumulative receipt for a chain. */
+    readonly outcomeReceipt: PlaybookRepositoryReceipt;
+}
+interface XStateDeferredBinding {
+    readonly operationId: string;
+    readonly pendingQuestion: PlaybookPendingBossQuestion;
+    readonly playerContinuation: JsonValue;
+}
+interface XStateRepositoryCompletionEvidence {
+    readonly finalText?: string;
+    readonly semanticCandidate?: JsonValue;
+    readonly deferred?: XStateDeferredBinding;
+    readonly unresolved?: true;
+}
+interface XStateRepositoryExclusiveResult<T> {
+    readonly operation: XStateRepositoryOperationSettlement<T> | XStateRepositoryOperationRejection;
+    readonly receipt: PlaybookRepositoryReceipt;
+    readonly effectLedger: PlaybookEffectLedger;
+    readonly deferredStatus?: 'bound' | 'unresolved';
+}
+interface XStateRepositoryDeferredContinuationResult<T> {
+    readonly status: 'continued';
+    readonly operation: XStateRepositoryOperationSettlement<T> | XStateRepositoryOperationRejection;
+    readonly receipt: PlaybookRepositoryReceipt;
+    readonly logicalReceipt?: PlaybookRepositoryReceipt;
+    readonly effectLedger: PlaybookEffectLedger;
+    readonly deferredStatus?: 'bound' | 'unresolved';
+}
+interface XStateRepositoryDeferredCheckpointMismatch {
+    readonly status: 'checkpoint-mismatch' | 'ineligible';
+    readonly effectLedger: PlaybookEffectLedger;
+}
+interface XStateRepositoryDeferredParked {
+    readonly status: 'parked';
+    readonly effectLedger: PlaybookEffectLedger;
+}
+interface XStateRepositoryDeferredRestoreResult {
+    readonly status: 'restored' | 'checkpoint-mismatch' | 'ineligible';
+    readonly effectLedger: PlaybookEffectLedger;
+}
+type XStateEffectBoundarySeed = Omit<PlaybookEffectBoundaryStart, 'playbookId' | 'canonicalWorktree' | 'baseline' | 'cohortId'>;
+/** One member's completion inside a repository cohort (DR-067 §1). */
+type XStateRepositoryCohortCompletion<T> = XStateRepositoryExclusiveCompletion<T> & {
+    readonly roleId: string;
+};
+interface XStateRepositoryCohortResult<T> {
+    readonly baseline: PlaybookRepositoryReceipt['baseline'];
+    readonly invocationId: string;
+    readonly operations: Readonly<Record<string, XStateRepositoryOperationSettlement<T> | XStateRepositoryOperationRejection>>;
+    readonly receipts: Readonly<Record<string, PlaybookRepositoryReceipt>>;
+    readonly effectLedger: PlaybookEffectLedger;
+}
+export interface XStateRepositoryCapability {
+    observe?(): Promise<PlaybookRepositoryReceipt['baseline']>;
+    acquire?(options: {
+        readonly signal: AbortSignal;
+    }): Promise<{
+        assertOwner(): Promise<void>;
+        release(): Promise<void>;
+    }>;
+    runExclusive<T>(options: {
+        readonly signal: AbortSignal;
+        readonly effectBoundary: XStateEffectBoundarySeed;
+        readonly operation: (context: {
+            readonly baseline: PlaybookRepositoryReceipt['baseline'];
+            readonly identity: unknown;
+        }) => Promise<T>;
+        readonly completeEffectBoundary: (completion: XStateRepositoryExclusiveCompletion<T>) => XStateRepositoryCompletionEvidence | Promise<XStateRepositoryCompletionEvidence>;
+    }): Promise<XStateRepositoryExclusiveResult<T>>;
+    runDeferred<T>(options: {
+        readonly mode: 'continue';
+        readonly signal: AbortSignal;
+        readonly operationId: string;
+        readonly effectBoundary: XStateEffectBoundarySeed;
+        readonly operation: (context: {
+            readonly baseline: PlaybookRepositoryReceipt['baseline'];
+            readonly identity: unknown;
+            readonly playerContinuation: JsonValue;
+        }) => Promise<T>;
+        readonly completeEffectBoundary: (completion: XStateRepositoryExclusiveCompletion<T>) => XStateRepositoryCompletionEvidence | Promise<XStateRepositoryCompletionEvidence>;
+    }): Promise<XStateRepositoryDeferredContinuationResult<T> | XStateRepositoryDeferredCheckpointMismatch>;
+    runDeferred(options: {
+        readonly mode: 'park' | 'restore';
+        readonly signal: AbortSignal;
+        readonly operationId: string;
+    }): Promise<XStateRepositoryDeferredParked | XStateRepositoryDeferredRestoreResult>;
+    /**
+     * DR-067 §1 / PBRT-73: one repository claim over the working leaves of a
+     * parallel state entered together — every member an `unchanged` boundary
+     * of one cohort, the operations run concurrently under that claim, and
+     * one completion callback per member. Required for an artifact that
+     * declares a parallel state.
+     */
+    runCohort?<T>(options: {
+        readonly signal: AbortSignal;
+        readonly invocationId: string;
+        readonly roleIds: readonly string[];
+        readonly dispositionsByRole: Readonly<Record<string, readonly ['unchanged']>>;
+        readonly effectBoundaries: Readonly<Record<string, XStateEffectBoundarySeed>>;
+        readonly operations: Readonly<Record<string, (context: {
+            readonly baseline: PlaybookRepositoryReceipt['baseline'];
+            readonly identity: unknown;
+            readonly invocationId: string;
+            readonly roleId: string;
+        }) => Promise<T>>>;
+        readonly completeEffectBoundary: (completion: XStateRepositoryCohortCompletion<T>) => XStateRepositoryCompletionEvidence | Promise<XStateRepositoryCompletionEvidence>;
+    }): Promise<XStateRepositoryCohortResult<T>>;
+}
 /** The runtime ABI this engine implements (DR-022). */
 export declare const RUNTIME_ABI = 1;
 /** The linked-artifact schema versions this engine accepts (DR-022). */
@@ -106,6 +274,43 @@ export interface XStatePlaybookRuntimeCompat {
     /** The engine ABI the artifact was linked against. */
     runtimeAbi: number;
 }
+/** Authority for one schema-3 delegated-player outcome payload field. */
+export type XStateOutcomeFieldAuthority = 'presentation' | 'semantic' | 'effect' | 'runtime';
+/** Repository disposition required by one schema-3 outcome arm. */
+export type XStateRepositoryDisposition = 'unchanged' | 'one-descendant-commit' | 'deferred';
+/** Closed authority and repository contract for one governed outcome. */
+export interface XStateGovernedOutcomeSpec {
+    readonly fields: Readonly<Record<string, XStateOutcomeFieldAuthority>>;
+    readonly repositoryDisposition: XStateRepositoryDisposition;
+}
+/**
+ * Schema-3 authority metadata, keyed first by player state and then by its
+ * declared outcome. A roleless artifact supplies an explicitly empty
+ * `governedPlayerStates` object.
+ */
+export interface XStateOutcomeAuthoritySpec {
+    readonly governedPlayerStates: Readonly<Record<string, Readonly<Record<string, XStateGovernedOutcomeSpec>>>>;
+}
+/**
+ * Schema-3 factory input composed by a registry from persisted configured
+ * options and live current-host capabilities. The engine snapshots only the
+ * first member and never places the second in machine input or persistence.
+ */
+export interface XStatePlaybookRuntimeConstruction<ConfiguredOptions, HostCapabilities extends object> {
+    readonly configuredOptions: ConfiguredOptions;
+    readonly hostCapabilities: HostCapabilities & {
+        readonly repository: XStateRepositoryCapability;
+        readonly effectLedger: PlaybookEffectLedgerCapability;
+    };
+}
+export type XStatePlaybookRuntimeFactoryOptions<ConfiguredOptions, HostCapabilities extends object> = XStatePlaybookRuntimeConstruction<ConfiguredOptions, HostCapabilities>;
+/** Shared XState factory with its captured, validated artifact compatibility. */
+export type XStatePlaybookRuntimeFactory<Options = unknown, ArtifactSchema extends 3 = 3> = PlaybookRuntimeFactory<Options> & {
+    readonly compat: Readonly<{
+        readonly artifactSchema: ArtifactSchema;
+        readonly runtimeAbi: typeof RUNTIME_ABI;
+    }>;
+};
 /**
  * One direct-Captain actor invocation handed to a spec's `captainStrategy`
  * (slc/link.md §Captain adjudication, controller form). The engine owns
@@ -146,15 +351,9 @@ export interface XStateCaptainStrategyRun<TOptions> {
     recoverableFailure<E extends Error>(error: E): E;
 }
 export type XStateCaptainStrategy<TOptions> = (run: XStateCaptainStrategyRun<TOptions>) => Promise<PlaybookActorOutput>;
-export interface XStatePlaybookRuntimeSpec<TOptions> {
+interface XStatePlaybookRuntimeSpecBase<TOptions> {
     /** Diagnostic label used in internal invariant errors. Default 'playbook'. */
     label?: string;
-    /**
-     * Link-time compatibility declaration checked at construction against the
-     * loaded engine's self-report (DR-022). Absent declarations reject because
-     * their overloaded player metadata has no safe local-role interpretation.
-     */
-    compat?: XStatePlaybookRuntimeCompat;
     /** Validate and JSON-snapshot the caller's per-run options. */
     snapshotOptions: (value: unknown) => TOptions;
     /** Derive the FSM machine input from validated options. Default: identity. */
@@ -168,14 +367,7 @@ export interface XStatePlaybookRuntimeSpec<TOptions> {
     entryEvent?: {
         type: string;
         textField: string;
-        /**
-         * DR-034: the FSM context member this machine's entry action copies the
-         * exact Boss text into. Where it is named, the failure-state retry
-         * builds its payload from that member of the live snapshot instead of
-         * from the process-local recorded event, so the action derives the same
-         * before and after `restore`. Absent: the recorded event stays the
-         * source and the action lives only as long as the process.
-         */
+        /** @deprecated Step checkpoints now carry the accepted input directly. */
         contextField?: string;
     };
     /**
@@ -203,7 +395,7 @@ export interface XStatePlaybookRuntimeSpec<TOptions> {
     /** Complete FSM-derived Boss-facing metadata for every `player` state. */
     roleStates?: Readonly<Record<string, XStateRoleStateStatus>>;
     /** Compose the player prompt. Default: continuation blocks + `<field>` placeholder substitution. */
-    composePlayerPrompt?: (input: PlaybookPlayerInput, promptIdentity: XStatePromptIdentity) => string;
+    composePlayerPrompt?: (input: PlaybookPlayerInput, promptIdentity: XStatePromptIdentity, resuming?: boolean) => string;
     /** Compose the direct-Captain prompt. Default: continuation blocks + placeholder substitution with deterministic JSON rendering. */
     composeCaptainPrompt?: (input: PlaybookCaptainInput) => string;
     /** Linker-known exceptions to the default kebab-token → camel-field mapping. */
@@ -226,6 +418,8 @@ export interface XStatePlaybookRuntimeSpec<TOptions> {
      * surfaced first-class by the view and shall not be named here.
      */
     controlContextFields?: readonly string[];
+    /** Root final states whose terminal outcome leaves unfinished work. Default: none. */
+    unfinishedFinalStateIds?: ReadonlySet<string>;
     /** States that may suspend for a Boss reply. Default: targets of the FSM's `awaitBossReply` BOSS_REPLY transitions. */
     resumableStateIds?: ReadonlySet<string>;
     /** Human status lines for a root transition. Default: guard, declared-player, question, and failure lines. */
@@ -237,21 +431,31 @@ export interface XStatePlaybookRuntimeSpec<TOptions> {
     /** Working directory for `script` actors. Default: the validated options' string `cwd`, else the process working directory. */
     scriptCwd?: (options: TOptions) => string | undefined;
 }
+export interface XStatePlaybookRuntimeSpec<TOptions> extends XStatePlaybookRuntimeSpecBase<TOptions> {
+    compat: XStatePlaybookRuntimeCompat & {
+        artifactSchema: 3;
+    };
+    outcomeAuthority: XStateOutcomeAuthoritySpec;
+}
+/** Schema-3 shared-engine spec with required exact outcome authority metadata. */
+export type XStatePlaybookRuntimeSpecV3<TOptions> = XStatePlaybookRuntimeSpec<TOptions>;
 /** Strip a single Markdown code fence that wraps the whole string. */
 export declare function stripCodeFence(text: string): string;
 export declare function extractJsonValue(text: string, start: number, repair: boolean): string | undefined;
 export declare function parseJudgeJson(raw: string): unknown;
-export declare function normalizeErrorCompact(err: unknown): {
-    name: string;
-    message: string;
-} | undefined;
-export declare function normalizeErrorFull(err: unknown): {
-    name: string;
-    message: string;
-    stack?: string;
-} | undefined;
+export declare function normalizeErrorCompact(err: unknown): Omit<NormalizedError, 'stack'> | undefined;
+export declare function normalizeErrorFull(err: unknown): NormalizedError | undefined;
 /** Read the FSM context's single pending Boss question, when well-formed. */
 export declare function pendingBossQuestionFromContext(context: Record<string, unknown>): PlaybookPendingBossQuestionContext | undefined;
+/** Add clarification context without repeating the question in a live conversation. */
+export declare function composePlayerContinuation(input: Pick<PlaybookPlayerInput, 'pendingBossQuestion' | 'bossReply'>, body: string, resuming?: boolean): string;
+/**
+ * The block for one governed call, or `undefined` where the call is not
+ * effect-authorized — a call whose declared outcomes carry no
+ * `one-descendant-commit` disposition may commit nothing, so it is told
+ * nothing.
+ */
+export declare function effectAuthorizedPreExistingBlock(effectBoundary: Pick<PlaybookEffectBoundaryStart, 'dispositions'>, baseline: PlaybookRepositoryReceipt['baseline'] | undefined): string | undefined;
 /**
  * Default player-prompt composer (slc/link.md §Player prompt composition).
  * One callback-based pass substitutes each `<fieldName>` placeholder whose
@@ -259,7 +463,7 @@ export declare function pendingBossQuestionFromContext(context: Record<string, u
  * placeholder-looking text inside a value is never re-substituted. The
  * continuation preamble and Q/A blocks precede the domain body on resume.
  */
-export declare function defaultComposePlayerPrompt(input: PlaybookPlayerInput, placeholderFields?: Readonly<Record<string, string>>): string;
+export declare function defaultComposePlayerPrompt(input: PlaybookPlayerInput, placeholderFields?: Readonly<Record<string, string>>, resuming?: boolean): string;
 /**
  * Default direct-Captain prompt composer (slc/link.md §Captain prompt
  * composition). Placeholder substitution is presence-based: string fields
@@ -276,6 +480,21 @@ export declare function defaultComposeCaptainPrompt(input: PlaybookCaptainInput,
 export declare function defaultExtractRequiredFields(description: string): string[];
 /** Default delegated-player adjudicator prompt. */
 export declare function defaultBuildJudgePrompt(input: PlaybookPlayerInput, finalText: string): string;
+/**
+ * Judge-facing rendering of one governed outcome (DR-040 §1). The artifact's
+ * description is not altered: its meaning is carried through verbatim, while
+ * its `Output shall include` clause — authored for the complete actor output
+ * — is replaced by the reply contract `outcomeAuthority` gives the judge:
+ * exactly `guard` plus the outcome's semantic-owned fields, each keeping the
+ * placeholder or guidance the clause authors for it, and every
+ * presentation-, effect-, or runtime-owned field named as runtime-supplied
+ * so the judge omits it. Rendering the clause verbatim asked the judge for
+ * `question`, `planningResult`, or `evaluatedRevision`, which the reconciler
+ * rejects as a structural error, spending the single correction on a
+ * self-inflicted defect. Exported so linked machinery of an artifact's own
+ * renders the identical contract instead of restating it.
+ */
+export declare function renderGovernedOutcomeContract(guard: string, description: string, outcome: XStateGovernedOutcomeSpec | undefined): string[];
 export interface PlayerAdjudicationSpec {
     buildJudgePrompt?: (input: PlaybookPlayerInput, finalText: string) => string;
     extractRequiredFields?: (description: string) => string[];
@@ -292,9 +511,12 @@ export interface PlayerAdjudicationSpec {
 export declare function adjudicatePlayerOutput(spec: PlayerAdjudicationSpec, input: PlaybookPlayerInput, finalText: string, ports: PlaybookPorts, signal: AbortSignal, boundary?: RuntimeBoundaryCalls): Promise<PlaybookActorOutput>;
 interface PlayerBridgeSpec {
     resolveRoleId: (input: PlaybookPlayerInput) => string;
+    validateInput?: (input: PlaybookPlayerInput) => void;
     composePlayerPrompt: (input: PlaybookPlayerInput) => string;
     adjudication: PlayerAdjudicationSpec;
     resumableStateIds: ReadonlySet<string>;
+    allowsCorrectiveReplay?: (result: PlayerResult) => boolean;
+    run?: (input: PlaybookPlayerInput, signal: AbortSignal, execute: () => Promise<PlaybookActorOutput>) => Promise<PlaybookActorOutput>;
 }
 export declare function createPlayerBridge(spec: PlayerBridgeSpec, ports: PlaybookPorts, getActiveSignal?: () => AbortSignal | undefined, boundary?: RuntimeBoundaryCalls, onControlPlaneError?: (error: unknown) => void): PromiseActorLogic<PlaybookActorOutput, PlaybookPlayerInput>;
 /**
@@ -307,7 +529,11 @@ export declare function defaultBuildCaptainJudgePrompt(input: {
     readonly sourceItem: string;
     readonly result: Readonly<Record<string, string>>;
 }, finalText: string): string;
-/** Targets of the FSM's `awaitBossReply` BOSS_REPLY transitions. */
+/**
+ * Targets of the FSM's `awaitBossReply` BOSS_REPLY transitions, plus — for
+ * the parallel shape gears2fsm compiles (DR-067) — the targets of each
+ * region wait leaf's branch-local BOSS_REPLY arms, resolved to state ids.
+ */
 export declare function resumableStateIdsFromMachine(machine: AnyStateMachine): ReadonlySet<string>;
 /**
  * Source state descriptions by state key, node id, and `meta.playbook`
@@ -316,16 +542,32 @@ export declare function resumableStateIdsFromMachine(machine: AnyStateMachine): 
  */
 export declare function stateDescriptionsFromMachine(machine: AnyStateMachine): ReadonlyMap<string, string>;
 /**
+ * DR-048: each root final state's declared terminal kind, read from
+ * `meta.playbook.terminal` in `machine.config`. The kind is compiled
+ * metadata — the compiler derives it from the Source's own outcome wording,
+ * exactly as it derives the state's description — so a caller learns whether
+ * a completed child succeeded from the machine it reached, never from the
+ * child's output fields or an agent's prose.
+ *
+ * A machine whose final states declare no kind yields an empty map and keeps
+ * the pre-DR-048 delivery. A `terminal` on a non-final state, or a value
+ * other than `success` or `failure`, is a malformed artifact and throws.
+ */
+export declare function terminalOutcomesFromMachine(machine: AnyStateMachine, label?: string): ReadonlyMap<string, 'success' | 'failure'>;
+/**
  * Build a `PlaybookRuntimeFactory` that interprets the given FSM artifact
  * under the slc/link.md contract. The factory provides every actor kind the
  * machine declares — `player`, `script`, `captain`, and nested `playbook`
  * (literal and dynamic) — and implements the full runtime lifecycle including
- * the optional parked-session snapshot capability (DR-014).
+ * the optional parked-session snapshot capability (DR-014) and the retained-
+ * snapshot adoption capability (DR-038).
  *
- * Scope: flat single-region machines — no parallel state, no compound
- * child states, and every root state's `meta.playbook.stateId` equal to its
- * state key — so each snapshot exposes exactly one playbook state id.
- * Parallel-region FSMs keep their own linked runtimes.
+ * Scope: flat single-region machines — every root state's
+ * `meta.playbook.stateId` equal to its state key, so each snapshot exposes
+ * exactly one playbook state id — plus the parallel profile of DR-067: root
+ * `type: 'parallel'` states of the shape gears2fsm compiles, whose regions
+ * run as one all-`unchanged` repository cohort with keyed pending questions.
+ * A machine declaring a parallel state omits `adopt`.
  */
-export declare function createXStatePlaybookRuntime<TOptions>(machine: AnyStateMachine, spec: XStatePlaybookRuntimeSpec<TOptions>): PlaybookRuntimeFactory<TOptions>;
+export declare function createXStatePlaybookRuntime<TOptions, THostCapabilities extends object>(machine: AnyStateMachine, spec: XStatePlaybookRuntimeSpecV3<TOptions>): XStatePlaybookRuntimeFactory<XStatePlaybookRuntimeConstruction<TOptions, THostCapabilities>, 3>;
 export {};

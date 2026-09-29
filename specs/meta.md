@@ -36,7 +36,7 @@ A spec file shall keep one sentence per line — with lists, tables, and diagram
 
 ### meta-4
 
-Each DR shall follow the ADR format [[2]], with required sections Status, Context, Decision, and Consequences, plus an optional References section.
+Each DR shall follow the ADR format [[2]], with sections Status, Context, Decision, and Consequences, plus References where it cites an external source [[meta-19](#meta-19)].
 
 ### meta-5
 
@@ -181,16 +181,16 @@ Each package's `Verification` section shall verify every behavior in that packag
 
 ### meta-16
 
-A citation of a spec item or record shall be an inline relative link with the cited ID as its link text:
+A citation of a spec item or DR shall be an inline relative link with the cited ID as its link text:
 
 | Cited | Form |
 | --- | --- |
 | Spec item | its heading anchor, in an outer pair of square brackets (e.g., `[[meta-1](meta.md#meta-1)]`) |
-| Record | its file, with no outer brackets (e.g., `[DR-000](decisions/000-spec-structure-format.md)`) |
+| DR | its file, with no outer brackets (e.g., `[DR-000](decisions/000-spec-structure-format.md)`) |
 
 ### meta-18
 
-No DR or spec item shall cite an IR or name it in prose.
+No spec shall cite an IR or name it in prose, except that IR itself.
 
 ### meta-19
 

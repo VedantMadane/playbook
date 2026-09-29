@@ -100,6 +100,12 @@ trusted publishing — static npm tokens shall not be used.
 The scoped `@sublang/playbook` package shall be published with
 `--access public` to ensure public availability.
 
+### Normal test gate
+
+#### release-31
+
+When the normal repository test gate runs through `pnpm test`, its effective pnpm lifecycle shall execute the project-local `spex lint` command to successful completion before starting Vitest.
+
 ### Install closure
 
 #### release-12
@@ -162,8 +168,10 @@ available in `@sublang/cligent` 0.13.0, and shall admit the explicit
 [[playbook-captain-16](playbook-captain.md#playbook-captain-16)], and the isolated
 `CallCaptainOptions.resume` and `CallCaptainOptions.allowedTools`
 surface required by [[playbook-captain-31](playbook-captain.md#playbook-captain-31)].
-The declared range's floor shall be at least `@sublang/cligent` 0.22.0 and shall preserve `[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*` player ids while player and Captain call options carry atomic complete per-call model, effort, instruction, and permissions with explicit concrete-value versus provider-default tuning ([[playbook-cli-4](playbook-cli.md#playbook-cli-4)], [[playbook-captain-10](playbook-captain.md#playbook-captain-10)], [[playbook-captain-31](playbook-captain.md#playbook-captain-31)]).
-That floor shall also expose the typed complete-settings rejection used to preserve a prior continuation without a fresh fallback.
+The declared range's floor shall be at least `@sublang/cligent` 0.28.0, the oldest release whose runtime floors serve every seeded model ([DR-074](../decisions/074-seeds-name-the-latest-models.md)), and shall preserve `[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*` player ids while player and Captain call options carry atomic complete per-call model, effort, optional fast mode, instruction, and permissions with explicit concrete-value versus provider-default model and effort tuning ([[playbook-cli-4](playbook-cli.md#playbook-cli-4)], [[playbook-captain-10](playbook-captain.md#playbook-captain-10)], [[playbook-captain-31](playbook-captain.md#playbook-captain-31)]).
+That floor shall expose cligent's public adapter-scoped fast-mode capability and assertion as a callable runtime export rather than require a Playbook-owned support table, accept literal `true` and `false` only for supported adapters, and reject either present boolean for an unsupported adapter before provider work.
+That floor shall preserve adjacent complete `text` messages as distinct newline-separated messages in player `finalText` when a successful terminal `done` event supplies no result.
+That floor shall also expose the typed complete-settings rejection used to preserve a prior continuation without a fresh fallback, plus optional `CaptainRunResult.errorCode` and `PlayerRunResult.errorCode` members typed exactly `'SESSION_RESUME_REJECTED'`, whose pre-execution proof permits one fresh call [[session-storage-8](session-storage.md#session-storage-8)].
 The declared floor shall accept an empty configured player roster, resolve it to an empty startup-visible set and Boss-only one-column layout, and initialize the runtime Captain with an empty player manifest while accepting empty visibility, so an all-roleless Playbook catalog remains roleless ([[playbook-cli-9](playbook-cli.md#playbook-cli-9)], [[playbook-cli-10](playbook-cli.md#playbook-cli-10)]).
 The declared floor shall expose both the stock tmux-play child-launch surface used by the raw and diagnostic forms of [[playbook-cli-1](playbook-cli.md#playbook-cli-1)] and the public runtime values `launchManagedTmuxPlay` and `runManagedTmuxPlaySession` with their exact `LaunchManagedTmuxPlayOptions` to `Promise<PreparedManagedTmuxPlayLaunch>` and `ManagedTmuxPlaySessionOptions` to `Promise<void>` call signatures, providing the managed prepared-launch, gated-input, terminal-record, buffered-reply, activation-abort, synchronous native-client hand-off, cancellation, and failure-atomic shutdown surfaces used by [[playbook-cli-49](playbook-cli.md#playbook-cli-49)].
 The managed launch context and direct session options shall each expose a required exact boolean work-directory cleanup authority that the caller can carry unchanged across its private child boundary, so a marker can corroborate launcher ownership but can never grant cleanup authority by itself ([[playbook-cli-49](playbook-cli.md#playbook-cli-49)]).
@@ -179,7 +187,7 @@ the pre-close Captain lifecycle, and isolated fresh, tool-restricted
 Captain calls, first released together in `@sublang/cligent` 0.15.0;
 merely using a range that could admit a later compatible version shall
 not satisfy this requirement.
-Since the DR-032 release, the pin shall be at least 0.22.0 and shall expose the segmented-id grammar, empty-roster host shape, atomic complete per-call settings, typed settings rejection, and reliable attached-client resizing above.
+Since the DR-032 release, complete-message transport repair, and fast-mode addition, the pin shall be at least 0.24.0 and shall expose the segmented-id grammar, empty-roster host shape, atomic complete per-call settings including optional fast mode, public fast-mode capability assertion, typed settings rejection, reliable attached-client resizing, and result-less terminal fallback above.
 
 #### release-22
 
@@ -190,8 +198,8 @@ specs ([[release-16](#release-16)]) —
 `@sublang/spex/scaffold/specs/meta.md` (English) and
 `@sublang/spex/scaffold/i18n/zh/specs/meta.md` (Chinese) — resolve
 from the installed module tree of every production install.
-The declared range's floor shall be at least `@sublang/spex` 2.1.1,
-the first release whose CLI validates the canonical package-only spec layout used by this repository.
+The declared range's floor shall be at least `@sublang/spex` 3.0.0,
+whose refreshed record and citation law this repository adopts while retaining the canonical package-only spec layout validated since 2.1.1.
 
 ### Public surfaces
 
@@ -205,6 +213,7 @@ That module shall carry only the runtime contract types
 ([[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)]) — no runtime engine and no
 linker. A breaking change to its exported type names or shapes shall
 be released under [[release-1](#release-1)] SemVer.
+Its closed `PlaybookRunResult` declaration shall include the exact state-only `{ outcome: 'unresolved-effect', state: PlaybookState }` arm of [[playbook-runtime-79](playbook-runtime.md#playbook-runtime-79)] and shall expose no bounded effect evidence on that runtime-owned result.
 The package shall additionally expose `@sublang/playbook/xstate-runtime` with
 JavaScript and declaration artifacts for the shared XState snapshot,
 quiescence, strict JSON, error-normalization, and nested-call bridge helpers
@@ -220,8 +229,13 @@ adjudication prompt builder `defaultBuildCaptainJudgePrompt` that states the
 judge reply contract shared with compiled Captain artifacts
 ([DR-025](../decisions/025-resilient-captain-control-adjudication.md),
 [[captain-playbook-18](captain-playbook.md#captain-playbook-18)]).
+It shall also expose the governed-outcome judge contract renderer `renderGovernedOutcomeContract` that linked workflow machinery an artifact supplies of its own shares with the engine ([[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)]).
 This engine subpath shall depend one-way on the
 type-only runtime contract and shall import no generated FSM or host adapter.
+The public XState engine shall keep `RUNTIME_ABI` at `1`, export the frozen `SUPPORTED_ARTIFACT_SCHEMAS` value `[3]`, and export only the schema-3 authority, repository-disposition, governed-outcome, authority-specification, construction-input, factory-option, and specification declaration types governed by [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)].
+The public Playbook Captain declaration surface shall expose only the schema-3 registry-entry shape and its live host-construction-capability type under [[playbook-captain-5](playbook-captain.md#playbook-captain-5)].
+The packed CODE, REVIEW, DECIDE, and session-Captain TypeScript artifacts and committed JavaScript siblings shall declare or enforce artifact schema `3` under [[playbook-1](playbook.md#playbook-1)] and [[captain-playbook-8](captain-playbook.md#captain-playbook-8)]; the three workflow registries and their declaration siblings shall expose that exact schema, each runtime declaration shall retain its schema-3 construction surface where public, and no sibling shall expose a legacy schema-2 variant.
+That Captain declaration surface shall additionally expose `PlaybookCaptainUnresolvedEffect`, the pure `assertPlaybookCaptainUnresolvedEffects` validator, and `PlaybookCaptainSettlement` with a required read-only `unresolvedEffects` list of that exact bounded entry type under [[playbook-captain-58](playbook-captain.md#playbook-captain-58)], while the runtime declaration shall keep `PlaybookRunResult` free of the list.
 The `PlaybookSession`, player-resume, and trace shapes introduced by
 [DR-010](../decisions/010-playbook-session-tracing-and-resume.md) are
 such a breaking public-contract change.
@@ -232,30 +246,35 @@ breaking 1.0 contract boundary.
 
 #### release-16
 
-The published package shall ship the authored compiler-phase specs
-`slc/link.md`, `slc/gears2fsm.md`, `slc/text2gears.md`, and
-`slc/optimize.md` as package
-files and expose them through a public, semver-stable `exports['./slc/*']`
-mapping (`'./slc/*': './slc/*'`).
-A consumer shall be able to locate a spec by resolving
-`@sublang/playbook/slc/<name>.md` via `import.meta.resolve` and reading
-the resolved file from disk.
+The published package shall ship the following compiler assets through the public, semver-stable `exports['./slc/*']` mapping (`'./slc/*': './slc/*'`):
+
+| Package path | Purpose |
+| --- | --- |
+| `slc/text2gears.md`, `slc/gears2fsm.md`, `slc/optimize.md`, `slc/prefix.md`, `slc/link.md` | Authored compiler-phase definitions. |
+| `slc/prefix-prompts.mjs` | Prompt-prefix pass rewrite CLI [[compiler-prompt-prefix-4](compiler-prompt-prefix.md#compiler-prompt-prefix-4)]. |
+| `slc/materialize-link.mjs` | Optional thin-module materializer CLI [[link-materialization-1](link-materialization.md#link-materialization-1)]. |
+| `slc/scaffold-fsm.mjs`, `slc/experiments/fsm-scaffold-guidance.md` | Optional incomplete FSM initializer CLI and its opt-in guidance [[fsm-scaffolding-1](fsm-scaffolding.md#fsm-scaffolding-1)]. |
+| `slc/slc.pin-inputs.json` | Phase-set semantic-input declaration for incremental invalidation [[link-materialization-13](link-materialization.md#link-materialization-13)]. |
+| `slc/workflow-contracts.json` | Independently readable builtin workflow output catalog [[compiler-workflow-contracts-1](compiler-workflow-contracts.md#compiler-workflow-contracts-1)]. |
+
+A consumer shall be able to locate each asset by resolving `@sublang/playbook/<package-path>` via `import.meta.resolve` and reading the resolved file from disk.
+The three `.mjs` helpers' public API shall comprise their resolvable file paths and specified CLI contracts; their JavaScript module exports shall remain internal implementation details outside public API compatibility guarantees.
 Removing or renaming a published `slc/*` path shall be released under
 [[release-1](#release-1)] SemVer.
 
 #### release-20
 
-The published package shall expose the generic `playbook` executable through `package.json` `bin` and the CODE, REVIEW, and DECIDE playbook and registry modules through public `exports['./<id>/playbook']` and `exports['./<id>/registry']` subpaths, all backed by files listed in `files`, as public semver-stable surfaces.
+The published package shall expose the generic `playbook` executable through `package.json` `bin` and the CODE, REVIEW, DECIDE, DEV, BRANCH, and PR playbook and registry modules through public `exports['./<id>/playbook']` and `exports['./<id>/registry']` subpaths, all backed by files listed in `files`, as public semver-stable surfaces.
 The package shall also ship `reference/sdlc/captain.md` and the default
 Captain's GEARS, FSM, and linked-runtime TypeScript, JavaScript, and declaration
 artifacts, and shall expose the compiled runtime through the public semver-stable
 `exports['./captain/playbook']` subpath.
-The package shall also ship the authored CODE, REVIEW, and DECIDE sources `reference/sdlc/code.md`, `reference/sdlc/review.md`, and `reference/sdlc/decide.md` beside their compiled artifacts, so a host can display or recompile the bundled playbooks from source.
+The package shall also ship the authored CODE, REVIEW, DECIDE, DEV, BRANCH, and PR sources `reference/sdlc/code.md`, `reference/sdlc/review.md`, `reference/sdlc/decide.md`, `reference/sdlc/dev.md`, `reference/sdlc/branch.md`, and `reference/sdlc/pr.md` beside their compiled artifacts, so a host can display or recompile the bundled playbooks from source.
 The package shall also ship the `docs/` guides the README delegates to, so
 an installed copy resolves its own links to the version it shipped with
 rather than to whatever the repository currently documents.
 Every Markdown file the tarball ships shall be link-closed over the packed file list: each relative link target and each link-reference-definition destination in a packed `.md` shall resolve to a packed file or a directory containing packed files, and a fragment on a packed Markdown target shall name an anchor that file renders.
-A shipped guide citing repository-only content shall cite it by absolute repository URL referencing the repository's main line — a deliberate living pointer, since the version-locality guarantee above governs packed content, while a reader needing the shipped-version text of a repository-only document reads the repository at the shipped release tag.
+A packed Markdown file citing repository-only content shall cite it by absolute repository URL referencing the repository's main line — a deliberate living pointer, since the version-locality guarantee above governs packed content, while a reader needing the shipped-version text of a repository-only document reads the repository at the shipped release tag. Such a pointer shall use GitHub's `blob/main` form only for an existing file and its `tree/main` form only for an existing directory; the path kind is part of the resolved destination, not an interchangeable URL style.
 A packed SLC definition's relative citation into `specs/` is exempt from the closure as a repository citation under the specs tree's own citation law, which requires the relative form.
 The internal Captain shall have no `exports['./captain/registry']` subpath
 because it is not an enabled registry entry.
@@ -283,6 +302,29 @@ to change, and they may be added, changed, or removed in any release.
 Narrowing an existing public declaration so input that previously
 typechecked no longer does — including adding a required property to an
 options type — is likewise a breaking change under [[release-1](#release-1)].
+
+#### release-33
+
+The published package shall expose `@sublang/playbook/session-store` and `@sublang/playbook/session-host` as public, semver-stable subpaths backed by committed `.js` and `.d.ts` artifacts listed in `files` and their `exports` entries.
+These modules shall provide shared session lifecycle, validation and management to embedding hosts [[session-storage-11](session-storage.md#session-storage-11)], while preserving the existing narrow summary/replay facade [[playbook-cli-73](playbook-cli.md#playbook-cli-73)].
+Lease staging and retirement remain private.
+The lease-free stream-read result shall expose only the observed readable boundary and make no claim about another process's durable or incomplete state, while successful lease-bound reads and live status expose both numeric boundaries plus the latch and failed replay initialization exposes the null-boundary incomplete status ([[playbook-cli-76](playbook-cli.md#playbook-cli-76)], [[playbook-cli-82](playbook-cli.md#playbook-cli-82)], [[playbook-cli-83](playbook-cli.md#playbook-cli-83)]).
+Its declaration shall own the closed token-free session-summary types and opaque replay-payload types used by that
+surface ([[playbook-cli-73](playbook-cli.md#playbook-cli-73)], [[playbook-cli-74](playbook-cli.md#playbook-cli-74)]) and shall resolve under ordinary consumer declaration checking
+without importing or re-exporting Cligent's observed-record union or
+referring to a private JavaScript module that has no shipped declaration.
+A breaking change to that subpath's exported names or shapes, and any
+change to the frozen replay-stream file contract it reads and writes
+([[playbook-cli-74](playbook-cli.md#playbook-cli-74)]), shall be released
+under [[release-1](#release-1)] SemVer, because a dependent host pins its
+floor to the release that ships them.
+
+#### release-34
+
+The published package shall expose `@sublang/playbook/host-capabilities` as a public, semver-stable subpath export backed by committed `.d.ts` and `.js` artifacts listed in `files` and mapped under `exports['./host-capabilities']` (`types` and `default`), as the public boundary through which an external host constructs live schema-3 repository and effect-ledger capabilities for a Git worktree, observes that worktree, classifies receipts, and obtains fail-closed capabilities for an artifact with no governed state ([DR-046](../decisions/046-public-worktree-host-capabilities.md)).
+That module shall expose only the narrow facade of [[playbook-cli-87](playbook-cli.md#playbook-cli-87)] over the CLI host's single repository-effect implementation, while that implementation's lease, session-record, catalog, recovery, members remain outside the repository-effects facade; session lifecycle uses the separate public session modules [[session-storage-11](session-storage.md#session-storage-11)].
+Its declaration shall be self-contained, re-declaring the runtime contract's ledger, receipt, observation, and question types name for name rather than importing them, so it resolves under ordinary consumer declaration checking against only the `AbortSignal` global.
+A breaking change to that subpath's exported names or shapes shall be released under [[release-1](#release-1)] SemVer, because a dependent host deletes its own classifier copy on adopting it and pins its floor to the release that ships it.
 
 ### Pre-release Checklist
 
@@ -312,26 +354,36 @@ step below holds of the packed candidate:
    named as its own top-level install root reports every adapter
    **available** when probed from that same location
    ([DR-026](../decisions/026-optional-adapter-sdks.md) §3).
-4. **Installed CLI.** The installed `playbook` executable prints its top-level and `run` usage, resolved config path, continuation and uncertain-recovery grammar, and for `--list` names the `code`, `review`, and `decide` entries of a config enabling the bundled registries ([[release-20](#release-20)]).
+4. **Installed CLI.** The installed `playbook` executable prints its top-level and `run` usage, resolved config path, continuation and uncertain-recovery grammar, and for `--list` names the `code`, `review`, `decide`, `dev`, `branch`, and `pr` entries of a config enabling the bundled registries ([[release-20](#release-20)]).
 5. **Hermetic shared-Captain and player-ledger run.** A bare fixture repository with no `package.json`, lockfile, or `node_modules` at any level shall hold one configured thin registry importing `xstate` and `@sublang/playbook/xstate-runtime` whose work is a [DR-016](../decisions/016-script-actors-and-optimize-pass.md) script actor and one explicit-role registry whose two sequential roles share one segmented player id while a third role binds an equal-configured distinct segmented id ([[playbook-captain-26](playbook-captain.md#playbook-captain-26)], [[playbook-cli-4](playbook-cli.md#playbook-cli-4)]).
    Neither engine import shall resolve from the fixture before launch.
    A subprocess driver beside the globally installed candidate shall invoke the packed launcher's existing dependency-injection seam with a deterministic adapter, the shared config, and a `/command` Boss turn supplied on stdin, without replacing the compiled Captain or constructing tmux.
    The first process shall print one provisioning line, create exactly the two engine links resolving into the isolated prefix, and return exactly one `{sessionId, reply}` JSON object only after persisting the complete Captain session.
    A second process shall continue that same public session id from stdin with the stored Captain continuation and frozen working directory, shall not replay the completed fixture lifecycle, and shall provision nothing further.
    A third process shall run the explicit-role registry with the shared roles ordered first-to-second, and a fourth process shall select the same id under compatible current Captain, player, and role tuning and run those roles second-to-first.
-   The four-process trace and complete schema-3 record shall prove one shared token chain across both role orders, one independent token chain for the equal-configured distinct player id, retained structural identity and working directory, current model and effort application to prior tokens, and explicit provider-default selections ([[playbook-cli-23](playbook-cli.md#playbook-cli-23)]).
+   The four-process trace and complete schema-7 manifest and local hints shall prove one shared token chain across both role orders, one independent token chain for the equal-configured distinct player id, an empty retained-generation map after clean completion ([[playbook-cli-51](playbook-cli.md#playbook-cli-51)]), retained structural identity and working directory, current model, effort, and absent, literal-false, or literal-true fast-mode application to prior tokens, and explicit provider-default model and effort selections ([[playbook-cli-23](playbook-cli.md#playbook-cli-23)]).
+   Separate fresh configs shall bind each literal fast-mode boolean to a role whose player uses an unsupported adapter; the packed CLI shall reject both configs before session-store access, registry preparation, registry import, adapter-SDK readiness, Captain-runtime creation, or host-runtime creation ([[playbook-cli-4](playbook-cli.md#playbook-cli-4)]).
    A third configured thin registry, whose script actor fails until a flag file outside the repository exists, shall park its engagement in the recoverable failure state in one process; after the flag is created, a further process holding only that record shall be offered the retry in its own decision digest, shall select it by the exact advertised id, and shall apply it once and finish the engagement ([[playbook-runtime-52](playbook-runtime.md#playbook-runtime-52)], [DR-034](../decisions/034-durable-failure-retry-continuity.md)).
    The fixture repository shall stay clean.
-6. **Compiled runtime integrity.** The installed Captain, CODE, REVIEW, and DECIDE playbook subpaths import and construct runtimes carrying the declared contract surface.
-7. **Compiled-artifact fidelity.** Every packed file other than the manifest is byte-identical to the repository's own, and the committed Captain, CODE, REVIEW, and DECIDE artifact-conformance suites pass with their source/GEARS/FSM, transition, prompt, and topology checks named among those that ran.
-8. **Nested cligent floor.** The nested installed `@sublang/cligent` shall satisfy the caret range the packed manifest declares and expose the complete enumerated release-floor capability set through `@sublang/cligent/tmux-play` resolved from that nested copy ([[release-14](#release-14)]).
-   The guard shall prove the runtime presence and exact call signatures of `launchManagedTmuxPlay` and `runManagedTmuxPlaySession`, plus the exact usable type and optionality of `CaptainContext.emitReply`, `CaptainRunResult.resumeToken`, `Captain.prepareDispose`, the player and Captain call-option parameters, each continuation and complete-setting option, every complete setting and tuning selection, the typed settings rejection and predicate, the required work-directory cleanup-authority member on both managed launch context and direct session options, both managed attach activation members, and the prepared attach parameter.
+6. **Packed effect-reconciliation matrix.** A fresh Git repository shall configure one schema-3 governed-player fixture through the packed launcher, shared Captain, CLI host, and nested installed Cligent dependency under [DR-040](../decisions/040-outcome-authority-effect-reconciliation.md).
+   One process shall create exactly one clean descendant commit while its Codex-shaped player emits separate commentary and misleading `Commit:` text messages followed by successful terminal `done` with no result; an exact hidden semantic candidate and the durable receipt's commit OID shall settle the accepted outcome without deriving repository authority from that prose ([[playbook-runtime-77](playbook-runtime.md#playbook-runtime-77)]).
+   A second process shall create one further clean descendant commit but return two malformed hidden-judge replies, thereby spending the single correction budget and parking one bounded unresolved-effect entry with the exact baseline HEAD, after HEAD, and proven commit OID ([[playbook-captain-58](playbook-captain.md#playbook-captain-58)]).
+   Two successor processes selecting the exact advertised reconciliation and abandonment controls shall start no player or judge and make no repository change; reconciliation shall preserve the parked evidence, while abandonment shall preserve the same final settlement evidence, leave the root absent from retained generations, and return the session to chat ([[playbook-runtime-79](playbook-runtime.md#playbook-runtime-79)], [[playbook-captain-56](playbook-captain.md#playbook-captain-56)], [[playbook-captain-58](playbook-captain.md#playbook-captain-58)]).
+7. **Compiled runtime integrity.** The installed Captain, CODE, REVIEW, DECIDE, DEV, BRANCH, and PR playbook subpaths import and construct runtimes carrying the declared contract surface; Captain, CODE, REVIEW, DEV, BRANCH, and PR expose retained-snapshot adoption while DECIDE, whose machine declares a parallel state, omits it ([[playbook-runtime-61](playbook-runtime.md#playbook-runtime-61)]).
+8. **Compiled-artifact fidelity.** Every packed file other than the manifest is byte-identical to the repository's own, and the committed Captain, CODE, REVIEW, DECIDE, DEV, BRANCH, and PR artifact-conformance suites pass with their source/GEARS/FSM, transition, prompt, and topology checks — PR's script-state check among them — named among those that ran.
+9. **Nested cligent floor.** The nested installed `@sublang/cligent` shall satisfy the caret range the packed manifest declares and expose the complete enumerated release-floor capability set through its root and `@sublang/cligent/tmux-play` public specifiers resolved from that nested copy ([[release-14](#release-14)]).
+   The guard shall prove the runtime presence and exact call signatures of `launchManagedTmuxPlay` and `runManagedTmuxPlaySession`, plus the exact usable type and optionality of `CaptainContext.emitReply`, `CaptainRunResult.resumeToken`, the exact optional literal `CaptainRunResult.errorCode` and `PlayerRunResult.errorCode`, `Captain.prepareDispose`, the player and Captain call-option parameters, each continuation and complete-setting option, every complete setting and tuning selection including optional boolean `AgentCallSettings.fastMode`, the root `assertFastModeSupported` type and callable runtime export whose supported-versus-unsupported results agree with Cligent's own public `FAST_MODE_SUPPORT` descriptor, the typed settings rejection and predicate, the required work-directory cleanup-authority member on both managed launch context and direct session options, both managed attach activation members, and the prepared attach parameter.
    It shall additionally pass a segmented player id such as `dev.coder` through the real public config loader unchanged.
    It shall pass an empty roster through that loader into the empty startup-visible Boss-only layout and initialize the real public runtime core with an empty Captain player manifest and accepted empty visibility.
+   Through that installed runtime, a deterministic Codex-shaped adapter shall emit one complete commentary `text` message, one complete final-response `text` message, and a successful terminal `done` event with no result, and the player result shall preserve exactly one newline between the two messages and exactly one final-response line.
    Every interface-member proof shall resolve the owning public type rather than search declarations by spelling, because an unrelated member or documentation reference can retain the same spelling after the required interface loses or narrows it.
    A candidate whose declared range admits only published cligent releases without any one of these capabilities shall fail here rather than at a Boss turn or attachment.
+10. **Packed session-store consumer.** An external package declaring only `@sublang/playbook` shall install the candidate tarball into a throwaway prefix and type-check with `skipLibCheck: false` against the packed `@sublang/playbook/session-store` declaration, then through that facade alone open a store on a temporary directory, list and read the exact five-field token-free summary of a session manifest the installed CLI wrote, acquire its lease, append and read back replay-stream entries, observe readable but not durable sequence advancement before release, follow that complete uncheckpointed append through an independent lease-free store read that exposes only its readable boundary, and receive the equalized final status from release ([[release-33](#release-33)], [[playbook-cli-73](playbook-cli.md#playbook-cli-73)], [[playbook-cli-76](playbook-cli.md#playbook-cli-76)], [[playbook-cli-82](playbook-cli.md#playbook-cli-82)], [[playbook-cli-83](playbook-cli.md#playbook-cli-83)]).
+   The summary shall expose no raw manifest or resume credential at any depth, the stream read-back shall satisfy the frozen envelope, sequence, and readable-prefix contract and carry no resume token, and a record below the current schema shall be rejected rather than migrated, so the external consumer is proven to apply the CLI's own validation ([[playbook-cli-74](playbook-cli.md#playbook-cli-74)], [[playbook-cli-75](playbook-cli.md#playbook-cli-75)]).
+11. **Packed host-capabilities consumer.** An external package declaring only `@sublang/playbook` shall install the candidate tarball into a throwaway prefix and type-check with `skipLibCheck: false` against the packed `@sublang/playbook/host-capabilities` declaration, then through that facade alone construct live capabilities on a fresh temporary Git worktree with exactly the declared members, observe its clean baseline, drive one exclusive governed operation that creates one descendant commit while spending the correction budget through `writeAhead` inside completion, receive a `one-descendant-commit` receipt carrying that commit's OID with the spent budget and completion evidence settled on the boundary, classify a second operation `unchanged`, agree with the module-level observation and classification functions, and receive a fail-closed capability that rejects and reports the empty ledger ([[release-34](#release-34)], [[playbook-cli-87](playbook-cli.md#playbook-cli-87)], [[playbook-cli-88](playbook-cli.md#playbook-cli-88)], [[playbook-cli-89](playbook-cli.md#playbook-cli-89)], [[playbook-cli-90](playbook-cli.md#playbook-cli-90)]).
+    The worktree shall end with exactly one descendant commit, a clean status, and no active repository claim.
 
-Step 7 shall claim no more than it proves. The SLC pipeline is agentic, so
+Step 8 shall claim no more than it proves. The SLC pipeline is agentic, so
 this gate shall not attempt to re-derive the compiled artifacts and shall
 not treat byte-for-byte reproduction as a release condition.
 The deterministic source contract check shall establish only that each GEARS artifact preserves the maintained source fragments its parser recognizes as instruction blocks or explicit quoted relays, including their order and literal quote markers.
@@ -354,27 +406,33 @@ suite's real model calls.
 Before tagging a release, the developer/agent shall run
 `pnpm test:acceptance` locally. This live acceptance suite shall pack and
 install the candidate package once and create isolated fresh git repositories.
-It shall run the installed executable's headless shared-Captain path with real Claude and Codex adapters for bundled REVIEW and CODE, using stdin as well as argument input, exact `{sessionId, reply}` JSON output, and no tmux-play session.
+It shall run the installed executable's headless shared-Captain path with real Claude and Codex adapters for bundled REVIEW, CODE, and DEV, using stdin as well as argument input, exact `{sessionId, reply}` JSON output, and no tmux-play session.
 The REVIEW case shall create the public session headlessly from stdin, retire that writer, and select the same public id through a second managed interactive process whose natural status question proves that the durable Captain and player conversations survive the front-end hand-off without repeating REVIEW or its repository effects ([[playbook-cli-23](playbook-cli.md#playbook-cli-23)], [[playbook-cli-49](playbook-cli.md#playbook-cli-49)]).
 The CODE case shall complete its nested REVIEW call and shall report the ordered start, child-call, child-return, and finish lifecycle exactly once.
+The DEV case shall run headless `/dev` for a fixture request whose sound planning path is `code`, complete the planned nested CODE call and CODE's nested REVIEW call through a distinct Analyst player that the other cases never reach, and shall report the ordered start, both child-call, both child-return, and finish lifecycle exactly once ([DR-044](../decisions/044-dev-planning-workflow.md)).
 It shall retain one installed interactive `/decide` case through a real attached tmux-play session so the live gate observes panes for DECIDE's explicitly bound players under [[playbook-captain-22](playbook-captain.md#playbook-captain-22)] and Boss/Captain focus while DECIDE completes nested REVIEW through the same player ids explicitly shared by both role maps under [[playbook-captain-29](playbook-captain.md#playbook-captain-29)].
 After the attached DECIDE turn settles and its pane child retires the lease, a headless process shall select that exact public id under compatible current tuning and prove that the Captain conversation, retained player tokens, explicit role bindings, frozen working directory, and completed repository effect survive without lifecycle replay, replacement player conversations, or a new tmux session ([[playbook-cli-22](playbook-cli.md#playbook-cli-22)], [[playbook-cli-23](playbook-cli.md#playbook-cli-23)], [[playbook-cli-49](playbook-cli.md#playbook-cli-49)]).
 It shall additionally run the hermetic global-only case ([DR-024](../decisions/024-runtime-engine-provisioning.md) §7): install the packed candidate globally into an isolated npm prefix, enable a compiled thin fixture registry importing `xstate` and `@sublang/playbook/xstate-runtime` in the shared config of a fresh repository with no project-local packages anywhere, and invoke its slash command through the installed headless Captain.
 The fixture shall mechanically reject a worker result that does not equal the repository token before it can enter its final state; the case shall assert automatic engine provisioning triggers exactly once, both runs return only `{sessionId, reply}`, each reply grounds the fixture's published terminal meaning that the exact token was returned and the request completed, and a repeated fresh run provisions nothing further.
+Across the successful REVIEW, CODE, DEV, DECIDE, and hermetic cases, the installed candidate shall persist canonical token-free Captain manifest schema `7` with digest-bound replay and local hints [[session-storage-2](session-storage.md#session-storage-2)] [[session-storage-6](session-storage.md#session-storage-6)], complete shell and internal-Captain runtime snapshot schema `4`, schema-3 catalog entries, an authoritative effect ledger exactly mirrored by the shell snapshot, an empty `unresolvedEffects` list, and complete receipts covering REVIEW `unchanged` plus `one-descendant-commit`, CODE `one-descendant-commit`, DEV `unchanged`, DECIDE `unchanged` plus `one-descendant-commit`, and hermetic `unchanged` as applicable ([[playbook-runtime-67](playbook-runtime.md#playbook-runtime-67)], [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)], [[playbook-captain-41](playbook-captain.md#playbook-captain-41)], [[playbook-captain-58](playbook-captain.md#playbook-captain-58)]).
+The same-id REVIEW and DECIDE status continuations shall preserve the complete effect ledger byte-for-byte while starting no governed repository boundary ([[playbook-cli-23](playbook-cli.md#playbook-cli-23)], [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)]).
 Documentation shall drop the project-local install and `npx`
 consumption story only after this case passes.
+It shall additionally run, from the repository sources rather than the packed candidate, the real-provider recovery cases — a worker, judge, stray-file, preparation, and unroutable-decision interruption each met by Captain's bounded preparation and the runtime's validated continuation without a repeated commit [[recovery-14](recovery.md#recovery-14)] [[recovery-8](recovery.md#recovery-8)] — and the SDK and CLI question-relay cases, in which Boss clarifies, reopens, and answers a long player question through Captain replies alone [[captain-playbook-5](captain-playbook.md#captain-playbook-5)].
 
 It shall additionally drive one conversational session against a real
 Claude Captain through an attached tmux-play session
 ([DR-029](../decisions/029-session-scoped-conversational-captain.md)).
 Every machine outcome in that session shall come from a deterministic
 [DR-016](../decisions/016-script-actors-and-optimize-pass.md) script-actor
-fixture playbook whose failure is engineered by an absent flag file, never
-from a rigged agent, so the only live variable is the Captain's own
+fixture playbook whose failure is engineered by the absent flag file of a
+release gate outside the repository, which no preparation may create,
+never from a rigged agent, so the only live variable is the Captain's own
 judgment. The session shall carry, in one shell session on one durable
 conversation: a natural chat turn that engages nothing; an engagement
-driven to a deterministic failure whose reply names the failed step and
-claims no completion; the verbatim `Retry and continue the iteration`
+driven to a deterministic failure whose same-turn automatic preparation [[recovery-14](recovery.md#recovery-14)]
+reports blocked rather than writing the gate's flag and whose reply names
+the failed step and claims no completion; the verbatim `Retry and continue the iteration`
 recovery, which shall reach the finished marker after the flag file is
 placed; a natural status question that moves no state; a second
 deterministic failure, and then a switch requested in ordinary prose —
@@ -385,7 +443,8 @@ whole session, no turn-failure marker appears beyond the two engineered
 script failures, and the fixture repository is left clean.
 
 The suite shall fail unless headless `/code` implements and commits its fixture requirement, reaches nested REVIEW approval, and leaves a clean worktree, and unless interactive `/decide` commits and reaches nested REVIEW approval for its fixture design without implementing that design, also with a clean worktree.
-The REVIEW case shall fail unless the headless process returns the public id and one Captain reply, the selected interactive process reports that same id and one new Captain reply, the first reaches approval, the continuation repeats no lifecycle or repository effect, the fixture repository remains clean, and the interactive pane child releases its lease after shutdown.
+The DEV case shall fail unless every Analyst planning receipt is `unchanged`, the accepted planning outcome is `code` with no Boss-question suspension and no DECIDE, BRANCH, or PR call — the pull-request paths leave this plain-path case unchanged — nested CODE implements and commits the fixture requirement, nested REVIEW approves it, and the worktree is clean.
+The REVIEW case shall fail unless the headless process returns the public id and one Captain reply, the selected interactive process reports that same id and one new Captain reply, the first reaches approval as recorded by the accepted REVIEW outcome rather than by any reply wording, the continuation repeats no lifecycle or repository effect, the fixture repository remains clean, and the interactive pane child releases its lease after shutdown.
 The DECIDE case shall fail unless the attached and selected headless processes report the same public id, the compatible reopening tuning is retained for the existing Captain and player continuations without changing their role bindings or tokens' ownership, the continuation repeats no lifecycle or repository effect, and no tmux session remains after the hand-off.
 Missing local authentication or required executables shall be a clear failure,
 not a skip.
@@ -404,7 +463,7 @@ Before tagging a release, the developer/agent shall verify, in this order:
 - [ ] All tests pass (`pnpm test` from the repo root).
 - [ ] The local model-free release smoke passes (`pnpm smoke:release`;
       [[release-28](#release-28)]).
-- [ ] The local real-agent acceptance suite passes, covering REVIEW headless-to-interactive continuation, headless CODE with nested REVIEW, DECIDE interactive-to-headless continuation, and the remaining hermetic and conversational cases (`pnpm test:acceptance`; [[release-24](#release-24)]).
+- [ ] The local real-agent acceptance suite passes, covering REVIEW headless-to-interactive continuation, headless CODE with nested REVIEW, headless DEV through its planned CODE path, DECIDE interactive-to-headless continuation, the remaining hermetic and conversational cases, and the source-hosted recovery and question-relay cases (`pnpm test:acceptance`; [[release-24](#release-24)]).
 - [ ] If the release changes the interactive CLI presentation or layout, or
       changes the declared or locked `@sublang/cligent` version, the
       conditional manual tmux UX smoke passes
@@ -416,6 +475,11 @@ Before tagging a release, the developer/agent shall verify, in this order:
 - [ ] `package.json` `version` is
       bumped and `private` is unset (or `false`).
 - [ ] All changes are committed and pushed to `main`.
+
+#### release-35
+
+Before releasing the recovery extensions that retain existing persisted version numbers, the maintainer shall verify that every supported host sharing a store, including the CLI and Spex SDK, uses the same compatible recovery reader and writer, and that the upgrade instructions require stopping all older writers before any new writer saves recovery data [[session-storage-2](session-storage.md#session-storage-2)] ([DR-071](../decisions/071-interrupted-continuation-settlement.md)).
+A mixed 15.1.x and extended-format store shall not be a supported release configuration.
 
 ## Verification
 
@@ -468,17 +532,18 @@ not be substituted for any case.
 #### release-19
 
 The test suite shall fail unless `package.json` declares
-`@sublang/cligent` with a caret SemVer range and — unless the
+`@sublang/cligent` with a caret SemVer range whose floor meets the
+[[release-14](#release-14)] floor and — unless the
 [[release-11](release.md#release-11)] local-development
 override is active, which rewrites both the recorded specifier and
 the resolution in the working copy — the root importer in
 `pnpm-lock.yaml` records the same specifier and a concrete resolved
-cligent version whose public tmux-play contract declares both the
+cligent version, at or above that floor, whose public tmux-play contract declares both the
 pre-close `Captain.prepareDispose()` lifecycle and
 `CallPlayerOptions.resume` selection accepted by
 `CaptainContext.callPlayer`, plus `CallCaptainOptions.resume` and
 `CallCaptainOptions.allowedTools` accepted by
-`CaptainContext.callCaptain`, atomic `AgentCallSettings` on both call-option types, explicit `TuningSelection`, and the public typed settings-rejection error and predicate required by [[release-14](#release-14)].
+`CaptainContext.callCaptain`, atomic `AgentCallSettings` on both call-option types with optional boolean `fastMode`, explicit `TuningSelection`, the public `assertFastModeSupported` capability assertion, and the public typed settings-rejection error and predicate required by [[release-14](#release-14)].
 
 The committed lockfile is never exempt, whatever the working copy
 holds. Both sides of every comparison below shall be this package's own
@@ -573,29 +638,31 @@ package ([DR-027](../decisions/027-runtime-compatibility-from-cligent.md)) (veri
 
 The test suite shall fail unless `package.json` declares
 `@sublang/spex` with a caret SemVer range whose floor is at least
-2.1.1, the root importer in `pnpm-lock.yaml` records the same
-specifier, and both `@sublang/spex/scaffold/specs/meta.md` and
+3.0.0, the root importer in `pnpm-lock.yaml` records the same
+specifier and resolves a version no lower than 3.0.0, and both `@sublang/spex/scaffold/specs/meta.md` and
 `@sublang/spex/scaffold/i18n/zh/specs/meta.md` resolve from the repo
-root to non-empty files, and the normal `pnpm test` gate runs `spex lint` before Vitest (verifying [[release-22](#release-22)]).
+root to non-empty files (verifying [[release-22](#release-22)]).
+
+### Normal Test Gate Coverage
+
+#### release-32
+
+The test suite shall fail unless the effective `pnpm test` lifecycle, in `pretest`, `test`, and `posttest` order, places a fail-fast `spex lint` command before its first Vitest command (verifying [[release-31](#release-31)]).
 
 ### Public Surface Coverage
 
 #### release-17
 
 
-The test suite shall fail unless each of
-`@sublang/playbook/slc/link.md`, `@sublang/playbook/slc/gears2fsm.md`,
-`@sublang/playbook/slc/text2gears.md`, and
-`@sublang/playbook/slc/optimize.md` resolves via
-`import.meta.resolve` to an existing file whose contents are readable (verifying [[release-16](#release-16)]).
+The test suite shall fail unless every published compiler asset resolves through its package subpath via `import.meta.resolve` to an existing file whose contents are readable (verifying [[release-16](#release-16)]).
 
 #### release-18
 
 
-The test suite shall fail unless `npm pack --dry-run` lists the `@sublang/playbook/runtime` and `@sublang/playbook/xstate-runtime` `.js` and `.d.ts` artifacts — including the `xstate-playbook-runtime` factory siblings backing the engine subpath — and all four `slc/*.md` files among the packed contents, plus the authored Captain, CODE, REVIEW, and DECIDE sources, every `docs/*.md` guide the README links to, each workflow's GEARS, FSM, and linked-runtime `.ts`, `.js`, and `.d.ts` artifacts, and the CODE, REVIEW, and DECIDE registry `.ts`, `.js`, and `.d.ts` artifacts under `reference/sdlc/<id>.playbook/`.
-Generated verification support shall remain canonical repository content but need not be packed (verifying [[release-15](#release-15)], [[release-16](#release-16)], and [[release-20](#release-20)]).
+The test suite shall fail unless `npm pack --dry-run` lists the `@sublang/playbook/runtime`, `@sublang/playbook/xstate-runtime`, `@sublang/playbook/session-store`, and `@sublang/playbook/host-capabilities` `.js` and `.d.ts` artifacts — including the `xstate-playbook-runtime` factory siblings backing the engine subpath and the internal `accepted-outcome` `.ts`, `.js`, and `.d.ts` siblings — and exactly the declared `slc/*` assets among the packed contents, plus the authored Captain, CODE, REVIEW, DECIDE, DEV, BRANCH, and PR sources, every `docs/*.md` guide the README links to, each workflow's GEARS, FSM, and linked-runtime `.ts`, `.js`, and `.d.ts` artifacts, and the CODE, REVIEW, DECIDE, DEV, BRANCH, and PR registry `.ts`, `.js`, and `.d.ts` artifacts under `reference/sdlc/<id>.playbook/`.
+Generated verification support shall remain canonical repository content but need not be packed (verifying [[release-15](#release-15)], [[release-16](#release-16)], [[release-20](#release-20)], [[release-33](#release-33)], and [[release-34](#release-34)]).
 The suite shall further fail unless every packed Markdown file is link-closed over the packed file list: each relative target and reference-definition destination resolves to a packed file or a directory containing packed files, and a fragment on a packed Markdown target names an anchor that file renders (verifying [[release-20](#release-20)]).
-The closure's two escape hatches shall themselves be verified against the repository tree: a packed SLC definition's exempt relative citation into `specs/` shall name an existing repository file whose fragment, when present, that file renders, and every living-pointer URL in a packed Markdown file shall name this repository's `main` branch, an existing repository path, and — on a Markdown target — a rendered anchor (verifying [[release-20](#release-20)]).
+The closure's two escape hatches shall themselves be verified against the repository tree: a packed SLC definition's exempt relative citation into `specs/` shall name an existing repository file whose fragment, when present, that file renders, and every living-pointer URL in a packed Markdown file shall name this repository's `main` branch, use `blob/main` for an existing file or `tree/main` for an existing directory, and — on a Markdown file target — name an anchor that file renders (verifying [[release-20](#release-20)]).
 
 #### release-21
 
@@ -603,11 +670,11 @@ The closure's two escape hatches shall themselves be verified against the reposi
 The test suite shall fail unless `package.json` declares a `playbook`
 bin and no `playbook-code` bin, declares
 `exports['./runtime']` and `exports['./xstate-runtime']`, declares
-the playbook and registry subpaths for CODE, REVIEW, and DECIDE,
+the playbook and registry subpaths for CODE, REVIEW, DECIDE, DEV, BRANCH, and PR,
 declares `exports['./captain/playbook']`, declares neither
 `exports['./captain/registry']` nor `exports['./code/tmux-play']`, and
 `npm pack --dry-run` lists the `playbook` launcher entry and the
-three workflow registry `.js` and `.d.ts` artifacts
+six workflow registry `.js` and `.d.ts` artifacts
 among the packed contents.
 The test suite shall additionally pin the semver-stable unit of each
 public subpath rather than only the subpath entry: it shall fail unless
@@ -616,6 +683,10 @@ declaration files behind every public subpath are exactly the recorded
 sets, so removing or renaming one goes red at the gate and is decided as
 a [[release-1](release.md#release-1)] release event before the tag
 rather than adjudicated after it.
+The public-surface suite shall import the XState engine and fail unless its runtime ABI is `1`, its supported schema set is the frozen exact value `[3]`, and the engine and Captain declaration surfaces expose only their schema-3 specification, factory, and registry-entry shapes with no schema-2 variant (verifying [[release-15](#release-15)]).
+The packed-artifact suite shall fail unless the authored TypeScript and committed JavaScript CODE, REVIEW, DECIDE, and session-Captain artifacts declare schema `3`, each workflow registry's TypeScript, JavaScript, and declaration siblings expose schema `3`, the CODE, REVIEW, and DECIDE runtime declarations retain the schema-3 factory discriminator, the session-Captain declaration retains its options-only wrapper without a legacy variant, and every sibling agrees with the shipped engine (verifying [[release-15](#release-15)]).
+The public-surface suite shall fail unless the declaration behind `exports['./runtime']` exposes `unresolved-effect` as exactly one state-only `PlaybookRunResult` arm with no state description, output, pending call, error, effect ledger, receipt, semantic candidate, or unresolved-effects projection (verifying [[release-15](#release-15)]).
+The public-surface suite shall fail unless the declaration behind `exports['./playbook-captain']` exports the exact bounded unresolved-effect entry interface and pure validator, requires `PlaybookCaptainSettlement.unresolvedEffects` as a read-only list of that interface, omits repository paths, projections, ledger and internal identities, prose, semantic evidence, and budgets from the entry, and adds no such list to `PlaybookRunResult` (verifying [[release-15](#release-15)]).
 Which subpaths those are shall be derived from `package.json`'s
 `exports` map minus a recorded exclusion carrying its reason, and the
 suite shall fail unless the recorded sets cover exactly that derivation.
@@ -626,8 +697,8 @@ unpinned along with `exports['./code/playbook']`,
 `exports['./playbook-captain']`, and other compiled-workflow subpaths,
 and a fifth name added here would have left the sixth to the next
 reviewer. Deriving it turns a subpath added to the manifest red until it
-is recorded. `exports['./slc/*']` is the recorded exclusion: a wildcard
-directory mapping to authored specs, not a module with an export set.
+is recorded.
+`exports['./slc/*']` shall be the recorded exclusion from module-export pinning because it maps to compiler definitions, data, and CLI tools whose public contract covers asset paths and specified CLI behavior rather than their internal JavaScript exports (verifying [[release-16](#release-16)]).
 The JavaScript and declaration sets shall be recorded separately, since
 one recorded set cannot describe both: a declaration file exports types
 the JavaScript module has no key for, so a single set forces the
@@ -672,19 +743,24 @@ unless all of the following hold:
   tarball alone and **available** with each SDK named as its own top-level
   install root, and the lean closure carries no `@anthropic-ai` or
   `@openai` directory at any depth;
-- the installed executable answers top-level and `run` help with the fresh, continuation, and uncertain-recovery grammar, and `--list` names the CODE, REVIEW, and DECIDE registries;
+- the installed executable answers top-level and `run` help with the fresh, continuation, and uncertain-recovery grammar, and `--list` names the CODE, REVIEW, DECIDE, DEV, BRANCH, and PR registries;
 - the hermetic fixture resolves neither engine import before launch, and a subprocess driver using the packed launcher's injected deterministic adapter drives its configured slash command through the compiled Captain with no tmux;
 - the first process provisions the fixture exactly once into the isolated prefix and returns only `{sessionId, reply}` after durable hand-off, a second process continues the same id from stdin with the stored Captain continuation and frozen working directory without replay or provisioning, and two further processes run one explicit-role fixture against that same id before and after compatible current retuning;
 - a deliberately failing fixture parks its engagement in the recoverable failure state in one process, and a second process — holding nothing but that record — is offered the retry in its own decision digest, selects it by the exact advertised id, applies it once, and finishes the engagement, so a recovery that the hosting process could once keep only in memory is proven to cross a process boundary;
+- a packed schema-3 governed-player fixture creates exactly one clean descendant commit in both its resolved and semantically unresolved rows while result-less Codex commentary and misleading `Commit:` prose remain opaque; the resolved row accepts only the hidden candidate plus receipt OID, the unresolved row parks after its one durable correction spend, and successor reconciliation and abandonment processes start no player or judge, change no repository state, and preserve the exact bounded evidence through final root disposal (verifying [[release-28](#release-28)]);
 - the explicit-role fixture binds two sequential roles to one segmented player id and a third role to an equal-configured distinct segmented id, orders the shared roles first-to-second before retuning and second-to-first afterward, and fails unless the shared roles advance one token chain in both directions while the distinct id advances only its own chain (verifying [[release-28](#release-28)]);
-- the retuned process applies the current Captain, player, and role model and effort values to the retained tokens, including explicit provider-default resets, while the stored structural projection, working directory, settled effects, public id, and repository remain unchanged (verifying [[release-28](#release-28)]);
-- the installed Captain, CODE, REVIEW, and DECIDE playbook subpaths construct, every packed file other than the manifest is byte-identical to the repository's own, the deterministic source-preservation check passes, and each compiled artifact's conformance suites pass with their declared coverage named among those that ran; and
-- the nested installed `@sublang/cligent` satisfies the packed manifest's caret range; is reached through `@sublang/cligent/tmux-play` resolved from that nested copy; exposes the managed launch and direct-session runtime values and signatures plus the enumerated Captain lifecycle, context call, continuation, complete-setting, typed-rejection, managed work-directory cleanup-authority, attachment activation, and synchronous native-hand-off release-floor members at the exact optionality and callable type Playbook relies on; accepts and preserves a segmented player id such as `dev.coder` through its real config loader; resolves an empty roster to the Boss-only layout and initializes its public runtime core with an empty Captain player manifest; and carries full model and effort tuning selections that distinguish every concrete shell value from an explicit provider-default reset (verifying [[release-14](#release-14)]).
+- the retuned process applies the current Captain, player, and role model, effort, and absent, literal-false, or literal-true fast-mode values to the retained tokens, including explicit provider-default model and effort resets, while the stored structural projection, working directory, settled effects, public id, and repository remain unchanged (verifying [[release-28](#release-28)]);
+- two fresh packed-CLI configs apply literal-false and literal-true fast mode to a role backed by an unsupported adapter, and both fail before session-store access, registry preparation, registry import, adapter-SDK readiness, Captain-runtime creation, or host-runtime creation (verifying [[release-28](#release-28)]);
+- the installed Captain, CODE, REVIEW, DECIDE, DEV, BRANCH, and PR playbook subpaths construct, Captain, CODE, REVIEW, DEV, BRANCH, and PR expose retained-snapshot adoption while DECIDE, whose machine declares a parallel state, omits it ([[release-28](#release-28)]), every packed file other than the manifest is byte-identical to the repository's own, the deterministic source-preservation check passes, and each compiled artifact's conformance suites pass with their declared coverage named among those that ran; and
+- the nested installed `@sublang/cligent` satisfies the packed manifest's caret range; is reached through its root and `@sublang/cligent/tmux-play` public specifiers resolved from that nested copy; exposes the managed launch and direct-session runtime values and signatures plus the enumerated Captain lifecycle, context call, continuation, complete-setting, fast-mode capability, typed-rejection, managed work-directory cleanup-authority, attachment activation, and synchronous native-hand-off release-floor members at the exact optionality and callable type Playbook relies on; exports a callable root fast-mode assertion whose results agree with Cligent's own public support descriptor; accepts and preserves a segmented player id such as `dev.coder` through its real config loader; resolves an empty roster to the Boss-only layout and initializes its public runtime core with an empty Captain player manifest; and carries full model and effort tuning selections that distinguish every concrete shell value from an explicit provider-default reset (verifying [[release-14](#release-14)]); and
+- one deterministic Codex-shaped call through that nested installed runtime preserves complete commentary and final-response `text` messages as exactly two lines when terminal `done` supplies no result (verifying [[release-14](#release-14)] and [[release-28](#release-28)]); and
+- an external package declaring only `@sublang/playbook` type-checks with `skipLibCheck: false` against the packed self-contained session-store declaration and, through that facade alone, opens a store, lists and reads only the exact token-free summary of a CLI-written token-free manifest, acquires its lease, appends and reads stream entries with readability advancing ahead of durability, independently follows the complete append with no false durability or completeness fields, receives equalized final status from release, satisfies the frozen envelope, sequence, and readable-prefix contract, carries no resume token, and migrates supported legacy data only through the explicit source-retaining migrator (verifying [[release-33](#release-33)] and [[release-28](#release-28)]); and
+- an external package declaring only `@sublang/playbook` type-checks with `skipLibCheck: false` against the packed self-contained host-capabilities declaration and, through that facade alone, constructs live capabilities on a fresh Git worktree, drives one exclusive governed commit with a mid-completion correction-budget spend, receives its `one-descendant-commit` receipt and OID with the spent budget settled on the boundary, classifies one `unchanged` operation, agrees with the module observation and classification functions, obtains rejecting fail-closed capabilities, and leaves the worktree with one descendant commit, a clean status, and no active claim (verifying [[release-34](#release-34)] and [[release-28](#release-28)]).
 
-The last clause is a standing guard, not a formality: Playbook relies on every enumerated lifecycle, conversation, settings, and attachment capability, a global install resolves cligent from that nested copy alone, and a candidate whose declared range admits only releases without one of them would install and then fail during initialization, a Boss turn, or managed attachment.
+The nested-cligent clause is a standing guard, not a formality: Playbook relies on every enumerated lifecycle, conversation, settings, and attachment capability, a global install resolves cligent from that nested copy alone, and a candidate whose declared range admits only releases without one of them would install and then fail during initialization, a Boss turn, or managed attachment.
 
 Because that clause is the whole of the gate's protection against an incompatible dependency, the normal `pnpm test` suite shall fail unless every check backing it is itself falsifiable: for each required interface member, a fixture `@sublang/cligent` that declares the owning interface without that member shall make the check fail and name that exact member, while declaration enumeration over the same mutated fixture still finds every required spelling, so a guard that drifts back to matching names rather than resolving owning members fails these rows.
-A fixture loader retaining the unsegmented player-id grammar, a config loader or runtime core rejecting an empty player roster, a call option missing or narrowing any continuation or complete-setting member, a tuning type unable to express the full shell value domain or either explicit selection, an optional member made required, an absent managed runtime value or missing or narrowed managed function declaration, a missing, optional, or narrowed managed cleanup-authority boolean, a synchronous lifecycle or native-hand-off member where Playbook requires an asynchronous or synchronous shape respectively, a managed attach that omits either activation option, or a package that stops exporting the public specifier shall likewise fail with the exact unsupported capability named.
+A fixture loader retaining the unsegmented player-id grammar, a config loader or runtime core rejecting an empty player roster, a call option missing or narrowing any continuation or complete-setting member, an `AgentCallSettings` type missing or narrowing optional boolean fast mode, a root export missing or narrowing the fast-mode capability assertion, a root runtime missing that callable or accepting an unsupported adapter, a tuning type unable to express the full shell value domain or either explicit selection, an optional member made required, an absent or widened/narrowed resume-rejection code, an absent managed runtime value or missing or narrowed managed function declaration, a missing, optional, or narrowed managed cleanup-authority boolean, a synchronous lifecycle or native-hand-off member where Playbook requires an asynchronous or synchronous shape respectively, a managed attach that omits either activation option, or a package that stops exporting either public specifier shall likewise fail with the exact unsupported capability named.
 One row shall run the complete checks against the repository's own installed cligent, so the declared floor is proven compatible without a pack or an install.
 
 Nothing here shall be asserted by recompiling a playbook.
@@ -699,30 +775,34 @@ selected by the normal `pnpm test` configuration or by GitHub CI.
 #### release-25
 
 
-The opt-in local `pnpm test:acceptance` suite shall pack and install the candidate package once, then exercise five independent fresh git repositories through the installed npm `playbook` command shim.
+The opt-in local `pnpm test:acceptance` suite shall pack and install the candidate package once, then exercise five independent fresh git repositories through the installed npm `playbook` command shim, followed by the source-hosted recovery and question-relay cases below.
 The first case shall pipe `/review <request>` to installed `playbook run --json` over a prepared commit using the shared config and real Captain, Coder, and Reviewer agents.
 After that headless process retires its lease, it shall launch a managed interactive process selected by the returned public session id, verify its one matching operational id line, ask one natural status question through the attached Boss pane, and fail unless the reply preserves the private Captain marker, REVIEW's approval and repository effects occur exactly once, the public id and stored working directory remain unchanged, the selected child retires its lease on shutdown, and the worktree stays clean (verifying [[release-24](#release-24)]).
 The second case shall invoke installed `playbook run --json "/code <task>"` with real Claude and Codex agents and shall fail unless the start, nested REVIEW call, nested REVIEW return, and finish lifecycle markers appear once in order on stderr, only the requested implementation changes, the approved result is present in `HEAD`, the worktree is clean, and no tmux process is created.
 The third, independent `/decide` case shall begin attached to tmux-play and shall fail unless its start, nested REVIEW call/return, and finish markers appear, only the requested spec-design files change, the design is committed without implementation, and the worktree is clean.
 The DECIDE case shall also fail unless the nested REVIEW leaf exposes exactly the Coder and Reviewer players explicitly shared with DECIDE, creates no replacement conversation for either player id, and keeps the Boss/Captain pane focused.
-After the interactive pane child shuts down, the case shall reopen that exact public id through installed `playbook run --session <id> --json` with a compatible current-tuning overlay and a natural status question, and shall fail unless the exact `{sessionId, reply}` result preserves the prior Captain and player continuations, records the current Captain, player, and role model and effort selections including provider-default selections, repeats no lifecycle or repository effect, creates no tmux session, and leaves the worktree clean (verifying [[release-24](#release-24)]).
+After the interactive pane child shuts down, the case shall reopen that exact public id through installed `playbook run --session <id> --json` with a compatible current-tuning overlay and a natural status question, and shall fail unless the exact `{sessionId, reply}` result preserves the prior Captain and player continuations, records the current Captain, player, and role model, effort, and fast-mode settings including provider-default model and effort selections and a literal fast-mode boolean, repeats no lifecycle or repository effect, creates no tmux session, and leaves the worktree clean (verifying [[release-24](#release-24)]).
 The fourth, hermetic global-only case shall install the packed candidate into an isolated npm global prefix with inherited npm prefix configuration neutralized, place a configured compiled thin fixture registry importing `xstate` and `@sublang/playbook/xstate-runtime` and making one real Claude player call under a real Codex Captain in a fresh git repository containing no `package.json`, lockfile, or `node_modules` at any level, and invoke the prefix's `playbook run --json` command by absolute path with `/hermetic <task>`.
 It shall fail unless neither engine import resolves from the fixture before launch; the first process prints one provisioning line and creates exactly the `node_modules/xstate` and `node_modules/@sublang/playbook` links resolving into the isolated prefix; the fixture mechanically proves the player result equals the repository token before final completion; both processes return exact `{sessionId, reply}` objects whose replies ground the published terminal meaning that the exact token was returned and the request completed; a repeated fresh run creates nothing further and prints no provisioning line; and `@sublang/cligent` resolves from beneath the prefix's `@sublang/playbook` rather than from any machine-global copy (verifying [[release-24](#release-24)]).
+The first four cases shall fail unless their successful durable records carry the exact record, snapshot, catalog, ledger-mirror, empty-unresolved-list, and per-workflow receipt-classification matrix of [[release-24](#release-24)], and the same-id REVIEW and DECIDE status continuations leave that ledger unchanged.
 
 The fifth, conversational case
 ([DR-029](../decisions/029-session-scoped-conversational-captain.md)) shall
 drive one attached tmux-play session with a real Claude Captain and a
 bundled deterministic fixture playbook whose middle step is a
 [DR-016](../decisions/016-script-actors-and-optimize-pass.md) script actor
-succeeding only when a flag file exists — the engineered failure, so no
-agent is rigged and the Captain's judgment is the only live variable.
+succeeding only when the flag file of a release gate outside the
+repository exists — the engineered failure, which no preparation may repair
+because only that gate writes the flag, so no agent is rigged and the
+Captain's judgment is the only live variable.
 It shall fail unless, in one shell session and in this order:
 
 - a natural-language chat turn is answered as Captain prose while no
   engagement starts;
 - engaging the fixture with the flag file absent reaches the fixture's
-  failure, and that turn's reply names the failed step while claiming no
-  completion;
+  failure, the automatic preparation that stop allows reports blocked
+  instead of writing the gate's flag, and that turn's reply names the
+  failed step while claiming no completion;
 - after the flag file is created, the verbatim Boss turn
   `Retry and continue the iteration` drives that same engagement to its
   finished marker, with no second engagement started in its place;
@@ -741,6 +821,9 @@ repository is left clean with no ignored or untracked artifacts. The
 deterministic `/decide <task>` command mapping is not this case's subject
 and stays in the hermetic tier; what this case exercises is the
 model-decided switch against a still-active engagement.
+
+The recovery cases shall drive the repository's session host with a real Claude Captain and a real Codex worker over a two-step fixture in a fresh git repository, injecting one interruption per case — a worker transport failure before the second step, a judge transport failure after the first commit, a stray generated file left by a read-only check, a transport failure after preparation tools ran with the session reopened in `recover` mode, and a check that reports a decision the fixture cannot route — and shall fail unless a `recover` selection continues the interrupted step, preparing the withheld local marker where the fixture omits it, and that step completes with the first commit made once, the worker called once for the first step and at most twice for the second, a clean worktree, and, for the stray file, `restored` evidence on its boundary, while the unroutable decision parks the leaf as `failed` with a `blocked` candidate and an unspent correction budget (verifying [[release-24](#release-24)]).
+The question-relay cases shall run the same repository host through the SDK and through `playbook run`, and shall fail unless Captain's first reply explains a long player question — its two options, the seven-day deletion, and the approval requirement — in at most 65 words without the question's jargon, a clarification addressed to Captain settles as `respond` and leaves the frames unchanged, a reopened session delivers a player-directed follow-up verbatim, the explicit choice settles as `deliver` and completes the flow, and no raw `boss-question` status reaches the record stream (verifying [[release-24](#release-24)]).
 
 The acceptance suite shall require local adapter authentication, tmux 3.3 or newer, glow,
 Expect, git, and npm. It shall not be selected by the normal `pnpm test`
@@ -771,6 +854,10 @@ This human presentation check is conditional under [[release-10](#release-10)] a
 [[release-25](#release-25)]; the real-model functional workflows shall not be
 repeated manually — interactively or through `playbook run` — merely to
 duplicate the automatic gate.
+
+#### release-36
+
+When the recovery release gate is audited, the audit shall record the exact CLI and embedded SDK versions and their shared-store recovery checks, verify the documented coordinated upgrade, and block publication while any supported writer remains incompatible [[release-35](#release-35)].
 
 ### Hosted release workflow
 

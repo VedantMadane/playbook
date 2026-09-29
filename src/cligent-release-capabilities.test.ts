@@ -35,12 +35,15 @@ function write(path: string, contents: string): void {
 interface FixtureShape {
   readonly emitReply?: string;
   readonly resumeToken?: string;
+  readonly captainErrorCode?: string;
+  readonly playerErrorCode?: string;
   readonly prepareDispose?: string;
   readonly callPlayer?: string;
   readonly callCaptain?: string;
   readonly tuningSelection?: string;
   readonly settingsModel?: string;
   readonly settingsEffort?: string;
+  readonly settingsFastMode?: string;
   readonly rootEffort?: string;
   readonly rootPermissionPolicy?: string;
   readonly settingsInstruction?: string;
@@ -52,6 +55,9 @@ interface FixtureShape {
   readonly captainAllowedTools?: string;
   readonly settingsError?: string;
   readonly settingsPredicate?: string;
+  readonly fastModeAssertion?: string;
+  readonly fastModeAssertionRuntime?: boolean;
+  readonly fastModeAssertionSemantics?: boolean;
   readonly launchManagedSignature?: string;
   readonly runManagedSignature?: string;
   readonly launchManagedRuntime?: boolean;
@@ -74,6 +80,8 @@ function fixtureCligent(root: string, shape: FixtureShape = {}): string {
   const {
     emitReply = 'emitReply(text: string): Promise<void>;',
     resumeToken = 'readonly resumeToken?: string;',
+    captainErrorCode = "readonly errorCode?: 'SESSION_RESUME_REJECTED';",
+    playerErrorCode = "readonly errorCode?: 'SESSION_RESUME_REJECTED';",
     prepareDispose = 'prepareDispose?(): Promise<void>;',
     callPlayer =
       'callPlayer(playerId: string, prompt: string, options?: CallPlayerOptions): Promise<unknown>;',
@@ -84,6 +92,7 @@ function fixtureCligent(root: string, shape: FixtureShape = {}): string {
       | { readonly kind: 'provider-default' };`,
     settingsModel = 'readonly model: TuningSelection;',
     settingsEffort = 'readonly effort: TuningSelection<Effort>;',
+    settingsFastMode = 'readonly fastMode?: boolean;',
     rootEffort = `export type Effort =
       | 'off' | 'on'
       | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -108,6 +117,10 @@ function fixtureCligent(root: string, shape: FixtureShape = {}): string {
 }`,
     settingsPredicate =
       'export declare function isAgentCallSettingsError(error: unknown): error is AgentCallSettingsError;',
+    fastModeAssertion =
+      "export declare function assertFastModeSupported(agent: AgentType | 'claude', path?: string): void;",
+    fastModeAssertionRuntime = true,
+    fastModeAssertionSemantics = true,
     launchManagedSignature =
       'export declare function launchManagedTmuxPlay(options: LaunchManagedTmuxPlayOptions): Promise<PreparedManagedTmuxPlayLaunch>;',
     runManagedSignature =
@@ -150,10 +163,33 @@ function fixtureCligent(root: string, shape: FixtureShape = {}): string {
     )}\n`,
   );
   const tmuxPlay = join(packageRoot, 'dist', 'app', 'tmux-play');
-  write(join(packageRoot, 'dist', 'index.js'), 'export {};\n');
+  write(
+    join(packageRoot, 'dist', 'index.js'),
+    fastModeAssertionRuntime
+      ? `export const FAST_MODE_SUPPORT = Object.freeze({
+  'claude-code': Object.freeze({ requestSupported: true }),
+  codex: Object.freeze({ requestSupported: true }),
+  gemini: Object.freeze({ requestSupported: false }),
+});
+export function assertFastModeSupported(agent, path = 'fastMode') {
+  ${
+    fastModeAssertionSemantics
+      ? `const canonical = agent === 'claude' ? 'claude-code' : agent;
+  if (FAST_MODE_SUPPORT[canonical]?.requestSupported !== true) {
+    throw new Error(path + ' is not supported for adapter ' + agent);
+  }`
+      : ''
+  }
+}
+`
+      : 'export {};\n',
+  );
   write(
     join(packageRoot, 'dist', 'index.d.ts'),
-    "export type { Effort, PermissionPolicy } from './app/tmux-play/contract.js';\n",
+    `export type { Effort, PermissionPolicy } from './app/tmux-play/contract.js';
+export type AgentType = 'claude-code' | 'codex' | 'gemini' | 'kimi' | 'opencode';
+${fastModeAssertion}
+`,
   );
   write(
     join(tmuxPlay, 'index.js'),
@@ -237,6 +273,7 @@ ${tuningSelection}
 export interface AgentCallSettings {
   ${settingsModel}
   ${settingsEffort}
+  ${settingsFastMode}
   ${settingsInstruction}
   ${settingsPermissions}
 }
@@ -265,7 +302,11 @@ export interface CaptainRunResult {
     readonly status: RunStatus;
     readonly turnId: number;
     ${resumeToken}
+    ${captainErrorCode}
     readonly finalText?: string;
+}
+export interface PlayerRunResult {
+    ${playerErrorCode}
 }
 `,
   );
@@ -321,6 +362,7 @@ ${runManagedSignature}
     `export interface UnrelatedCapabilityNames {
   emitReply: unknown;
   resumeToken: unknown;
+  errorCode: unknown;
   prepareDispose: unknown;
   callPlayer: unknown;
   callCaptain: unknown;
@@ -329,6 +371,7 @@ ${runManagedSignature}
   settings: unknown;
   model: unknown;
   effort: unknown;
+  fastMode: unknown;
   instruction: unknown;
   permissions: unknown;
   signal: unknown;
@@ -337,6 +380,7 @@ ${runManagedSignature}
   workDirOwnedByLauncher: unknown;
   launchManagedTmuxPlay: unknown;
   runManagedTmuxPlaySession: unknown;
+  assertFastModeSupported: unknown;
 }
 export declare class AgentCallSettingsErrorDecoy {}
 export declare function isAgentCallSettingsErrorDecoy(): void;
@@ -351,6 +395,7 @@ export type TuningSelectionDecoy =
 const NAIVE_REQUIRED_SPELLINGS = [
   'emitReply',
   'resumeToken',
+  'errorCode',
   'prepareDispose',
   'callPlayer',
   'callCaptain',
@@ -359,10 +404,12 @@ const NAIVE_REQUIRED_SPELLINGS = [
   'settings',
   'model',
   'effort',
+  'fastMode',
   'instruction',
   'permissions',
   'AgentCallSettingsError',
   'isAgentCallSettingsError',
+  'assertFastModeSupported',
   'signal',
   'beforeNativeAttach',
   'attach',
@@ -406,6 +453,8 @@ describe('the cligent release-capability guard', () => {
     expect(result.proven).toEqual([
       'CaptainContext.emitReply',
       'CaptainRunResult.resumeToken',
+      'CaptainRunResult.errorCode',
+      'PlayerRunResult.errorCode',
       'Captain.prepareDispose',
       'CaptainContext.callPlayer options',
       'CaptainContext.callCaptain options',
@@ -416,10 +465,12 @@ describe('the cligent release-capability guard', () => {
       'CallCaptainOptions.settings',
       'AgentCallSettings.model',
       'AgentCallSettings.effort',
+      'AgentCallSettings.fastMode',
       'AgentCallSettings.instruction',
       'AgentCallSettings.permissions',
       'AgentCallSettingsError',
       'isAgentCallSettingsError',
+      'assertFastModeSupported',
       'launchManagedTmuxPlay signature',
       'ManagedTmuxPlayLaunchContext.workDirOwnedByLauncher',
       'runManagedTmuxPlaySession signature',
@@ -430,6 +481,7 @@ describe('the cligent release-capability guard', () => {
       'loadTmuxPlayConfig segmented player id',
       'loadTmuxPlayConfig empty player roster',
       'createTmuxPlayRuntime empty player roster',
+      'assertFastModeSupported runtime semantics',
       'launchManagedTmuxPlay runtime export',
       'runManagedTmuxPlaySession runtime export',
     ]);
@@ -446,6 +498,18 @@ describe('the cligent release-capability guard', () => {
   });
 
   it.each([
+    ...(['CaptainRunResult', 'PlayerRunResult'] as const).flatMap((owner) =>
+      [
+        ['absent', ''],
+        ['required', "readonly errorCode: 'SESSION_RESUME_REJECTED';"],
+        ['widened', 'readonly errorCode?: string;'],
+        ['narrowed', 'readonly errorCode?: never;'],
+      ].map(([kind, declaration]) => [
+        `${kind} ${owner} resume rejection`,
+        { [owner === 'CaptainRunResult' ? 'captainErrorCode' : 'playerErrorCode']: declaration },
+        `${owner}.errorCode`,
+      ]),
+    ),
     [
       'required Captain reply emitter',
       { emitReply: 'emitReply?: (text: string) => Promise<void>;' },
@@ -617,6 +681,21 @@ describe('the cligent release-capability guard', () => {
       'AgentCallSettings.effort',
     ],
     [
+      'fast-mode setting',
+      { settingsFastMode: '' },
+      'AgentCallSettings.fastMode',
+    ],
+    [
+      'optional fast-mode setting',
+      { settingsFastMode: 'readonly fastMode: boolean;' },
+      'AgentCallSettings.fastMode',
+    ],
+    [
+      'complete fast-mode boolean domain',
+      { settingsFastMode: 'readonly fastMode?: true;' },
+      'AgentCallSettings.fastMode',
+    ],
+    [
       'narrowed root permission value domain',
       {
         rootPermissionPolicy:
@@ -692,6 +771,21 @@ describe('the cligent release-capability guard', () => {
       'settings-error predicate',
       { settingsPredicate: '' },
       'isAgentCallSettingsError',
+    ],
+    [
+      'fast-mode capability assertion',
+      { fastModeAssertion: '' },
+      'assertFastModeSupported',
+    ],
+    [
+      'fast-mode runtime capability assertion',
+      { fastModeAssertionRuntime: false },
+      'assertFastModeSupported runtime semantics',
+    ],
+    [
+      'fast-mode runtime capability semantics',
+      { fastModeAssertionSemantics: false },
+      'assertFastModeSupported runtime semantics',
     ],
     [
       'managed launch declaration',

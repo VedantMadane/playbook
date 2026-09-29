@@ -4,16 +4,18 @@
 // failure state must offer that recovery to the next process, so
 // `playbook run --continue` can retry it in place instead of dismissing it.
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import {
   createEvent,
   type AgentAdapter,
   type AgentEvent,
   type AgentOptions,
 } from '@sublang/cligent';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import codePlaybookRegistryEntry from './code.registry.js';
 import type {
   PlaybookRuntime,
@@ -26,13 +28,20 @@ const { runPlaybookCli } = await import(
   new URL('./bin/playbook.js', import.meta.url).href
 );
 
-const tempDirs: string[] = [];
+const execFileAsync = promisify(execFile);
 
-afterEach(async () => {
-  await Promise.all(
-    tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
-  );
-});
+// The test body owns cleanup: a runner timeout must not remove files while
+// an awaited CLI call is still retiring its writer lease.
+function withFixture(prefix: string, run: (dir: string) => Promise<void>) {
+  return async () => {
+    const dir = await mkdtemp(join(tmpdir(), prefix));
+    try {
+      await run(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+}
 
 function writer() {
   const chunks: string[] = [];
@@ -43,6 +52,31 @@ function writer() {
     },
     text: () => chunks.join(''),
   };
+}
+
+async function initializeTestRepository(root: string) {
+  const cwd = join(root, 'repository');
+  await mkdir(cwd);
+  await execFileAsync('git', ['init', '--quiet'], { cwd });
+  await writeFile(join(cwd, 'tracked.txt'), 'baseline\n', 'utf8');
+  await execFileAsync('git', ['add', 'tracked.txt'], { cwd });
+  await execFileAsync(
+    'git',
+    [
+      '-c',
+      'user.name=Playbook Test',
+      '-c',
+      'user.email=playbook-test@example.invalid',
+      '-c',
+      'commit.gpgsign=false',
+      'commit',
+      '--quiet',
+      '-m',
+      'baseline',
+    ],
+    { cwd },
+  );
+  return cwd;
 }
 
 /**
@@ -60,6 +94,14 @@ class ScriptedAdapter implements AgentAdapter {
     prompt: string,
     _options?: AgentOptions,
   ): AsyncGenerator<AgentEvent, void, void> {
+    if (prompt.includes('Check whether existing instructions already answer')) {
+      yield createEvent('done', this.agent, { status: 'success', result: '{"instructionIndex":null}', usage: { toolUses: 0 }, durationMs: 1 }, 'question-check');
+      return;
+    }
+    if (prompt.includes('You are Captain preparing an interrupted playbook')) {
+      yield createEvent('done', this.agent, { status: 'success', result: '{"status":"blocked","summary":"This fixture requires Boss input before continuing."}', usage: { toolUses: 0 }, durationMs: 1 }, 'preparation');
+      return;
+    }
     // Every Captain call is hidden control work, so the composer markers —
     // which this test's own scripted Captain sends — and the runtime's own
     // classifier marker decide first; what is left under the hidden-control
@@ -99,7 +141,6 @@ class ScriptedAdapter implements AgentAdapter {
       : adjudication
         ? JSON.stringify({
             guard: 'needsBossReply',
-            question: 'May I proceed with the risky rename?',
           })
         : closing
           ? 'The retry ran; CODE is waiting on your answer.'
@@ -145,7 +186,7 @@ function activeState(stateId = 'ready'): PlaybookState {
 
 function runtimeSnapshot(turns: number): PlaybookRuntimeSnapshot {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     playbookId: 'captain',
     machine: { value: 'hub', status: 'active' },
     roleResumeTokens: {},
@@ -159,6 +200,12 @@ function runtimeSnapshot(turns: number): PlaybookRuntimeSnapshot {
     },
     state: activeState('hub'),
     pendingBossQuestions: [],
+    effectLedger: {
+      schemaVersion: 1,
+      revision: 0,
+      boundaries: [],
+      logicalOperations: [],
+    },
   } as PlaybookRuntimeSnapshot;
 }
 
@@ -219,11 +266,10 @@ function scriptedCaptainRuntime(receipts: unknown[]) {
 }
 
 describe('headless failure retry across a continued session (DR-034)', () => {
-  it('advertises and applies the retry the first process could not keep', async () => {
+  it('advertises and applies the retry the first process could not keep', withFixture('playbook-retry-', async (dir) => {
     ScriptedAdapter.playerScript = ['error'];
     ScriptedAdapter.playerCalls = 0;
-    const dir = await mkdtemp(join(tmpdir(), 'playbook-retry-'));
-    tempDirs.push(dir);
+    const cwd = await initializeTestRepository(dir);
     const configPath = join(dir, 'playbook.config.yaml');
     await writeFile(
       configPath,
@@ -260,6 +306,7 @@ describe('headless failure retry across a continued session (DR-034)', () => {
           `10000000-0000-4000-8000-${String(++value).padStart(12, '0')}`;
       })(),
       probeAdapterSdk: async () => true,
+      cwd,
       sessionsDir,
       spawn: () => {
         throw new Error('headless run must not spawn tmux-play');
@@ -315,15 +362,14 @@ describe('headless failure retry across a continued session (DR-034)', () => {
     expect(recovered.snapshot.frames[0].runtime.state.stateId).toBe(
       'awaitBossReply',
     );
-  });
+  }), 30_000);
 
-  it('settles and recovers a failure reached after an answered Boss question', async () => {
+  it('settles and recovers a failure reached after an answered Boss question', withFixture('playbook-replyfail-', async (dir) => {
     // The coder asks first, then fails on the resumed call, then recovers:
     // ok (asks) → error (after the answer) → ok (asks again).
     ScriptedAdapter.playerScript = ['ok', 'error'];
     ScriptedAdapter.playerCalls = 0;
-    const dir = await mkdtemp(join(tmpdir(), 'playbook-replyfail-'));
-    tempDirs.push(dir);
+    const cwd = await initializeTestRepository(dir);
     const configPath = join(dir, 'playbook.config.yaml');
     await writeFile(
       configPath,
@@ -360,6 +406,7 @@ describe('headless failure retry across a continued session (DR-034)', () => {
           `20000000-0000-4000-8000-${String(++value).padStart(12, '0')}`;
       })(),
       probeAdapterSdk: async () => true,
+      cwd,
       sessionsDir,
       spawn: () => {
         throw new Error('headless run must not spawn tmux-play');
@@ -430,5 +477,5 @@ describe('headless failure retry across a continued session (DR-034)', () => {
     expect(
       recovered.snapshot.frames[0].runtime.pendingBossQuestions,
     ).toHaveLength(1);
-  });
+  }), 30_000);
 });

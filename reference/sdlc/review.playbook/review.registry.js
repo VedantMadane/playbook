@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 import createPlaybookRuntime from './review.playbook.js';
 export const reviewStateCountLabels = {
-    reviewInitial: 'review round',
-    reviewAfterCommit: 'review round',
-    reviewAfterRebuttal: 'rebuttal',
+    firstReview: 'review round',
+    reviewAfterFix: 'review round',
+    reviewAfterRejection: 'rebuttal',
 };
 export const reviewCopyPasteGuardNames = [
     'hasFindings',
@@ -47,14 +47,21 @@ export function validateReviewOptions(optionSlice) {
 export const reviewPlaybookRegistryEntry = {
     id: 'review',
     command: 'review',
-    intent: 'review the latest commit until no material correctness or spec findings remain',
-    artifactSchema: 2,
+    intent: 'review a supplied scope of committed work until no unsettled findings remain',
+    artifactSchema: 3,
+    runtimeProfile: Object.freeze({
+        kind: 'shared-factory',
+        compat: createPlaybookRuntime.compat,
+    }),
     requiredRoleIds: ['coder', 'reviewer'],
     concurrentRoleSets: [],
     summaryPolicy: reviewSummaryPolicy,
     validateOptions: validateReviewOptions,
-    createRuntime(options) {
-        return createPlaybookRuntime(options);
+    createRuntime(options, hostCapabilities) {
+        return createPlaybookRuntime({
+            configuredOptions: options,
+            hostCapabilities,
+        });
     },
 };
 export default reviewPlaybookRegistryEntry;

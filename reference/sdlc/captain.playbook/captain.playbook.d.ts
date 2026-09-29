@@ -5,17 +5,20 @@ export type { CaptainCallOptions, CaptainResult, JsonValue, NormalizedError, Pla
 export type { DecisionAction, EnabledPlaybook, ParsedActingDecision, SettlementEvidence, SettlementReceiptEvidence, };
 /** One nonempty complete standalone request selected for `start` or `switch`. */
 export type CaptainControllerInput = string;
-/** One validated controller selection submitted through the port (DR-029). */
+/** One validated controller selection submitted through the port (DR-029, DR-038). */
 export type CaptainControllerSelection = {
     readonly action: 'respond';
     readonly text: string;
+} | {
+    readonly action: 'resume';
+    readonly playbookId: string;
 } | {
     readonly action: 'start' | 'switch';
     readonly playbookId: string;
     /** Complete standalone request synthesized from the remembered Boss conversation. */
     readonly input: CaptainControllerInput;
 } | {
-    readonly action: 'dismiss';
+    readonly action: 'dismiss' | 'recover';
 } | {
     readonly action: 'deliver';
 } | {
@@ -92,6 +95,7 @@ export declare const _internal: {
     validateParsedActingDecision: typeof validateParsedActingDecision;
     statusesForState: typeof statusesForState;
     normalizeError: typeof normalizeError;
+    UNFINISHED_FINAL_STATE_IDS: ReadonlySet<string>;
 };
 export declare function createPlaybookRuntime(options: PlaybookRuntimeOptions): PlaybookRuntime;
 declare const factory: PlaybookRuntimeFactory<PlaybookRuntimeOptions>;

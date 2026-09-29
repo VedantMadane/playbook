@@ -105,8 +105,8 @@ its exit status or signal and exit `127` when it cannot be spawned
 
 The Boss pane starts at the Playbook Captain shell, where the session
 Captain runs for the whole session and sees every turn. Use `/code`,
-`/review`, or `/decide` followed by a task to select one of the bundled
-playbooks explicitly. A registered command resolves deterministically,
+`/review`, `/decide`, `/dev`, `/branch`, or `/pr` followed by a task to
+select one of the bundled playbooks explicitly. A registered command resolves deterministically,
 with no model call parsing it: at idle it starts that playbook, at its
 own leaf it delivers the rest of the line, an enabled command absent
 from the active path switches to it, and a bare command answers with
@@ -121,24 +121,39 @@ untouched
 ([[playbook-captain-1](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-captain.md#playbook-captain-1)],
 [[playbook-captain-2](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-captain.md#playbook-captain-2)]).
 
-The current CODE, REVIEW, and DECIDE workflows take their deterministic
-initial event from the selecting Boss turn. CODE and DECIDE then call REVIEW
-as a nested playbook. Local role names do not imply continuity: each frame
+The current CODE, REVIEW, DECIDE, DEV, BRANCH, and PR workflows take their
+deterministic initial event from the selecting Boss turn. CODE and DECIDE then
+call REVIEW as a nested playbook, while DEV — the repository-aware planner
+behind `/dev` — chooses the development path for a request and itself calls
+CODE, or DECIDE and then CODE, as nested playbooks. When the request names a
+GitHub issue or asks for pull-request delivery, DEV reads the issue and its
+comments while planning, calls BRANCH before that path and PR after CODE
+succeeds, and ends with a merged pull request and a closed issue — or with a
+named failure that leaves the pull request open for a later `/pr`. Both are
+usable on their own: `/branch <issue or request>` creates and checks out
+`issue-N-slug` (or a request slug) at the current commit, changing nothing
+else; `/pr` pushes the checked-out branch, opens or reuses its pull request
+against the default branch, waits for the checks, fixes red checks through one
+nested CODE call, merges with a merge commit, and fast-forwards the local
+default branch. A repository without checks merges on CODE's nested review
+alone. BRANCH, PR, and issue-aware DEV planning require the GitHub CLI `gh`,
+authenticated for the repository's GitHub remote
+([DR-050](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/050-pull-request-delivery.md)).
+Local role names do not imply continuity: each frame
 uses the exact stable player IDs configured under its `roles` map. Equal IDs
 share one pane and provider conversation across nested and later root
 engagements; distinct IDs remain isolated even when their agent settings are
 identical. When a player surfaces a
-clarifying question the FSM parks, the pane shows the question, and a
-judge classifies your next turn as its reply or a fresh directive that
-abandons it
+clarifying question, the playbook pauses and Captain explains the complete question briefly.
+Answer or ask for clarification through Captain; reading a player pane is unnecessary.
+A request to explain preserves the pending question, while an answer or explicit player follow-up reaches the waiting player
 ([[playbook-runtime-2](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-runtime.md#playbook-runtime-2)]).
 
 The Captain pane shows start/stop/finished status with `◇` lines and
-streams progress with captain-speech classification and questions
+streams progress; Captain relays pending questions in its reply
 ([[playbook-runtime-3](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-runtime.md#playbook-runtime-3)]), while player
 prompts ride their own panes. A turn that actually did something ends
-with one Captain reply summarizing what changed, composed only from that
-turn's reported outcome; a turn that changed nothing ends with an
+with one Captain reply summarizing what changed, grounded in that turn's reported outcome and current pending questions; a turn that changed nothing ends with an
 ordinary reply and no saved-counts line
 ([[playbook-captain-19](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-captain.md#playbook-captain-19)]).
 
@@ -169,10 +184,10 @@ stderr, and `--verbose` adds only telemetry topic names to stderr.
 | `--no-provision` | do not create missing engine links for configured filesystem registries |
 | `--json` | print exactly one `sessionId` / `reply` object |
 | `--verbose` | add Captain telemetry topic names to stderr |
-| `--continue` | continue the latest durable Captain session |
+| `--continue` | continue the newest Captain session stored for this working directory, or the reported global fallback |
 | `--session <id>` | continue one durable Captain session explicitly |
-| `--retry-uncertain` | with `--session`, retry its exact recorded uncertain input |
-| `--discard-uncertain` | with `--session`, abandon its uncertain attempt |
+| `--retry-uncertain` | with `--session`, restore and report interrupted work; then choose a continuation |
+| `--discard-uncertain` | with `--session`, discard an attempt only if no work was recorded |
 | `--` | end options before one literal input or reply |
 | `-h`, `--help` | print the complete grammar without reading stdin or config |
 
@@ -180,15 +195,14 @@ Exit `0` means the Captain turn and its durable hand-off were presented,
 even when the selected action reported rejection or failure through the
 Captain reply. Argument, config, catalog, readiness, or pre-turn setup errors
 exit `1`; a started-turn, persistence, lease-release, or presentation failure
-exits `2` with stdout empty. SIGINT, SIGTERM, and SIGHUP preserve the
-uncertain boundary, withhold stdout, and are re-raised after lease retirement
+exits `2` with stdout empty. SIGINT, SIGTERM, and SIGHUP withhold stdout, preserve uncertainty unless stopped recovery can save its current work, and are re-raised after lease retirement
 ([[playbook-cli-18](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-cli.md#playbook-cli-18)]).
 
 The former positional `<from>`, `resume`, `--player`, `--captain`,
 `--option`, `--cwd`, `--last`, run-only `--config`, and top-level `run:`
 config are removed from `playbook run`. Enable a registry under `playbooks`,
 declare provider agents once under top-level `players`, bind every local role
-under `playbooks.<id>.roles`, tune compatible model and effort in a `--with`
+under `playbooks.<id>.roles`, tune compatible model, effort, and fast mode in a `--with`
 overlay, invoke the effective `/command`, and run from the working directory
 you want agents to use. Legacy `playbooks.<id>.players` blocks are rejected and
 are not auto-migrated because choosing equal or distinct new player IDs chooses
@@ -231,15 +245,16 @@ module's directory is a git repository, add `node_modules/` to its
 
 ### Continuing a Captain session
 
-Interactive and headless commands write the same logical-session records under
-`${XDG_STATE_HOME:-$HOME/.local/state}/playbook/sessions/`. A fresh interactive
-child persists turn zero before printing `playbook: session <id>` and opening
-Boss input; a fresh headless turn returns the same kind of ID in `--json`.
-After the current writer exits or explicitly hands off, either presentation
-can reopen either origin:
+Interactive and headless commands write the same logical-session records in
+the configured [`sessions` directory](configuration.md#session-storage), whose
+default is `${SPEX_HOME:-$HOME/.spex}/sessions/`. A fresh
+interactive child persists turn zero before printing `playbook: session <id>`
+and opening Boss input; a fresh headless turn returns the same kind of ID in
+`--json`. After the current writer exits or explicitly hands off, either
+presentation can reopen either origin:
 
 ```sh
-# Reopen the latest settled session headlessly:
+# Reopen the newest session stored for this working directory headlessly:
 playbook run --continue "keep the scope small; skip the docs"
 
 # Reopen one exact session in either presentation:
@@ -247,8 +262,16 @@ playbook --session 4f2c0000-0000-4000-8000-000000009ab1
 playbook run --session 4f2c0000-0000-4000-8000-000000009ab1
 ```
 
+Bare `--continue` prefers the newest durable record whose stored working
+directory equals the directory where the command is invoked. If none matches,
+it reports that absence on stderr and selects the globally newest record,
+naming that session and its stored working directory. Use `--session <id>` to
+select one exact session without applying the directory preference. The
+uncertainty rules below still apply to whichever record is selected
+([DR-041](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/041-working-directory-aware-continuation.md)).
+
 A missing headless reply is read verbatim from stdin. Reopening restores the
-compiled Captain conversation, engagement stack, nested child boundary,
+Captain recovery journal, engagement stack, nested child boundary,
 stable-player ledger, and absolute working directory without replaying a
 settled or pending child start. One exclusive writer owns the session, so a
 detached interactive pane child remains the owner until it shuts down; a
@@ -257,34 +280,143 @@ competing front end fails closed instead of forking the history.
 An ordinary reopen reads current config and any opening `--with` fragments,
 projects them to the stored catalog and player roster, and requires the stored
 role bindings plus every structural setting to remain exact. Compatible
-current `model` and `effort` selections apply to the next call, including an
-explicit boolean `false` provider-default reset. The retained provider token
-is never silently replaced by a fresh conversation if that selection is not
-supported
+current `model`, `effort`, and optional `fastMode` settings apply to the next
+call. Boolean `false` explicitly resets model or effort to the provider
+default, but `fastMode: false` is a literal disabled request; omission selects
+the fast-mode provider default or inherits the player value at a role binding.
+Provider conversations are local hints. Missing hints start fresh from stored
+context; a definite pre-execution rejection permits one fresh attempt.
+Unsupported settings and ambiguous failures do not trigger that fallback
 ([[playbook-cli-22](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-cli.md#playbook-cli-22)],
 [DR-032](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/032-explicit-roles-session-players.md)).
+
+### Following replay history
+
+Beside each `<session-id>.json` manifest, both front ends tee every observed
+host record in order to `<session-id>.records.jsonl`. Each complete line is a
+version-1 envelope with a writer-assigned sequence contiguous from `1`, the
+opaque record, and an optional local playbook role where the trace establishes
+one unambiguously. The stream is a mode-`0600` regular non-symlink file inside
+the private sessions directory. Readers consume only the complete
+newline-terminated prefix; a final partial line is not presented as a record.
+
+Manifests use schema 7 and contain token-free recovery. The matching replay
+stream carries immutable configuration and graph records, so history does not
+require installed modules. Provider continuation hints live separately in
+`<session-id>.hints.json` and stay local. A hint is consumed before use and
+accepted only for the exact checkpoint that created it.
+
+The manifest hashes its exact durable replay prefix. Missing or changed bytes,
+saved incompleteness, or unsupported required context block continuation while
+preserving readable history. A partial final line waits for completion; valid
+unknown record kinds are skipped for presentation. New session creation fails
+if its required context cannot be saved before work.
+
+After work begins, replay failure stops recording and reports an incomplete
+history warning without authorizing a repeated action. Recovery and uncertainty
+remain durable; the incomplete marker persists across process restarts.
+Release retains the lease if that marker cannot be saved.
+
+Copy the manifest and matching replay together. Do not copy hints or leases.
+Continuation also requires matching working-directory/module paths and
+compatible runtimes; changed paths allow history only. Prompts, replies and
+tool content remain sensitive even after structured continuation fields have
+been removed. See the [shared storage contract](https://github.com/sublang-ai/playbook/blob/main/specs/packages/session-storage.md).
+
+### Migrating older sessions
+
+Stop old writers and snapshot Spex home and `${XDG_STATE_HOME:-$HOME/.local/state}/playbook` before upgrading.
+The ordinary default migrates known legacy formats into `~/.spex/sessions`, retaining history even when recovery is unavailable; explicit store overrides remain isolated.
+Migration retains original files under `local/migrations/` beside the destination sessions directory, validates the new bundle, then removes the former replay and manifest.
+Unknown or unsafe inputs stay in place with a diagnostic.
+
+For an explicitly configured store, migrate each selected legacy session before continuing it:
+
+```sh
+playbook migrate-session <id> [--with <path>]...
+```
+
+Schema 6 may retain execution; older CLI records and desktop sidecars lacking complete recovery remain readable history.
+Discovery skips these histories and unmigrated records with a reason; they do not block other sessions.
+
+### Reconciling possible repository effects
+
+For each governed player call, Playbook records a Git baseline before the call
+and a durable receipt afterward. CODE and DECIDE commit arms, and REVIEW's
+Coder commit arm, accept a commit only when the receipt proves exactly one
+descendant commit with no residual repository change; REVIEW's Reviewer calls,
+DECIDE's proposal calls, every DEV Analyst planning call, BRANCH's Coder call,
+and PR's Coder call require the repository to remain exact — a new branch at
+the current commit, a push, and an opened pull request change neither HEAD's
+commit nor the working tree, and BRANCH takes its base revision from that
+receipt rather than from the Coder. PR's check waits, fix publication, merge,
+and fast-forward are agent-free script steps outside governance; the merge is
+the one step that moves HEAD, onto the default branch. The
+player's prose, including any `Commit:` line, is presentation rather than
+proof.
+
+If interruption, missing semantic evidence, concurrent work, or an ambiguous
+repository delta prevents those facts from agreeing, the workflow parks
+without replaying the player. Captain reports whether a change was observed or
+could not be excluded, with the available baseline, after-HEAD, and proven
+commit identity but no repository paths. While parked, ask Captain either to
+retry reconciliation from the retained evidence or to abandon the unresolved
+attempt. Reconciliation may complete the saved evidence or restore an exact
+deferred Boss-question checkpoint, but it starts no replacement player call;
+abandonment disposes the complete engagement without claiming an authored
+workflow outcome. The same restricted recovery survives process restart
+([DR-040](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/040-outcome-authority-effect-reconciliation.md)).
+
+### Preparing a stopped step
+
+Captain automatically tries to prepare and resume a step stopped by an operation in the current turn. You can also supply a missing answer or ask for a repair:
+
+```sh
+playbook run --session <id> "Install the missing dependency and continue."
+```
+
+This also works in the interactive Boss pane. Captain may inspect prerequisites, prepare local tools, put generated files aside, and adjust local ignore settings. It preserves user work and the task's scope. It cannot do the remaining specialist work, change saved session data, invent a result, or skip a step.
+
+The runtime checks the continuation. It retries the interrupted step, keeps earlier commits, and uses saved output when only its assessment was interrupted. If a read-only check left unwanted files, retry requires restoring its original files and HEAD; the original failure stays recorded. A waiting player's repository checkpoint must remain intact.
+
+Captain asks Boss for a real missing decision, uncertain permission, or a missing or contradictory playbook transition. Repository checks alone cannot prove that publishing or another outside action is safe to repeat; Captain must check that separately.
+
+Preparation allows at most two automatic attempts, each following a stop produced by work in this turn. Resuming saved work or refusing new text does not start preparation. Each preparation has a 150-second deadline. When a turn with recorded progress throws and its calls drain safely, the latest stopped step is saved and accepts a new instruction; the interactive pane stays open. Before every player, script or preparation step, the runner saves its position; it saves the result before advancing. After process loss, Retry only restores and reports. Boss chooses what happens next. Custom hosts must provide cancellation before preparation is available.
+
+Custom runtimes can provide the same recovery offer: step prompt, optional preparation conditions and evidence, and a continuation they will validate. Captain needs no list of repair tools or error strings. Failed checkpoints without an invocation position have no step retry; restarting the whole playbook could repeat completed work.
+
+Captain may answer a player from the original task when it already answers the question. It reports what it reused, respects later Boss instructions and never sends that original answer twice automatically.
+
+If a process loses the exact stopping point, retry settles the attempt in chat without repeating player work. Files and recorded evidence remain; unrelated saved workflows remain available. This also works when the attempt began from chat or used a custom runtime.
+
+All applications sharing a session store, including Spex and the CLI, must upgrade together before running this version: every step writes the new progress fields, and every saved shell snapshot carries `presentedEffectPrefix`. Hosts through 16.0.x reject those fields as unknown, so they cannot open any session this version saves.
 
 ### Recovering an uncertain turn
 
 Before model work, the runner takes one exclusive session lease and writes an
 uncertain marker. If the process is interrupted after effects may
 have begun but before settlement is durable, ordinary continuation refuses
-to guess. Choose explicitly:
+to guess. Retry restores the saved position and reports what happened, without running any work. Discard is a separate explicit request:
 
 ```sh
 playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --retry-uncertain
 playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 --discard-uncertain
 ```
 
-Retry reads no input and reuses the byte-exact recorded turn and its exact
-attempted Captain, player, and per-role model/effort selections; current config
-cannot retune that attempt, and retry may duplicate external effects. Discard
+Retry reads no input and restores the recorded attempt only to report it. It runs no model work. Later turns use the current compatible configuration. A completed step can use its saved result without running again. Before repeating an unfinished step, Boss must confirm that the old worker has stopped and check any outside actions; unchanged files do not prove nothing happened. A runtime that cannot save its position returns to Captain with the work preserved. Discard
 reads no input and runs no model: it restores the exact prior settled boundary,
 or deletes a never-settled fresh session, while abandoning the attempted work.
-An interrupted interactive turn uses the same uncertain record and is
-recovered with these headless commands. Session files written by the removed
-direct v6 runner and legacy record schemas are not shared schema-3 Captain
-sessions and cannot be continued. Explicit selection rejects them. Implicit
-`--continue` reports and skips released schema-2 Captain records, naming each
-session and path; move them outside the sessions directory or remove them to
-silence the warning. Malformed records and unknown schemas still fail closed.
+An interrupted interactive turn that could not save a normal pause uses the same uncertain record and these headless recovery commands. Discard preserves the attempt's replay history and
+refuses if the effect ledger has advanced beyond the prior checkpoint or any step was recorded. It does not undo files or commits. Captain never selects discard automatically.
+
+Stop old writers before upgrading. When using the ordinary `~/.spex/sessions`
+default, the CLI imports sessions from
+`${XDG_STATE_HOME:-$HOME/.local/state}/playbook/sessions`. Explicit `SPEX_HOME`
+or `sessions` selections bypass this discovery. Other locations can be migrated
+through the [shared API](embedding.md#sharing-the-cli-session-store).
+
+Migration preserves the complete replay and retains original bytes before
+removing old active files. Valid schema-6 recovery becomes token-free; schemas
+2–5 and incomplete desktop sidecars become history only. Unsupported inputs
+stay in place with a diagnostic; active writers and destination conflicts stop
+the cutover. Ordinary continuation never guesses missing identity or effects.

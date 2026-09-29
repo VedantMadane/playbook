@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { constants, realpathSync } from 'node:fs';
-import { lstat, open, readFile, realpath, unlink } from 'node:fs/promises';
+import { lstat, open, realpath, unlink } from 'node:fs/promises';
 import {
   basename,
   dirname,
@@ -30,9 +30,15 @@ import {
   CaptainSessionHostCleanupError,
   captainOptionsFromConfig,
   createCaptainSessionHost,
+  installRetainedGenerationsForLaunch,
+  reportSkippedCaptainSession,
   validateFrozenExecutionConfig,
 } from './run.js';
 import { prepareConfiguredRegistries } from './provision.js';
+import {
+  createReplayRecordObserver,
+  replayIncompleteMessage,
+} from './replay-observer.js';
 import {
   assertCaptainSessionExecutionCompatible,
   createCaptainSessionStore,
@@ -47,6 +53,8 @@ export const MANAGED_INTERACTIVE_PAYLOAD_FILE =
 export const MANAGED_INTERACTIVE_PAYLOAD_SCHEMA_VERSION = 1;
 export const MANAGED_INTERACTIVE_PAYLOAD_KIND =
   'playbook-managed-interactive-launch';
+export const MANAGED_INTERACTIVE_READINESS_WITNESS_FILE =
+  'playbook-managed-readiness';
 
 const PAYLOAD_KEYS = [
   'schemaVersion',
@@ -82,10 +90,7 @@ export function validateManagedInteractivePayload(value) {
   }
   assertUuid(value.sessionId, 'managed interactive session id');
   assertCanonicalAbsolutePath(value.cwd, 'managed interactive working directory');
-  assertCanonicalAbsolutePath(
-    value.sessionsDir,
-    'managed interactive sessions directory',
-  );
+  assertAbsolutePath(value.sessionsDir, 'managed interactive sessions directory');
   if (typeof value.noProvision !== 'boolean') {
     throw new Error('managed interactive noProvision must be a boolean');
   }
@@ -154,6 +159,18 @@ export async function writeManagedInteractivePayload(workDir, value) {
     await handle.close();
   }
   return path;
+}
+
+export async function publishManagedInteractiveReadinessWitness(
+  workDir,
+  sessionId,
+) {
+  return writeManagedInteractiveReadinessClaim({
+    workDir,
+    sessionId,
+    claim: 'ready',
+    rejectExisting: true,
+  });
 }
 
 export async function readManagedInteractivePayload(path) {
@@ -300,13 +317,46 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
   let leaseQuarantined = false;
   let activeTurn;
   let executionProjection;
+  let freshLaunchRecord;
+  let replayChannel;
 
   const release = async () => {
     if (released || lease === undefined) return;
     const owned = lease;
-    await owned.release();
+    let status;
+    try {
+      status = await owned.release();
+    } catch (error) {
+      await replayChannel?.reportIfIncomplete();
+      throw error;
+    }
+    await replayChannel?.reportIfIncomplete(status);
     if (lease === owned) lease = undefined;
     released = true;
+  };
+
+  const abandonFreshLaunchRecord = async ({ claim = false } = {}) => {
+    const record = freshLaunchRecord;
+    if (
+      record === undefined ||
+      lease === undefined ||
+      Object.keys(record.retainedGenerations ?? {}).length !== 0
+    ) {
+      return;
+    }
+    if (
+      claim &&
+      !(await writeManagedInteractiveReadinessClaim({
+        workDir: payload.workDir,
+        sessionId: payload.sessionId,
+        claim: 'abandon',
+        rejectExisting: false,
+      }))
+    ) {
+      return;
+    }
+    freshLaunchRecord = undefined;
+    await lease.abandonFreshSettled({ expected: record });
   };
 
   return Object.freeze({
@@ -328,7 +378,17 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
       let host;
       try {
         lease = await store.acquire(payload.sessionId);
-        const authoritative = await lease.read();
+        if (payload.mode === 'selected') await lease.assertContinuable({ cwd: payload.cwd, executionProjection: payload.executionProjection });
+        replayChannel = createManagedReplayChannel({
+          lease,
+          sessionId: payload.sessionId,
+          presentationGate: context.observers[0],
+        });
+        const authoritative =
+          typeof lease.recoverUnresolvedEffectAbandonment === 'function'
+            ? await lease.recoverUnresolvedEffectAbandonment()
+            : await lease.read();
+        let retainedGenerations = {};
         let restoreSnapshot;
         const prepareRegistryModule =
           options.prepareRegistryModule ??
@@ -381,14 +441,21 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
             { loadModule, prepareRegistryModule },
           );
           restoreSnapshot = record.snapshot;
+          retainedGenerations = record.retainedGenerations ?? {};
         }
 
         const created = await createSessionHost({
           config: executionProjection,
           sessionId: payload.sessionId,
           cwd: payload.cwd,
+          sessionLease: lease,
           loadModule,
-          observers: context.observers,
+          observers: [
+            ...context.observers,
+            ...(replayChannel === undefined
+              ? []
+              : [replayChannel.observer]),
+          ],
           ...(options.adapterImports
             ? { adapterImports: options.adapterImports }
             : {}),
@@ -401,22 +468,60 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
           ...(options.createHostRuntime
             ? { createHostRuntime: options.createHostRuntime }
             : {}),
+          ...(options.createEffectLedgerWriteAhead
+            ? {
+                createEffectLedgerWriteAhead:
+                  options.createEffectLedgerWriteAhead,
+              }
+            : {}),
           ...(restoreSnapshot !== undefined ? { restoreSnapshot } : {}),
         });
         ({ host, shell } = created);
-        if (payload.mode === 'fresh') {
-          await lease.initializeSettled({
-            cwd: payload.cwd,
-            structuralProjection:
-              projectCaptainSessionStructure(executionProjection),
-            executionProjection,
-            snapshot: created.snapshot,
-          });
-        }
+        await installRetainedGenerationsForLaunch({
+          lease,
+          shell,
+          ...(payload.mode === 'fresh'
+            ? {
+                freshBoundary: {
+                  cwd: payload.cwd,
+                  structuralProjection:
+                    projectCaptainSessionStructure(executionProjection),
+                  executionProjection,
+                  snapshot: created.snapshot,
+                },
+                onFreshRecord(record) {
+                  freshLaunchRecord = record;
+                },
+                onLegacyRecord: (record) =>
+                  reportSkippedCaptainSession(
+                    options.stderr ?? process.stderr,
+                    'playbook',
+                    'legacy',
+                    record,
+                  ),
+                onInvalidRecord: (record) =>
+                  reportSkippedCaptainSession(
+                    options.stderr ?? process.stderr,
+                    'playbook',
+                    'invalid',
+                    record,
+                  ),
+              }
+            : {}),
+          retainedGenerations,
+          reconcileRepositoryEffects: created.reconcileRepositoryEffects,
+        });
+        await replayChannel?.reportIfIncomplete();
         initialized = true;
         return {
           abortActiveTurn: (...args) => host.abortActiveTurn(...args),
-          runBossTurn: (...args) => host.runBossTurn(...args),
+          async runBossTurn(...args) {
+            try { return await host.runBossTurn(...args); }
+            catch (error) {
+              if (created.getInterruptedSettlement?.(activeTurn?.attemptId)) return;
+              throw error;
+            }
+          },
           async dispose() {
             try {
               await host.dispose();
@@ -443,6 +548,13 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
             // presentation cannot start concurrently with that failed host.
             leaseQuarantined = true;
             failures.push(disposeError);
+          }
+        }
+        if (!leaseQuarantined) {
+          try {
+            await abandonFreshLaunchRecord();
+          } catch (abandonmentError) {
+            failures.push(abandonmentError);
           }
         }
         shell = undefined;
@@ -488,6 +600,13 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
         throw new Error('managed interactive turn prompt changed after write-ahead');
       }
       if (terminal.type !== 'turn_finished') {
+        // The shared Captain boundary saves drained recovery before reporting
+        // cancellation. Keep the pane open only when that save succeeded.
+        if ((await lease.read())?.state === 'settled') {
+          await replayChannel?.reportIfIncomplete();
+          activeTurn = undefined;
+          return;
+        }
         throw new Error(
           'managed interactive Captain turn aborted; durable state remains uncertain',
         );
@@ -503,23 +622,117 @@ export function createManagedInteractiveLifecycle(payloadValue, options = {}) {
           `managed interactive Captain turn produced ${replies.length} usable Boss-visible replies; expected exactly one`,
         );
       }
-      const snapshot = shell?.exportSnapshot();
-      if (snapshot === undefined) {
+      const settlement = shell?.exportSettlement();
+      if (settlement === undefined) {
         throw new Error(
-          'managed interactive Captain turn settled without an exportable session snapshot',
+          'managed interactive Captain turn settled without an exportable session settlement',
         );
       }
-      await lease.settle({ attemptId: activeTurn.attemptId, snapshot });
+      await lease.settle({
+        attemptId: activeTurn.attemptId,
+        snapshot: settlement.snapshot,
+        unresolvedEffects: settlement.unresolvedEffects,
+        retentionUpdates: settlement.retentionUpdates,
+      });
+      await replayChannel?.reportIfIncomplete();
       activeTurn = undefined;
     },
 
-    async shutdown() {
+    async shutdown(context) {
       // Cligent invokes lifecycle shutdown only after runtime disposal and the
       // complete turn transaction, so ownership retirement cannot race either.
       if (leaseQuarantined) return;
-      await release();
+      const failures = [];
+      if (context !== undefined) {
+        try {
+          await abandonFreshLaunchRecord({ claim: true });
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      try {
+        await release();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(
+          failures,
+          'managed interactive shutdown could not retract its unused fresh session and retire its lease',
+        );
+      }
     },
   });
+}
+
+function createManagedReplayChannel({
+  lease,
+  sessionId,
+  presentationGate,
+}) {
+  if (
+    typeof lease?.append !== 'function' ||
+    typeof lease?.streamStatus !== 'function'
+  ) {
+    return undefined;
+  }
+  return createReplayRecordObserver({
+    lease,
+    async onIncomplete() {
+      if (typeof presentationGate?.onRecord !== 'function') return;
+      await presentationGate.onRecord({
+        type: 'captain_status',
+        turnId: null,
+        timestamp: Date.now(),
+        message: replayIncompleteMessage(sessionId),
+      });
+    },
+  });
+}
+
+async function writeManagedInteractiveReadinessClaim({
+  workDir,
+  sessionId,
+  claim,
+  rejectExisting,
+}) {
+  assertCanonicalAbsolutePath(
+    workDir,
+    'managed interactive readiness work directory',
+  );
+  assertUuid(sessionId, 'managed interactive readiness session id');
+  const path = join(workDir, MANAGED_INTERACTIVE_READINESS_WITNESS_FILE);
+  let handle;
+  try {
+    handle = await open(path, 'wx', 0o600);
+  } catch (cause) {
+    if (cause?.code === 'EEXIST' && !rejectExisting) return false;
+    throw new Error(
+      `managed interactive readiness claim could not be created: ${message(cause)}`,
+      { cause },
+    );
+  }
+  try {
+    await handle.chmod(0o600);
+    const stat = await handle.stat();
+    if (!stat.isFile() || (stat.mode & 0o7777) !== 0o600) {
+      throw new Error(
+        'managed interactive readiness claim is not a private regular file',
+      );
+    }
+    if (
+      typeof process.getuid === 'function' &&
+      stat.uid !== process.getuid()
+    ) {
+      throw new Error('managed interactive readiness claim has a foreign owner');
+    }
+    await handle.writeFile(`${claim} ${sessionId}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  return true;
 }
 
 export function parseManagedInteractiveChildArgs(argv) {
@@ -756,6 +969,12 @@ function assertCanonicalAbsolutePath(value, path) {
     resolve(value) !== value
   ) {
     throw new Error(`${path} must be a normalized absolute path`);
+  }
+}
+
+function assertAbsolutePath(value, path) {
+  if (typeof value !== 'string' || !isAbsolute(value)) {
+    throw new Error(`${path} must be an absolute path`);
   }
 }
 

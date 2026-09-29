@@ -76,8 +76,14 @@ text2gears shall not move a shared instruction ahead of behavior-specific contex
 
 Where Source says that a runtime value is relayed in quotes, the leading `>` is prompt content rather than Source-only blockquote syntax.
 If Source supplies a blockquoted template for that relay, text2gears shall keep one literal leading `>` on every quoted line; the target GEARS line therefore uses its outer blockquote marker followed by the literal marker, such as `> > Coder output: <coder-output>`.
-If Source names the relayed value but supplies no template, text2gears shall emit its canonical typed placeholder on a line beginning with literal `> ` and shall not summarize, paraphrase, or invent a value in its place.
+If Source names the relayed value but supplies no template, text2gears shall emit a bare quoted prompt-content line, exactly `> <token>`, written as `> > <token>` in the GEARS file because the first marker encloses the prompt and the second is literal content, without an added label or surrounding prose, and shall not summarize, paraphrase, or invent the relayed value.
 An ordinary Source blockquote that specifies a complete acting prompt without requiring quoted relay retains the existing rule above: its one leading marker is Source syntax and is not prompt content.
+
+Apply each Source-authored relay to every acting behavior it governs, including relays described only in prose.
+Mentioning a value in a condition, result contract, or machine context does not deliver it to the acting role; its complete prompt blockquote shall carry the required quoted placeholder.
+
+An acting prompt whose instructions refer to a runtime value the acting role cannot otherwise observe — for example the Boss input task that triggered the workflow — shall relay that value as a quoted `<placeholder>` line appended to the prompt even when Source states no explicit relay.
+A prompt that references an undelivered value asks its player to act on data it never received; omitting the relay is a compilation defect, not a faithful rendering of Source.
 
 Source statements that assign active-leaf routing, call identity, suspension,
 or return matching to the host describe execution preconditions rather than
@@ -134,6 +140,10 @@ Results:
 - `delegation`: Captain selected a call. Output shall include `remainingPlan: <JSON-safe array>`, `nextPlaybookId: <stable id>`, and `nextPlaybookInput: <complete request>`.
 ```
 
+A `Results:` block continues until the next item or section heading; after the label, emit only result bullets and blank lines.
+Put other acting-item conditions and invariants before the acting blockquote, never between the blockquote and `Results:` or after its bullets.
+Nested-call items remain without `Results:` and keep their child-continuation prose after the blockquote.
+
 `Results:` shall be a plain label rather than a heading.
 Every result shall occupy one bullet with exactly a backtick-delimited guard
 name, a colon, and a non-empty description.
@@ -142,6 +152,42 @@ The guard name shall match the ASCII identifier pattern
 The bullet order is authoritative, guard names are unique within the item, and
 the description shall name every required output property with its exact
 case-sensitive identifier.
+After `Output shall include`, reserve backticks for output-field declarations.
+Keep each declaration outside plain-text parentheses; explanatory symbols in
+parenthetical guidance use plain text, never separate backticks, because those
+backticks would declare extra required fields. Guidance may instead occur
+inside a field's complete annotation, including any parentheses there.
+For example, use `` `latestCommit` (new code-owned commit) `` or
+`` `latestCommit: <commit identity>` ``, without backticks around code.
+The commit a call itself creates is always declared as `latestCommit`, the
+canonical effect-owned property every linked runtime fills from the
+repository receipt and every terminal output projects from.
+An output property name shall match the same ASCII identifier pattern as a
+guard name: a kebab-case Source placeholder such as `<coder-output>` names the
+property `coderOutput` through the canonical kebab-token-to-camel-field mapping
+of [link](link.md), never a quoted kebab-case key, because downstream artifacts
+and calling playbooks consume these properties by name.
+A result shall declare an output property only where a consumer requires it:
+a later item's `<placeholder>`, the workflow's terminal return, or the
+workflow's declared public interface below.
+A detail the acting agent reports only within its final text — a reason, a
+summary, a list — travels in the result's verbatim final-text property and is
+not a separate judge-authored property.
+
+Where the selected pipeline supplies the
+[workflow contracts](workflow-contracts.json) catalog and the Source's basename
+is one of its `literalTargetBindings`, the compiled workflow is held to that
+builtin's declared output interface, because callers compiled against the
+catalog address it by that id: a result property whose value that interface
+returns shall take the interface's property name — `branch`, `issueSummary`,
+and `coderOutput` for `branch`; `evaluatedRevision` for the revision a clean
+review round evaluated — whether the value is semantic, presentation, or
+effect-owned, while the commit a call itself creates keeps the canonical
+`latestCommit` for the FSM to project into the interface's field.
+A Source placeholder that names such a value otherwise is an inconsistency
+between the Source and the catalog: leave the Target unwritten and report it
+as an incompatible compiler input rather than rename or invent.
+A Source outside those ids is named from its own words as above.
 
 A produced value consumed later shall have a declared producer: where any
 later item's blockquote reads a value through a `<placeholder>`, the item
@@ -150,13 +196,36 @@ whose relevant description names the produced output property, using the
 placeholder's exact identifier — this is what lets the FSM thread the value
 through typed context.
 A single-outcome producer then declares exactly one bullet naming the
-property; this consumed-output case is the sole one in which a
-single-outcome behavior carries a `Results:` label.
+property; this consumed-output case and the qualified-outcome case below are
+the two in which a single-outcome behavior carries a `Results:` label.
+The commit a call itself creates is the one exception to naming the property
+after the placeholder: its producer declares `latestCommit: <commit identity>`
+whatever placeholder a later prompt reads it through — `<code-commit>` or
+`<decide-commit>`, for instance — because the linked runtime fills that
+property from the repository receipt rather than from the player, and
+[gears2fsm](gears2fsm.md#context-and-prompts) binds the Source's placeholder
+to the retained commit.
+A placeholder the Source defines as a labelled section of another relayed
+value, naming the label that opens the section and the labels that end it —
+`<original-intent>` as the `Original intent:` section of the caller's request,
+which runs to the `Review scope:` line or to the end of the request, for
+instance — is derived, not produced: text2gears shall keep that defining
+sentence verbatim in the package introduction, or in the item's prose where the
+Source states it there, name the placeholder as the Source does, and declare no
+result property for it, because no player produces the value and
+[gears2fsm](gears2fsm.md#context-and-prompts) derives it from the relayed text.
 
 Where a later prompt relays a delegated player's whole final response as quoted context, the producer shall declare that property in the exact annotated form `` `<field>: <verbatim final text>` ``.
 The annotation makes the field runtime-owned: the adjudicator selects the result guard, while the linked runtime carries the player's canonical final text into that field instead of asking a judge to reproduce it.
 A distinct typed field extracted from that response remains judge-authored even when a later prompt quotes its exact value; quoting a field does not turn it into the player's whole final response.
 One property name shall not be annotated as verbatim in one result contract and judge-authored in another; text2gears shall choose distinct properties or report that the Source cannot be represented by the current contract.
+
+A Source statement that qualifies an outcome's evidence — what affirmatively
+supports it, what supports no outcome, such as "a progress report, status
+update, or promise of a later result supports no review outcome" — shall be
+carried in that outcome's result description, the only text the adjudicator
+reads when it selects the guard; left in the item's prose, it reaches no
+judge.
 
 Result metadata is compiler control data, not part of the acting agent's
 prompt.
@@ -172,12 +241,20 @@ Where Source restricts an initial Captain to routing, text2gears shall preserve
 only the authored question and delegation outcomes and shall not infer a
 direct-answer or terminal result merely because Captain is the acting agent.
 
-A single-outcome behavior whose output no later item consumes carries no
-`Results:` label; downstream,
+A single-outcome behavior whose output no later item consumes and whose
+outcome Source leaves unqualified carries no `Results:` label; downstream,
 [gears2fsm](gears2fsm.md#setup) gives its state the default single-outcome
 contract, so text2gears shall not invent a one-bullet `Results:` block for it.
 When a later item does consume its output, the produced-value rule above
-applies instead.
+applies instead; when Source qualifies the one outcome's evidence — what
+affirmatively supports it, what supports no outcome — the behavior carries
+exactly one `Results:` bullet naming that outcome and carrying the
+qualification, with an output property only where a consumer requires one,
+because the adjudicator reads the qualification nowhere else.
+
+When Source requires a terminal return to the caller, preserve every returned value or fact and its return condition as an explicit workflow output obligation in GEARS.
+Merely naming a value in a completion predicate or an acting result does not state that the workflow returns it.
+Keep this non-acting requirement outside prompt blockquotes, in the item's pre-prompt prose, an explicit terminal-return clause in the relevant Results description, or existing nested-call continuation; do not create a Captain action solely to restate the return.
 
 ### Boss-reply continuation
 
@@ -189,6 +266,16 @@ when the answer changes its complete runtime prompt. It shall not emit a
 second item solely for "Boss answers," "after the question," or clearing the
 consumed question/reply. The FSM and linker own the same-leaf suspension,
 continuation blocks, and consumed-context cleanup.
+Outside the decide-call-observe routing contract, an authored Boss question
+is the framework-owned `needsBossReply` outcome that
+[gears2fsm](gears2fsm.md#boss-reply-suspension) adds to every Captain- or
+player-invoking state: text2gears shall keep the question's conditions in the
+prompt and its continuation in the item's prose and shall declare no result
+for it, because a second guard for the same wait would give the adjudicator
+two equivalent outcomes.
+Only the routing contract's own `question` and `followUpQuestion` results
+declare the question, as `question: <verbatim final text>`; there, the result
+name or prose saying that a question is asked is not the field declaration.
 
 This rule is an exception to splitting by accumulated prompt content below.
 Split only when Source requires a genuinely different acting behavior after
@@ -239,6 +326,17 @@ text2gears shall emit an item whose behavior uses
 complete JSON-safe input-text template for that call.
 The literal target id shall be a stable configured playbook id, not a slash
 command or module specifier.
+In both literal and dynamic nested-call forms, the behavior's verb phrase shall
+be exact: `Captain shall call playbook ...:`.
+Text2gears shall not insert sequencing words such as `first`, `then`, `next`,
+or `finally` between `shall` and `call`; required sequencing belongs in the
+`When` or `While` clause or in continuation prose around the item.
+A nested-call item shall carry no `Results:` label: the child's terminal result
+is its outcome, so Source's continuation after child success, abort, or failure
+stays as prose after the blockquote for
+[gears2fsm](gears2fsm.md#nested-playbook-calls) to route through
+`invoke.onDone` and `invoke.onError`; a `Results:` block on a nested-call item
+is malformed.
 
 Example:
 
@@ -285,8 +383,16 @@ compiled items.
 The kind is defined here so every consumer of the GEARS format shares one
 item-syntax contract.
 
-A script item's blockquote is static shell text: it shall contain no
-`<placeholder>`, and Markdown escapes resolve exactly as in acting prompts.
+A script item's blockquote is static shell text apart from the
+`<placeholder>` forms an acting prompt may carry, which relay a runtime value
+the machine already retains; Markdown escapes resolve exactly as in acting
+prompts.
+A script reads no conversation and produces no prose, so a placeholder is
+sound there only to bind the command to a target the script cannot otherwise
+name — never to carry a value the script would have to interpret.
+It shall occupy a single-quoted shell word, so the authored command is valid
+shell as written and the compiled one binds a literal
+([gears2fsm "Setup"](gears2fsm.md#setup)).
 A script item shall carry a `Results:` label with exactly two bullets in this
 fixed interpretation: the first guard reports the script exiting with status
 zero, the second reports a nonzero exit status.
@@ -318,7 +424,9 @@ exact English form regardless of Source language.
 ## Transformation-spec sources
 
 A Source may itself be the normative specification of a transformation — e.g., a compiler phase definition, as when a meta pipeline compiles this file.
-Such a Source declares no roles and prompts none; its implied procedure is that Captain performs the specified transformation on request.
+Such a Source declares no roles and prompts none; Captain performs the specified transformation on request.
+Where such a Source carries a `## Compiled execution` section, text2gears shall compile it from that section alone: the section is the Source's complete behavior — its acting item, prompt, and `Results:` contract — and the remaining definition text is relayed content, not behaviors to transcribe, so the composition below applies only to a Source without that section.
+That section's blockquote is complete as authored: text2gears shall emit it verbatim and shall append no relay line to it — the `<definition>` placeholder is its only runtime value, and the undelivered-value rule above does not add `<boss-intent>` or any other placeholder to it.
 Compose Captain-acting spec items for it: when a transformation request names the specification's source and target, Captain shall carry out the transformation as specified.
 Prompts shall carry the specification's normative requirements as instructions to Captain — deduplicated, one point per line — without inventing roles, triggers, or requirements the specification does not state.
 
@@ -344,10 +452,29 @@ Markdown escaping is Source syntax, not content: extraction shall resolve escape
 
 Partition items by every variable that determines prompt content — including accumulated state when the trigger alone doesn't.
 
+Conversely, do not split by trigger alone: where two or more triggers lead to one behavior with the same acting clause, prompt, and result contract — a nested call Source says a later path makes "with the same input as" an earlier path's, for instance — text2gears shall emit one item whose condition joins the triggers and shall keep each path's continuation as that item's prose.
+An item per trigger duplicates an identical prompt and multiplies the FSM's states without a content difference.
+
 ### Prune dead disjuncts
 
 Drop disjunctive branches incompatible with the rest of an item's condition or prompt.
 Dead branches mislead readers and downstream phases.
+
+## Compiled execution
+
+This section governs compiled execution of this phase; the rules above remain the transformation's normative content for both execution paths.
+
+Where the phase host supplies `<definition>` as the exact bytes of the definition file the request names, when a transformation request names a `text` Source (`.md`) and a `gears` Target (`.md`), Captain shall carry out the text-to-GEARS transformation as specified:
+
+> Follow the definition relayed between the `--- DEFINITION ---` and `--- END DEFINITION ---` lines exactly, adding no rules of your own: read the named Source and write the named Target as the definition specifies.
+> If the Source cannot be transformed under the definition, do not guess: leave the Target unwritten and report the concrete reason.
+> --- DEFINITION ---
+> \<definition\>
+> --- END DEFINITION ---
+
+Results:
+- `compiled`: Captain wrote the named Target as the relayed definition specifies.
+- `rejected`: Captain reported that the Source cannot be transformed under the relayed definition and left the Target unwritten.
 
 ## References
 

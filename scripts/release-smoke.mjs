@@ -37,7 +37,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   CLIGENT_RELEASE_SPECIFIER,
@@ -50,10 +50,13 @@ const maxBuffer = 64 * 1024 * 1024;
 const smokeToken = 'RELEASE_SMOKE_OK';
 const smokeContinuedReply = 'RELEASE_SMOKE_CONTINUED';
 const smokeTask = 'Run the deterministic release smoke probe.';
+const unsupportedFastModeAdapterMarker =
+  '__PLAYBOOK_FAST_MODE_UNSUPPORTED_ADAPTER__';
 const sessionIdPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const adapterSdks = ['@anthropic-ai/claude-agent-sdk', '@openai/codex-sdk'];
 let isolatedNpmCache;
+let tmuxSentinel;
 
 class SmokeFailure extends Error {}
 
@@ -80,6 +83,32 @@ function tail(text, characters = 4000) {
     : value.slice(value.length - characters);
 }
 
+function installTmuxSentinel(root) {
+  const bin = join(root, 'no-tmux-bin');
+  const marker = join(root, 'tmux-was-invoked');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, 'tmux'),
+    [
+      '#!/bin/sh',
+      ': > "$PLAYBOOK_SMOKE_TMUX_MARKER"',
+      'exit 97',
+      '',
+    ].join('\n'),
+    { mode: 0o700 },
+  );
+  tmuxSentinel = Object.freeze({ bin, marker });
+}
+
+function assertTmuxWasNotInvoked() {
+  if (tmuxSentinel !== undefined && existsSync(tmuxSentinel.marker)) {
+    fail(
+      'the release smoke invoked tmux',
+      'The gate-wide private PATH sentinel was executed.',
+    );
+  }
+}
+
 // A version manager's inherited prefix would send `npm install -g` to the
 // maintainer's real global root instead of this run's throwaway one.
 function smokeEnv(overrides = {}) {
@@ -89,13 +118,20 @@ function smokeEnv(overrides = {}) {
   if (isolatedNpmCache !== undefined) {
     env.npm_config_cache = isolatedNpmCache;
   }
+  if (tmuxSentinel !== undefined) {
+    const pathEntries = String(env.PATH ?? '').split(delimiter);
+    if (pathEntries[0] !== tmuxSentinel.bin) {
+      env.PATH = [tmuxSentinel.bin, env.PATH].filter(Boolean).join(delimiter);
+    }
+    env.PLAYBOOK_SMOKE_TMUX_MARKER = tmuxSentinel.marker;
+  }
   return env;
 }
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd ?? repoRoot,
-    env: options.env ?? smokeEnv(),
+    env: smokeEnv(options.env),
     encoding: 'utf8',
     maxBuffer,
     stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
@@ -412,24 +448,26 @@ const machine = setup({}).createMachine({
 const createRuntime = createXStatePlaybookRuntime(machine, {
   label: 'SMOKE',
   // Link-time literal per slc/link.md, so the fixture models linker output.
-  compat: { artifactSchema: 2, runtimeAbi: 1 },
+  compat: { artifactSchema: 3, runtimeAbi: 1 },
   snapshotOptions: () => ({}),
   entryEvent: { type: 'START', textField: 'task' },
   roleStates: {},
+  outcomeAuthority: { governedPlayerStates: {} },
 });
 
 export default {
   id: 'smoke',
   command: 'smoke',
   intent: 'deterministic release smoke fixture',
-  artifactSchema: 2,
+  artifactSchema: 3,
+  runtimeProfile: { kind: 'shared-factory', compat: createRuntime.compat },
   requiredRoleIds: [],
   concurrentRoleSets: [],
   validateOptions(value) {
     return value ?? {};
   },
-  createRuntime() {
-    return createRuntime({});
+  createRuntime(configuredOptions, hostCapabilities) {
+    return createRuntime({ configuredOptions, hostCapabilities });
   },
 };
 `;
@@ -536,24 +574,202 @@ const machine = setup({}).createMachine({
 const createRuntime = createXStatePlaybookRuntime(machine, {
   label: 'RECOVER',
   // Link-time literal per slc/link.md, so the fixture models linker output.
-  compat: { artifactSchema: 2, runtimeAbi: 1 },
+  compat: { artifactSchema: 3, runtimeAbi: 1 },
   snapshotOptions: () => ({}),
   entryEvent: { type: 'START', textField: 'task', contextField: 'task' },
   roleStates: {},
+  outcomeAuthority: { governedPlayerStates: {} },
 });
 
 export default {
   id: 'recover',
   command: 'recover',
   intent: 'deterministic recoverable-failure fixture',
-  artifactSchema: 2,
+  artifactSchema: 3,
+  runtimeProfile: { kind: 'shared-factory', compat: createRuntime.compat },
   requiredRoleIds: [],
   concurrentRoleSets: [],
   validateOptions(value) {
     return value ?? {};
   },
-  createRuntime() {
-    return createRuntime({});
+  createRuntime(configuredOptions, hostCapabilities) {
+    return createRuntime({ configuredOptions, hostCapabilities });
+  },
+};
+`;
+}
+
+// A schema-3 governed player fixture whose only semantic arm requires one
+// descendant commit. The packed matrix below deliberately supplies no
+// terminal adapter result, so the authoritative commit identity can come
+// only from the repository receipt that the installed host persists.
+function effectArtifactSource() {
+  return `// Release smoke fixture: governed repository-effect authority.
+import { writeFileSync } from 'node:fs';
+import { assign, fromPromise, setup } from 'xstate';
+import {
+  createXStatePlaybookRuntime,
+} from '@sublang/playbook/xstate-runtime';
+
+const acceptedOidPath = process.env.PLAYBOOK_SMOKE_ACCEPTED_OID_PATH;
+if (typeof acceptedOidPath !== 'string' || acceptedOidPath.length === 0) {
+  throw new Error('PLAYBOOK_SMOKE_ACCEPTED_OID_PATH is required');
+}
+
+const machine = setup({
+  actors: {
+    player: fromPromise(async () => {
+      throw new Error('player actor must be provided by the runner');
+    }),
+  },
+  guards: {
+    completed: ({ event }) => event.output?.guard === 'complete',
+  },
+  actions: {
+    'playbook.acceptedOutcome': () => {},
+    recordAcceptedCommit: ({ event }) => {
+      writeFileSync(acceptedOidPath, event.output.latestCommit + '\\n');
+    },
+  },
+}).createMachine({
+  id: 'releaseeffect',
+  initial: 'ready',
+  context: {},
+  states: {
+    ready: {
+      id: 'ready',
+      description: 'Waits for the repository-effect probe.',
+      meta: {
+        playbook: {
+          stateId: 'ready',
+          description: 'Waits for the repository-effect probe.',
+        },
+      },
+      tags: ['playbook.parked'],
+      on: {
+        START: {
+          target: 'work',
+          actions: assign({ task: ({ event }) => event.task }),
+        },
+      },
+    },
+    work: {
+      id: 'work',
+      description: 'EFFECT-1: Worker creates one descendant commit.',
+      meta: {
+        playbook: {
+          stateId: 'work',
+          description: 'EFFECT-1: Worker creates one descendant commit.',
+          role: 'coder',
+        },
+      },
+      tags: ['playbook.busy'],
+      invoke: {
+        src: 'player',
+        input: ({ context }) => ({
+          stateId: 'work',
+          role: 'coder',
+          sourceItem: 'EFFECT-1',
+          prompt: [
+            'EFFECT-SMOKE player: create exactly one descendant commit.',
+            \`Task context: \${context.task}\`,
+          ].join('\\n'),
+          result: {
+            complete:
+              'The repository change is committed. Output shall include ' +
+              '\`latestCommit: <commit identity>\`.',
+          },
+        }),
+        onDone: [
+          {
+            guard: 'completed',
+            target: 'done',
+            actions: [
+              {
+                type: 'playbook.acceptedOutcome',
+                params: {
+                  source: 'work',
+                  target: 'done',
+                  acceptedOutcome: 'complete',
+                },
+              },
+              'recordAcceptedCommit',
+              assign({
+                latestCommit: ({ event }) => event.output.latestCommit,
+              }),
+            ],
+          },
+          { target: 'failed' },
+        ],
+        onError: {
+          target: 'failed',
+          actions: assign({ lastError: ({ event }) => String(event.error) }),
+        },
+      },
+    },
+    failed: {
+      id: 'failed',
+      description: 'The effect probe failed.',
+      meta: {
+        playbook: {
+          stateId: 'failed',
+          description: 'The effect probe failed.',
+        },
+      },
+      tags: ['playbook.parked'],
+    },
+    done: {
+      id: 'done',
+      description: 'The repository effect was accepted from durable evidence.',
+      meta: {
+        playbook: {
+          stateId: 'done',
+          description:
+            'The repository effect was accepted from durable evidence.',
+        },
+      },
+      type: 'final',
+    },
+  },
+  output: ({ context }) => ({ latestCommit: context.latestCommit }),
+});
+
+const createRuntime = createXStatePlaybookRuntime(machine, {
+  label: 'EFFECT',
+  compat: { artifactSchema: 3, runtimeAbi: 1 },
+  snapshotOptions: () => ({}),
+  entryEvent: { type: 'START', textField: 'task' },
+  roleStates: {
+    work: {
+      role: 'coder',
+      label: 'EFFECT-1: Worker creates one descendant commit.',
+    },
+  },
+  outcomeAuthority: {
+    governedPlayerStates: {
+      work: {
+        complete: {
+          fields: { latestCommit: 'effect' },
+          repositoryDisposition: 'one-descendant-commit',
+        },
+      },
+    },
+  },
+});
+
+export default {
+  id: 'effect',
+  command: 'effect',
+  intent: 'exercise durable repository-effect reconciliation',
+  artifactSchema: 3,
+  runtimeProfile: { kind: 'shared-factory', compat: createRuntime.compat },
+  requiredRoleIds: ['coder'],
+  concurrentRoleSets: [],
+  validateOptions(value) {
+    return value ?? {};
+  },
+  createRuntime(configuredOptions, hostCapabilities) {
+    return createRuntime({ configuredOptions, hostCapabilities });
   },
 };
 `;
@@ -568,13 +784,14 @@ export default {
   id: 'lanes',
   command: 'lanes',
   intent: 'exercise segmented shared and isolated session players',
-  artifactSchema: 2,
+  artifactSchema: 3,
+  runtimeProfile: { kind: 'bespoke', artifactSchema: 3 },
   requiredRoleIds: ['first', 'second', 'isolated'],
   concurrentRoleSets: [],
   validateOptions(value) {
     return value ?? {};
   },
-  createRuntime() {
+  createRuntime(_configuredOptions, _hostCapabilities) {
     let session;
     return {
       async init(next) {
@@ -702,6 +919,7 @@ class DeterministicAdapter {
         resume: options.resume === undefined ? null : options.resume,
         model: options.model ?? null,
         effort: options.effort ?? null,
+        fastMode: options.fastMode ?? null,
         resumeToken,
         advertised,
         selected,
@@ -752,20 +970,379 @@ process.exitCode = result.code ?? 0;
 `;
 }
 
+// Exercise malformed fast-mode configuration through the packed public CLI
+// boundary. Both boolean literals are semantically meaningful, so an adapter
+// that does not support fast mode must reject either one before any external
+// registry, SDK-readiness, or runtime work begins.
+function installedFastModeBoundaryDriverSource() {
+  return `import { readFileSync, writeFileSync } from 'node:fs';
+import { FAST_MODE_SUPPORT } from '@sublang/cligent';
+import { runPlaybookCli } from './reference/sdlc/code.playbook/bin/playbook.js';
+
+const cases = process.argv.slice(2);
+if (cases.length !== 2) {
+  throw new Error('expected fastMode=false and fastMode=true config paths');
+}
+const unsupportedAdapter = Object.entries(FAST_MODE_SUPPORT).find(
+  ([, capability]) => capability.requestSupported === false,
+)?.[0];
+if (unsupportedAdapter === undefined) {
+  throw new Error('packed Cligent declares no unsupported fast-mode adapter');
+}
+const adapterMarker = ${JSON.stringify(unsupportedFastModeAdapterMarker)};
+
+function capture() {
+  let text = '';
+  return {
+    stream: {
+      write(chunk) {
+        text += String(chunk);
+        return true;
+      },
+    },
+    value: () => text,
+  };
+}
+
+for (const configPath of cases) {
+  const authoredConfig = readFileSync(configPath, 'utf8');
+  if (authoredConfig.split(adapterMarker).length !== 2) {
+    throw new Error('unsupported fast-mode config has the wrong adapter marker');
+  }
+  writeFileSync(
+    configPath,
+    authoredConfig.replaceAll(adapterMarker, unsupportedAdapter),
+  );
+  const hooks = [];
+  const forbidden = (name) => async () => {
+    hooks.push(name);
+    throw new Error(\`forbidden external hook: \${name}\`);
+  };
+  const stdout = capture();
+  const stderr = capture();
+  const result = await runPlaybookCli({
+    argv: ['run', '/unsupported'],
+    env: process.env,
+    userConfigPath: configPath,
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    prepareRegistryModule: forbidden('prepare'),
+    loadModule: forbidden('import'),
+    probeAdapterSdk: forbidden('readiness'),
+    createCaptainRuntime: forbidden('captain-runtime'),
+    createHostRuntime: forbidden('host-runtime'),
+    sessionStore: new Proxy({}, {
+      get() {
+        hooks.push('session-store');
+        throw new Error('forbidden external hook: session-store');
+      },
+    }),
+  });
+  if (result.code !== 1) {
+    throw new Error(
+      \`unsupported fastMode config exited \${String(result.code)} instead of 1\`,
+    );
+  }
+  if (stdout.value() !== '') {
+    throw new Error(\`unsupported fastMode config wrote stdout: \${stdout.value()}\`);
+  }
+  if (
+    !stderr.value().includes('fastMode') ||
+    !stderr.value().includes('not supported') ||
+    !stderr.value().includes(unsupportedAdapter)
+  ) {
+    throw new Error(
+      \`unsupported fastMode config reported the wrong error: \${stderr.value()}\`,
+    );
+  }
+  if (hooks.length !== 0) {
+    throw new Error(
+      \`unsupported fastMode config crossed external hooks: \${hooks.join(', ')}\`,
+    );
+  }
+}
+
+process.stdout.write('fastMode false/true rejected before external hooks\\n');
+`;
+}
+
+// A dedicated packed driver for the schema-3 effect matrix. Player calls
+// create one real commit, emit two complete Cligent messages, and deliberately
+// omit `done.result`; Captain calls deterministically resolve, park, reconcile,
+// or abandon without a model.
+function installedEffectReconciliationDriverSource() {
+  return `import { spawnSync } from 'node:child_process';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createEvent } from '@sublang/cligent';
+import { runPlaybookCli } from './reference/sdlc/code.playbook/bin/playbook.js';
+
+const closingReply = ${JSON.stringify(smokeToken)};
+const callLog = requiredEnv('PLAYBOOK_SMOKE_AGENT_LOG');
+const effectRepo = requiredEnv('PLAYBOOK_SMOKE_EFFECT_REPO');
+const processName = requiredEnv('PLAYBOOK_SMOKE_PROCESS');
+const commentary = 'Effect smoke commentary remained a complete message.';
+const misleadingCommit = 'Commit: not-the-observed-oid';
+let sequence = 0;
+
+function runGit(args) {
+  const result = spawnSync('git', args, {
+    cwd: effectRepo,
+    encoding: 'utf8',
+  });
+  if (result.error !== undefined || result.status !== 0) {
+    throw new Error(
+      'effect smoke git ' + args.join(' ') + ' failed: ' +
+        String(result.error?.message ?? result.stderr ?? result.stdout),
+    );
+  }
+}
+
+function recordCall(kind, prompt, options, extra = {}) {
+  sequence += 1;
+  const resumeToken =
+    \`release-smoke-effect:\${kind}:\${processName}:\${sequence}\`;
+  appendFileSync(
+    callLog,
+    JSON.stringify({
+      process: processName,
+      kind,
+      prompt,
+      resume: options.resume === undefined ? null : options.resume,
+      resumeToken,
+      ...extra,
+    }) + '\\n',
+  );
+  return resumeToken;
+}
+
+class EffectAdapter {
+  agent = 'claude-code';
+
+  async *run(prompt, options = {}) {
+    if (this.agent === 'codex' && prompt.includes('EFFECT-SMOKE player:')) {
+      const resumeToken = recordCall('player', prompt, options);
+      if (!['effect-resolved', 'effect-parked'].includes(processName)) {
+        throw new Error('an unresolved-effect control replayed the player');
+      }
+      const filename = \`effect-\${processName}.txt\`;
+      const path = join(effectRepo, filename);
+      if (existsSync(path)) {
+        throw new Error('the governed player effect was replayed');
+      }
+      writeFileSync(path, \`\${processName}\\n\`);
+      runGit(['add', '--', filename]);
+      runGit(['commit', '-m', \`Record \${processName} effect\`]);
+      const transportId =
+        \`release-smoke-effect-transport-\${processName}-\${sequence}\`;
+      yield createEvent(
+        'text',
+        this.agent,
+        { content: commentary },
+        transportId,
+      );
+      yield createEvent(
+        'text',
+        this.agent,
+        { content: misleadingCommit },
+        transportId,
+      );
+      yield createEvent(
+        'done',
+        this.agent,
+        {
+          status: 'success',
+          resumeToken,
+          usage: { toolUses: 0 },
+          durationMs: 1,
+        },
+        transportId,
+      );
+      return;
+    }
+
+    let kind;
+    let result;
+    let selected = null;
+    let recordedResumeToken;
+    if (prompt.includes('Select exactly one action from the closed set')) {
+      kind = 'selection';
+      selected =
+        processName === 'effect-reconcile'
+          ? 'reconcile:unresolved-effect'
+          : processName === 'effect-abandon'
+            ? 'abandon:unresolved-effect'
+            : null;
+      if (selected === null || !prompt.includes(\`- \${selected}: \`)) {
+        throw new Error(
+          'the requested unresolved-effect control was not advertised',
+        );
+      }
+      result = JSON.stringify({ action: 'runtime', actionId: selected });
+    } else if (
+      prompt.includes('The closing reply is the turn summary') ||
+      prompt.includes('Outcome report facts (verbatim):')
+    ) {
+      kind = 'closing';
+      result = closingReply;
+    } else if (prompt.includes('This is hidden control work.')) {
+      kind = 'judge';
+      recordedResumeToken = recordCall(kind, prompt, options, { selected });
+      if (processName === 'effect-resolved') {
+        result = JSON.stringify({ guard: 'complete' });
+      } else if (processName === 'effect-parked') {
+        result = 'not JSON';
+      } else {
+        throw new Error('an unresolved-effect control started a judge');
+      }
+    } else {
+      throw new Error('effect smoke received an unexpected Captain prompt');
+    }
+
+    const resumeToken =
+      recordedResumeToken ?? recordCall(kind, prompt, options, { selected });
+    yield createEvent(
+      'done',
+      this.agent,
+      {
+        status: 'success',
+        result,
+        resumeToken,
+        usage: { toolUses: 0 },
+        durationMs: 1,
+      },
+      \`release-smoke-effect-transport-\${processName}-\${sequence}\`,
+    );
+  }
+
+  async isAvailable() {
+    return true;
+  }
+}
+
+class EffectCodexAdapter extends EffectAdapter {
+  agent = 'codex';
+}
+
+function requiredEnv(name) {
+  const value = process.env[name];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(\`\${name} is required\`);
+  }
+  return value;
+}
+
+const result = await runPlaybookCli({
+  argv: process.argv.slice(2),
+  env: process.env,
+  userConfigPath: requiredEnv('PLAYBOOK_SMOKE_CONFIG'),
+  adapterImports: {
+    claude: async () => EffectAdapter,
+    codex: async () => EffectCodexAdapter,
+  },
+  probeAdapterSdk: async () => true,
+});
+process.exitCode = result.code ?? 0;
+`;
+}
+
+// Run from the registry-installed cligent package itself. This exercises the
+// public no-presenter runtime that Playbook consumes, including the 0.23.0
+// result-less fallback that must retain whole Codex message boundaries.
+function cligentMessageBoundaryProbeSource() {
+  return `import { createEvent } from '@sublang/cligent';
+import { createTmuxPlayRuntime } from '@sublang/cligent/tmux-play';
+
+const commentary = 'Reworked the small packages.';
+const finalResponse = 'Commit: abc123';
+const sessionId = 'playbook-release-message-boundary';
+let playerResult;
+
+class CodexMessageAdapter {
+  agent = 'codex';
+
+  async *run() {
+    yield createEvent('text', this.agent, { content: commentary }, sessionId);
+    yield createEvent('text', this.agent, { content: finalResponse }, sessionId);
+    yield createEvent(
+      'done',
+      this.agent,
+      {
+        status: 'success',
+        usage: { toolUses: 0 },
+        durationMs: 1,
+      },
+      sessionId,
+    );
+  }
+
+  async isAvailable() {
+    return true;
+  }
+}
+
+class UnusedCaptainAdapter extends CodexMessageAdapter {
+  agent = 'claude-code';
+
+  async *run() {
+    throw new Error('the transport probe must not call the Captain adapter');
+  }
+}
+
+const runtime = await createTmuxPlayRuntime({
+  captain: {
+    async handleBossTurn(turn, context) {
+      playerResult = await context.callPlayer('coder', turn.prompt);
+    },
+  },
+  captainConfig: { adapter: 'claude' },
+  players: [{ id: 'coder', adapter: 'codex' }],
+  adapterImports: {
+    claude: async () => UnusedCaptainAdapter,
+    codex: async () => CodexMessageAdapter,
+  },
+});
+
+await runtime.runBossTurn('transport probe');
+
+const expected = commentary + '\\n' + finalResponse;
+const finalResponseLines = playerResult?.finalText
+  ?.split('\\n')
+  .filter((line) => line === finalResponse);
+if (
+  playerResult?.status !== 'ok' ||
+  playerResult.finalText !== expected ||
+  finalResponseLines?.length !== 1
+) {
+  throw new Error(
+    'installed cligent did not preserve complete Codex messages: ' +
+      JSON.stringify(playerResult),
+  );
+}
+`;
+}
+
 // The installed package's own module scope: self-referencing imports resolve
-// exactly as consumer imports of the four public playbook subpaths do,
+// exactly as consumer imports of the seven public playbook subpaths do,
 // exports map included.
 function compiledRuntimeImportProbeSource() {
-  return `// RELEASE-28 step 6: every installed playbook subpath constructs.
+  return `// RELEASE-28 step 7: every installed playbook subpath constructs.
 import captainFactory from '@sublang/playbook/captain/playbook';
 import codeFactory from '@sublang/playbook/code/playbook';
 import reviewFactory from '@sublang/playbook/review/playbook';
 import decideFactory from '@sublang/playbook/decide/playbook';
+import devFactory from '@sublang/playbook/dev/playbook';
+import branchFactory from '@sublang/playbook/branch/playbook';
+import prFactory from '@sublang/playbook/pr/playbook';
+import { emptyPlaybookEffectLedger } from '@sublang/playbook/xstate-runtime';
 
 const enabledPlaybooks = [
   { id: 'code', command: 'code', intent: 'implement a coding intent' },
   { id: 'review', command: 'review', intent: 'review the latest commit' },
   { id: 'decide', command: 'decide', intent: 'decide a spec design' },
+  { id: 'dev', command: 'dev', intent: 'plan a development request' },
+  { id: 'branch', command: 'branch', intent: 'branch for a GitHub issue' },
+  { id: 'pr', command: 'pr', intent: 'deliver the branch as a pull request' },
 ];
 const controller = {
   async submit() {
@@ -781,33 +1358,97 @@ const coreMembers = [
   'dispose',
 ];
 const controlMembers = ['describe', 'apply'];
+const adoptionMembers = ['adopt'];
+const probeSessionId = '00000000-0000-4000-8000-000000000017';
+const probeRepositoryIdentity = {
+  worktree: process.cwd(),
+  gitDir: process.cwd(),
+};
+const unavailableRepositoryOperation = async () => {
+  throw new Error('the construction probe must not use the repository');
+};
+function construction(playbookId, requiredRoleIds, concurrentRoleSets) {
+  const ledger = emptyPlaybookEffectLedger();
+  return {
+    configuredOptions: {},
+    hostCapabilities: {
+      authority: {
+        playbookId,
+        artifactSchema: 3,
+        cwd: process.cwd(),
+        sessionId: probeSessionId,
+        leaseOwnerToken: 'release-smoke-construction-probe',
+        canonicalWorktree: probeRepositoryIdentity,
+        requiredRoleIds,
+        concurrentRoleSets,
+      },
+      repository: {
+        identity: probeRepositoryIdentity,
+        observe: unavailableRepositoryOperation,
+        acquire: unavailableRepositoryOperation,
+        runExclusive: unavailableRepositoryOperation,
+        runCohort: unavailableRepositoryOperation,
+        runDeferred: unavailableRepositoryOperation,
+      },
+      effectLedger: {
+        snapshot: () => ledger,
+        writeAhead: async () => ledger,
+      },
+    },
+  };
+}
 const cases = [
   {
     id: 'captain',
     runtime: captainFactory({ enabledPlaybooks, controller }),
-    members: [...coreMembers, ...controlMembers],
+    members: [...coreMembers, ...controlMembers, ...adoptionMembers],
   },
   {
     id: 'code',
-    runtime: codeFactory({}),
-    members: [...coreMembers, ...controlMembers],
+    runtime: codeFactory(construction('code', ['coder'], [])),
+    members: [...coreMembers, ...controlMembers, ...adoptionMembers],
   },
   {
     id: 'review',
-    runtime: reviewFactory({}),
-    members: [...coreMembers, ...controlMembers],
+    runtime: reviewFactory(construction('review', ['coder', 'reviewer'], [])),
+    members: [...coreMembers, ...controlMembers, ...adoptionMembers],
   },
   {
     id: 'decide',
-    runtime: decideFactory({}),
+    runtime: decideFactory(
+      construction('decide', ['coder', 'reviewer'], [['coder', 'reviewer']]),
+    ),
     members: coreMembers,
+    absentMembers: adoptionMembers,
+  },
+  {
+    id: 'dev',
+    runtime: devFactory(construction('dev', ['analyst'], [])),
+    members: [...coreMembers, ...controlMembers, ...adoptionMembers],
+  },
+  {
+    id: 'branch',
+    runtime: branchFactory(construction('branch', ['coder'], [])),
+    members: [...coreMembers, ...controlMembers, ...adoptionMembers],
+  },
+  {
+    id: 'pr',
+    runtime: prFactory(construction('pr', ['coder'], [])),
+    members: [...coreMembers, ...controlMembers, ...adoptionMembers],
   },
 ];
 
-for (const { id, runtime, members } of cases) {
+for (const { id, runtime, members, absentMembers = [] } of cases) {
   const missing = members.filter((name) => typeof runtime[name] !== 'function');
   if (missing.length > 0) {
     console.error(\`\${id}/playbook runtime is missing: \${missing.join(', ')}\`);
+    process.exit(1);
+  }
+  const unexpected = absentMembers.filter((name) => name in runtime);
+  if (unexpected.length > 0) {
+    console.error(
+      \`\${id}/playbook runtime unexpectedly exposes: \${unexpected.join(', ')}\`,
+    );
     process.exit(1);
   }
   console.log(\`OK    \${id}/playbook constructs with \${members.length} contract members\`);
@@ -823,7 +1464,7 @@ for (const { id, runtime, members } of cases) {
 // tree, so equality is the normal outcome and this is not a drift guard —
 // committed-vs-built drift is the CI sibling check (RELEASE-10). It is the
 // transfer argument: the tarball a release uploads carries a counterpart
-// for every packed path, byte-for-byte the same artifacts step 7's suites
+// for every packed path, byte-for-byte the same artifacts step 8's suites
 // just ran against, with nothing generated or rewritten in transit.
 function packedComparableEntries(packedRoot, packedPackage) {
   const entries = [];
@@ -849,6 +1490,7 @@ async function main() {
   const root = mkdtempSync(join(tmpdir(), 'playbook-release-smoke-'));
   isolatedNpmCache = join(root, 'npm-cache');
   mkdirSync(isolatedNpmCache, { recursive: true });
+  installTmuxSentinel(root);
   const state = {};
   const steps = [
     ['pack the publishable tarball', () => stepPack(root, state)],
@@ -856,9 +1498,15 @@ async function main() {
     ['install the opted-in global shape', () => stepOptedIn(root, state)],
     ['run the installed CLI surfaces', () => stepInstalledCli(root, state)],
     ['drive the installed headless Captain', () => stepHermetic(root, state)],
+    ['reconcile packed repository effects', () =>
+      stepEffectReconciliation(root, state)],
     ['check compiled runtime integrity', () => stepCompiledRuntimeIntegrity(state)],
     ['check compiled-artifact fidelity', () => stepCompiledFidelity(state)],
     ['guard the nested cligent floor', () => stepCligentFloor(root, state)],
+    ['exercise the packed session-store facade', () =>
+      stepPackedSessionStore(root, state)],
+    ['exercise the packed host-capabilities facade', () =>
+      stepPackedHostCapabilities(root, state)],
   ];
 
   const startedAt = Date.now();
@@ -867,14 +1515,25 @@ async function main() {
     const label = `[${index + 1}/${steps.length}] ${title}`;
     const stepStartedAt = Date.now();
     process.stdout.write(`${label}\n`);
+    let lines = [];
+    let failure;
     try {
-      const lines = (await step()) ?? [];
+      lines = (await step()) ?? [];
+    } catch (error) {
+      failure = { error };
+    }
+    try {
+      assertTmuxWasNotInvoked();
+    } catch (error) {
+      failure = { error };
+    }
+    if (failure === undefined) {
       for (const line of lines) process.stdout.write(`    ${line}\n`);
       process.stdout.write(
         `    ok (${seconds(Date.now() - stepStartedAt)}s)\n\n`,
       );
-    } catch (error) {
-      failed = { label, error };
+    } else {
+      failed = { label, error: failure.error };
       process.stdout.write(
         `    FAILED (${seconds(Date.now() - stepStartedAt)}s)\n\n`,
       );
@@ -979,16 +1638,17 @@ function stepOptedIn(root, state) {
 // Step 4 — the installed executable's own non-launching surfaces.
 function stepInstalledCli(root, state) {
   const home = join(root, 'cli-home');
-  const configHome = join(home, '.config');
-  mkdirSync(join(configHome, 'playbook'), { recursive: true });
+  const spexHome = join(home, '.spex');
+  mkdirSync(join(spexHome, 'config'), { recursive: true });
   writeFileSync(
-    join(configHome, 'playbook', 'playbook.config.yaml'),
+    join(spexHome, 'config', 'playbook.config.yaml'),
     [
       'captain:',
       '  adapter: claude',
       'players:',
       '  release.coder: { adapter: claude }',
       '  release.reviewer: { adapter: codex }',
+      '  release.analyst: { adapter: claude }',
       'playbooks:',
       '  code:',
       '    from: "@sublang/playbook/code/registry"',
@@ -999,12 +1659,22 @@ function stepInstalledCli(root, state) {
       '  decide:',
       '    from: "@sublang/playbook/decide/registry"',
       '    roles: { coder: release.coder, reviewer: release.reviewer }',
+      '  dev:',
+      '    from: "@sublang/playbook/dev/registry"',
+      '    roles: { analyst: release.analyst }',
+      '  branch:',
+      '    from: "@sublang/playbook/branch/registry"',
+      '    roles: { coder: release.coder }',
+      '  pr:',
+      '    from: "@sublang/playbook/pr/registry"',
+      '    roles: { coder: release.coder }',
       '',
     ].join('\n'),
   );
   const env = smokeEnv({
     HOME: home,
-    XDG_CONFIG_HOME: configHome,
+    SPEX_HOME: spexHome,
+    XDG_CONFIG_HOME: join(home, '.config'),
     XDG_STATE_HOME: join(home, '.local', 'state'),
   });
   const help = run(state.optinBin, ['--help'], { cwd: root, env });
@@ -1022,6 +1692,9 @@ function stepInstalledCli(root, state) {
     '/code  code  —',
     '/review  review  —',
     '/decide  decide  —',
+    '/dev  dev  —',
+    '/branch  branch  —',
+    '/pr  pr  —',
   ]) {
     expectContains(list.stdout, expected, '--list output');
   }
@@ -1056,6 +1729,14 @@ function stepHermetic(root, state) {
   writeFileSync(configPath, smokeConfig('a'));
   const retunePath = join(scenario, 'retune-b.yaml');
   writeFileSync(retunePath, smokeRetuneOverlay());
+  const unsupportedFastModePaths = [false, true].map((fastMode) => {
+    const path = join(
+      scenario,
+      `unsupported-fast-mode-${String(fastMode)}.yaml`,
+    );
+    writeFileSync(path, unsupportedFastModeConfig(fastMode));
+    return path;
+  });
   for (const args of [
     ['init', '-b', 'main'],
     ['config', 'user.name', 'Playbook Release Smoke'],
@@ -1088,29 +1769,15 @@ function stepHermetic(root, state) {
     }
   }
 
-  const sentinelBin = join(scenario, 'sentinel-bin');
-  const tmuxMarker = join(scenario, 'tmux-was-invoked');
-  mkdirSync(sentinelBin, { recursive: true });
-  writeFileSync(
-    join(sentinelBin, 'tmux'),
-    [
-      '#!/bin/sh',
-      ': > "$PLAYBOOK_SMOKE_TMUX_MARKER"',
-      'exit 97',
-      '',
-    ].join('\n'),
-    { mode: 0o700 },
-  );
   const env = smokeEnv({
     HOME: join(scenario, 'home'),
-    XDG_CONFIG_HOME: join(scenario, 'xdg'),
+    SPEX_HOME: join(scenario, 'spex'),
+    XDG_CONFIG_HOME: join(scenario, 'xdg-config'),
     XDG_STATE_HOME: join(scenario, 'xdg-state'),
-    PATH: [sentinelBin, process.env.PATH].filter(Boolean).join(delimiter),
     ANTHROPIC_API_KEY: 'release-smoke-synthetic-readiness',
     OPENAI_API_KEY: 'release-smoke-synthetic-readiness',
     PLAYBOOK_SMOKE_CONFIG: configPath,
     PLAYBOOK_SMOKE_AGENT_LOG: join(scenario, 'agent-calls.ndjson'),
-    PLAYBOOK_SMOKE_TMUX_MARKER: tmuxMarker,
   });
   const processEnv = (name) => ({ ...env, PLAYBOOK_SMOKE_PROCESS: name });
   const driverPath = join(
@@ -1118,6 +1785,24 @@ function stepHermetic(root, state) {
     'release-smoke-headless.mjs',
   );
   writeFileSync(driverPath, installedHeadlessDriverSource());
+  const fastModeBoundaryDriverPath = join(
+    installedPackageRoot(state.optinPrefix),
+    'release-smoke-fast-mode-boundary.mjs',
+  );
+  writeFileSync(
+    fastModeBoundaryDriverPath,
+    installedFastModeBoundaryDriverSource(),
+  );
+  const fastModeBoundary = run(
+    process.execPath,
+    [fastModeBoundaryDriverPath, ...unsupportedFastModePaths],
+    { cwd: repo, env: processEnv('fast-mode-boundary') },
+  );
+  expectContains(
+    fastModeBoundary.stdout,
+    'fastMode false/true rejected before external hooks',
+    'packed fast-mode boundary probe',
+  );
 
   const first = run(process.execPath, [driverPath, 'run', '--json'], {
     cwd: repo,
@@ -1134,7 +1819,7 @@ function stepHermetic(root, state) {
   expectOneOrderedLifecycle(first.stderr, 'smoke');
   assertProvisionedEngineTree(repo, state.optinPrefix);
   const firstEnvelope = parseExactHeadlessReply(first.stdout, smokeToken);
-  const sessionsDir = join(env.XDG_STATE_HOME, 'playbook', 'sessions');
+  const sessionsDir = join(env.SPEX_HOME, 'sessions');
   const sessionPath = join(sessionsDir, `${firstEnvelope.sessionId}.json`);
   const firstRecord = readJson(sessionPath);
   const frozenCwd = realpathSync(repo);
@@ -1142,7 +1827,7 @@ function stepHermetic(root, state) {
     (player) => player.id,
   );
   if (
-    firstRecord.schemaVersion !== 3 ||
+    firstRecord.schemaVersion !== 7 ||
     firstRecord.kind !== 'captain-session' ||
     firstRecord.state !== 'settled' ||
     firstRecord.cwd !== frozenCwd ||
@@ -1154,9 +1839,9 @@ function stepHermetic(root, state) {
       'release.shared' ||
     firstRecord.structuralProjection?.catalog?.lanes?.roles?.isolated?.playerId !==
       'release.isolated' ||
-    firstRecord.snapshot?.captain?.conversation?.kind !== 'pinned' ||
-    firstRecord.snapshot?.captain?.conversation?.token !==
-      'release-smoke:closing:first:1'
+    JSON.stringify(firstRecord.retainedGenerations) !== '{}' ||
+    firstRecord.snapshot?.captain?.conversation?.kind !== 'needsSeeding' ||
+    readJson(join(sessionsDir, `${firstEnvelope.sessionId}.hints.json`)).captain?.token !== 'release-smoke:closing:first:1'
   ) {
     fail(
       'the first headless turn did not persist its schema-3 identity boundary',
@@ -1199,9 +1884,8 @@ function stepHermetic(root, state) {
   if (
     secondRecord.state !== 'settled' ||
     secondRecord.cwd !== frozenCwd ||
-    secondRecord.snapshot?.captain?.conversation?.kind !== 'pinned' ||
-    secondRecord.snapshot?.captain?.conversation?.token !==
-      'release-smoke:selection:continued:1'
+    secondRecord.snapshot?.captain?.conversation?.kind !== 'needsSeeding' ||
+    readJson(join(sessionsDir, `${firstEnvelope.sessionId}.hints.json`)).captain?.token !== 'release-smoke:selection:continued:1'
   ) {
     fail(
       'continuation replaced the frozen cwd or lost Captain continuity',
@@ -1245,6 +1929,7 @@ function stepHermetic(root, state) {
   expectOneOrderedLifecycle(laneB.stderr, 'lanes');
   parseExactHeadlessReply(laneB.stdout, smokeToken, firstEnvelope.sessionId);
   const finalRecord = readJson(sessionPath);
+  const finalHints = readJson(join(sessionsDir, `${firstEnvelope.sessionId}.hints.json`));
   const finalExecution = finalRecord.lastAppliedExecutionProjection;
   const finalPlayers = Object.fromEntries(
     (finalExecution?.players ?? []).map((player) => [player.id, player]),
@@ -1256,7 +1941,7 @@ function stepHermetic(root, state) {
   const finalPlayerIds = Object.keys(finalPlayers).sort();
   const finalRoleIds = Object.keys(finalRoles ?? {}).sort();
   if (
-    finalRecord.schemaVersion !== 3 ||
+    finalRecord.schemaVersion !== 7 ||
     finalRecord.kind !== 'captain-session' ||
     finalRecord.sessionId !== firstEnvelope.sessionId ||
     finalRecord.state !== 'settled' ||
@@ -1269,25 +1954,31 @@ function stepHermetic(root, state) {
       JSON.stringify(['release.isolated', 'release.shared']) ||
     JSON.stringify(finalRoleIds) !==
       JSON.stringify(['first', 'isolated', 'second']) ||
-    finalRecord.snapshot?.playerSessions?.['release.shared']?.resumeToken !==
-      'release-lane:shared:4' ||
-    finalRecord.snapshot?.playerSessions?.['release.isolated']?.resumeToken !==
-      'release-lane:isolated:2' ||
-    finalRecord.snapshot?.captain?.conversation?.kind !== 'pinned' ||
-    finalRecord.snapshot?.captain?.conversation?.token !==
-      'release-smoke:closing:lane-b:4' ||
+    JSON.stringify(finalRecord.retainedGenerations) !== '{}' ||
+    finalRecord.snapshot?.playerSessions?.['release.shared']?.resumeToken !== undefined ||
+    finalRecord.snapshot?.playerSessions?.['release.isolated']?.resumeToken !== undefined ||
+    finalRecord.snapshot?.captain?.conversation?.kind !== 'needsSeeding' ||
+    finalHints.players?.['release.shared'] !== 'release-lane:shared:4' ||
+    finalHints.players?.['release.isolated'] !== 'release-lane:isolated:2' ||
+    finalHints.captain?.token !== 'release-smoke:closing:lane-b:4' ||
     finalExecution?.captain?.model?.value !== 'release-smoke-captain-b' ||
     finalExecution?.captain?.effort?.value !== 'max' ||
+    finalExecution?.captain?.fastMode !== true ||
     finalPlayers['release.shared']?.model?.value !== 'release-player-b' ||
     finalPlayers['release.shared']?.effort?.value !== 'max' ||
+    finalPlayers['release.shared']?.fastMode !== false ||
     finalPlayers['release.isolated']?.model?.value !== 'release-player-b' ||
     finalPlayers['release.isolated']?.effort?.value !== 'max' ||
+    finalPlayers['release.isolated']?.fastMode !== false ||
     finalRoles?.first?.model?.value !== 'release-player-b' ||
     finalRoles?.first?.effort?.value !== 'max' ||
+    finalRoles?.first?.fastMode !== false ||
     finalRoles?.second?.model?.kind !== 'provider-default' ||
     finalRoles?.second?.effort?.kind !== 'provider-default' ||
+    finalRoles?.second?.fastMode !== true ||
     finalRoles?.isolated?.model?.value !== 'release-player-b' ||
-    finalRoles?.isolated?.effort?.value !== 'max'
+    finalRoles?.isolated?.effort?.value !== 'max' ||
+    finalRoles?.isolated?.fastMode !== true
   ) {
     fail(
       'cross-process lane continuation lost identity or current tuning',
@@ -1325,12 +2016,6 @@ function stepHermetic(root, state) {
     .split('\n')
     .map((line) => JSON.parse(line));
   assertSmokeCalls(calls);
-  if (existsSync(tmuxMarker)) {
-    fail(
-      'the installed headless Captain invoked tmux',
-      'The private PATH sentinel was executed during a no-presenter turn.',
-    );
-  }
   const status = run('git', ['status', '--porcelain'], { cwd: repo });
   if (status.stdout.trim() !== '') {
     fail(
@@ -1428,23 +2113,456 @@ function stepHermetic(root, state) {
     );
   }
 
+  const credentials = [
+    finalHints.captain?.token,
+    ...Object.values(finalHints.players ?? {}),
+  ].filter((value) => typeof value === 'string' && value.length > 0);
+  if (credentials.length < 3) {
+    fail(
+      'the CLI-written session has no acknowledged local hints',
+      JSON.stringify(credentials),
+    );
+  }
+  state.sessionStoreFixture = Object.freeze({
+    sessionsDir,
+    sessionId: firstEnvelope.sessionId,
+    oldSessionId: recoverEnvelope.sessionId,
+    oldSessionPath: recoverPath,
+    expectedSummary: Object.freeze({
+      schemaVersion: finalRecord.schemaVersion,
+      sessionId: finalRecord.sessionId,
+      state: finalRecord.state,
+      cwd: finalRecord.cwd,
+      updatedAt: finalRecord.updatedAt,
+    }),
+    credentials: Object.freeze(credentials),
+  });
+
   rmSync(driverPath);
+  rmSync(fastModeBoundaryDriverPath);
   return [
     'one provisioning line; both engine links resolve into the prefix',
     `stdin produced exact {sessionId,reply} with ${smokeToken}`,
     `four processes continued Captain session ${firstEnvelope.sessionId}`,
     'schema 3 retained two segmented player identities and frozen structure',
     'shared roles chained one token; the isolated player kept its own token',
-    'ordinary reopen applied current model and effort, including provider-default',
+    'ordinary reopen applied current model, effort, and literal fast mode',
+    'omitted fast mode kept the provider default; unsupported booleans ran no external hook',
     'continuation replayed no settled effect and invoked no tmux',
     'a second process advertised and applied the parked failure retry',
+  ];
+}
+
+// Step 6 — one real governed repository effect through the packed launcher,
+// installed Cligent transport, shared Captain, CLI host, and schema-3 runtime.
+// A resolved row proves receipt-owned commit identity; a second row parks on
+// exhausted semantic correction, then two successor processes reconcile and
+// abandon it without replaying either player or judge.
+function stepEffectReconciliation(root, state) {
+  const scenario = join(root, 'effect-reconciliation');
+  const repo = join(scenario, 'repo');
+  const continuationCwd = join(scenario, 'continuation-cwd');
+  const home = join(scenario, 'home');
+  const stateHome = join(scenario, 'state');
+  const callLog = join(scenario, 'agent-calls.ndjson');
+  const acceptedOidPath = join(scenario, 'accepted-commit-oid.txt');
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(continuationCwd, { recursive: true });
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(repo, '.gitignore'), 'node_modules/\n');
+  writeFileSync(join(repo, 'effect.playbook.mjs'), effectArtifactSource());
+  const configPath = join(repo, 'playbook.config.yaml');
+  writeFileSync(
+    configPath,
+    [
+      'captain: { adapter: claude, model: release-smoke-captain, effort: high }',
+      'players:',
+      '  effect.coder: { adapter: codex }',
+      'playbooks:',
+      '  effect:',
+      '    from: ./effect.playbook.mjs',
+      '    roles: { coder: effect.coder }',
+      '',
+    ].join('\n'),
+  );
+  for (const args of [
+    ['init', '-b', 'main'],
+    ['config', 'user.name', 'Playbook Release Smoke'],
+    ['config', 'user.email', 'smoke@sublang.invalid'],
+    ['config', 'commit.gpgsign', 'false'],
+    ['add', '.'],
+    ['commit', '-m', 'Initialize effect reconciliation fixture'],
+  ]) {
+    run('git', args, { cwd: repo });
+  }
+
+  const env = smokeEnv({
+    HOME: home,
+    SPEX_HOME: join(home, '.spex'),
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_STATE_HOME: stateHome,
+    ANTHROPIC_API_KEY: 'release-smoke-synthetic-readiness',
+    OPENAI_API_KEY: 'release-smoke-synthetic-readiness',
+    PLAYBOOK_SMOKE_CONFIG: configPath,
+    PLAYBOOK_SMOKE_AGENT_LOG: callLog,
+    PLAYBOOK_SMOKE_ACCEPTED_OID_PATH: acceptedOidPath,
+    PLAYBOOK_SMOKE_EFFECT_REPO: repo,
+  });
+  const processEnv = (name) => ({ ...env, PLAYBOOK_SMOKE_PROCESS: name });
+  const driverPath = join(
+    installedPackageRoot(state.optinPrefix),
+    'release-smoke-effect-reconciliation.mjs',
+  );
+  writeFileSync(driverPath, installedEffectReconciliationDriverSource());
+
+  const head = () =>
+    run('git', ['rev-parse', 'HEAD'], { cwd: repo }).stdout.trim();
+  const assertOneDescendant = (baseline, after, label) => {
+    run('git', ['merge-base', '--is-ancestor', baseline, after], { cwd: repo });
+    const count = run('git', ['rev-list', '--count', `${baseline}..${after}`], {
+      cwd: repo,
+    }).stdout.trim();
+    if (count !== '1') {
+      fail(`${label} did not create exactly one descendant commit`, count);
+    }
+    const status = run('git', ['status', '--porcelain'], { cwd: repo });
+    if (status.stdout.trim() !== '') {
+      fail(`${label} left repository residue`, status.stdout);
+    }
+  };
+  const expectedFinalText =
+    'Effect smoke commentary remained a complete message.\n' +
+    'Commit: not-the-observed-oid';
+  const assertBoundary = (
+    record,
+    { baselineHead, afterHead, resolved, label },
+  ) => {
+    const ledger = record.effectLedger;
+    if (
+      ledger?.boundaries?.length !== 1 ||
+      ledger.logicalOperations?.length !== 0 ||
+      JSON.stringify(record.snapshot?.effectLedger) !== JSON.stringify(ledger)
+    ) {
+      fail(
+        `${label} did not persist one mirrored physical boundary`,
+        JSON.stringify({ ledger, snapshotLedger: record.snapshot?.effectLedger }),
+      );
+    }
+    const boundary = ledger.boundaries[0];
+    const receipt = boundary.physicalReceipt;
+    const candidateMatches = resolved
+      ? JSON.stringify(boundary.semanticCandidate) ===
+        JSON.stringify({ guard: 'complete' })
+      : !Object.hasOwn(boundary, 'semanticCandidate');
+    if (
+      boundary.finalText !== expectedFinalText ||
+      boundary.baseline?.head !== baselineHead ||
+      boundary.after?.head !== afterHead ||
+      receipt?.classification !== 'one-descendant-commit' ||
+      receipt.baseline?.head !== baselineHead ||
+      receipt.after?.head !== afterHead ||
+      receipt.commitOid !== afterHead ||
+      boundary.correctionBudget?.limit !== 1 ||
+      boundary.correctionBudget?.spent !== !resolved ||
+      !candidateMatches
+    ) {
+      fail(
+        `${label} did not retain exact semantic and repository evidence`,
+        JSON.stringify(boundary),
+      );
+    }
+    return boundary;
+  };
+  const assertUnresolved = (record, baselineHead, afterHead, label) => {
+    const expectedKeys = [
+      'afterHead',
+      'baselineHead',
+      'classification',
+      'commitOid',
+    ];
+    const effect = record.unresolvedEffects?.[0];
+    if (
+      record.unresolvedEffects?.length !== 1 ||
+      JSON.stringify(Object.keys(effect ?? {}).sort()) !==
+        JSON.stringify(expectedKeys) ||
+      effect?.classification !== 'one-descendant-commit' ||
+      effect.baselineHead !== baselineHead ||
+      effect.afterHead !== afterHead ||
+      effect.commitOid !== afterHead
+    ) {
+      fail(
+        `${label} lost bounded unresolved-effect evidence`,
+        JSON.stringify(record.unresolvedEffects),
+      );
+    }
+  };
+  const sessionsDir = join(env.SPEX_HOME, 'sessions');
+  const sessionRecord = (id) => readJson(join(sessionsDir, `${id}.json`));
+
+  const resolvedBaseline = head();
+  const resolvedRun = run(process.execPath, [driverPath, 'run', '--json'], {
+    cwd: repo,
+    env: processEnv('effect-resolved'),
+    input: '/effect resolve from durable repository evidence\n',
+  });
+  expectOneOrderedLifecycle(resolvedRun.stderr, 'effect');
+  const resolvedEnvelope = parseExactHeadlessReply(
+    resolvedRun.stdout,
+    smokeToken,
+  );
+  const resolvedHead = head();
+  assertOneDescendant(resolvedBaseline, resolvedHead, 'resolved effect row');
+  if (
+    !existsSync(acceptedOidPath) ||
+    readFileSync(acceptedOidPath, 'utf8') !== `${resolvedHead}\n`
+  ) {
+    fail(
+      'resolved effect row did not deliver the receipt-owned commit OID',
+      existsSync(acceptedOidPath)
+        ? readFileSync(acceptedOidPath, 'utf8')
+        : 'accepted OID probe is absent',
+    );
+  }
+  const resolvedRecord = sessionRecord(resolvedEnvelope.sessionId);
+  assertBoundary(resolvedRecord, {
+    baselineHead: resolvedBaseline,
+    afterHead: resolvedHead,
+    resolved: true,
+    label: 'resolved effect row',
+  });
+  if (
+    resolvedRecord.schemaVersion !== 7 ||
+    resolvedRecord.state !== 'settled' ||
+    resolvedRecord.snapshot?.mode !== 'chat' ||
+    resolvedRecord.unresolvedEffects?.length !== 0
+  ) {
+    fail(
+      'resolved effect row did not settle from receipt authority',
+      JSON.stringify({
+        schemaVersion: resolvedRecord.schemaVersion,
+        state: resolvedRecord.state,
+        mode: resolvedRecord.snapshot?.mode,
+        unresolvedEffects: resolvedRecord.unresolvedEffects,
+      }),
+    );
+  }
+
+  rmSync(acceptedOidPath);
+  const parkedBaseline = head();
+  const parkedRun = run(process.execPath, [driverPath, 'run', '--json'], {
+    cwd: repo,
+    env: processEnv('effect-parked'),
+    input: '/effect park after bounded semantic failure\n',
+  });
+  if (
+    !parkedRun.stderr.includes('◇ /effect started') ||
+    parkedRun.stderr.includes('◇ /effect finished')
+  ) {
+    fail(
+      'unresolved effect row did not retain its engagement',
+      `stderr:\n${tail(parkedRun.stderr)}`,
+    );
+  }
+  const parkedHead = head();
+  assertOneDescendant(parkedBaseline, parkedHead, 'parked effect row');
+  if (existsSync(acceptedOidPath)) {
+    fail(
+      'semantically unresolved effect row published an accepted commit OID',
+      readFileSync(acceptedOidPath, 'utf8'),
+    );
+  }
+  const evidenceLine =
+    'Observed repository change: the step made one new commit; ' +
+    `HEAD moved from ${parkedBaseline} to the proven commit ${parkedHead}.`;
+  const unresolvedReply = [
+    smokeToken,
+    '',
+    'Repository-effect evidence:',
+    `- 1. ${evidenceLine}`,
+    'This evidence does not establish workflow completion or attribute any ' +
+      'repository change or commit to this workflow.',
+  ].join('\n');
+  const parkedReply = [
+    unresolvedReply,
+    '',
+    "Failure: the step's outcome could not be decided.",
+    'Controls:',
+    '- Retry unresolved effect reconciliation ' +
+      '(no-op: nothing has changed since it failed)',
+    '- Abandon unresolved workflow attempt (ready)',
+    '- Stop /effect (ready)',
+  ].join('\n');
+  const parkedEnvelope = parseExactHeadlessReply(
+    parkedRun.stdout,
+    parkedReply,
+  );
+  const parkedRecord = sessionRecord(parkedEnvelope.sessionId);
+  assertBoundary(parkedRecord, {
+    baselineHead: parkedBaseline,
+    afterHead: parkedHead,
+    resolved: false,
+    label: 'parked effect row',
+  });
+  assertUnresolved(
+    parkedRecord,
+    parkedBaseline,
+    parkedHead,
+    'parked effect row',
+  );
+  if (
+    parkedRecord.schemaVersion !== 7 ||
+    parkedRecord.state !== 'settled' ||
+    parkedRecord.snapshot?.mode !== 'engaged.parked' ||
+    parkedRecord.snapshot?.frames?.at(-1)?.playbookId !== 'effect'
+  ) {
+    fail(
+      'unresolved effect row did not persist its parked root',
+      JSON.stringify({
+        schemaVersion: parkedRecord.schemaVersion,
+        state: parkedRecord.state,
+        mode: parkedRecord.snapshot?.mode,
+        frames: parkedRecord.snapshot?.frames,
+      }),
+    );
+  }
+  const parkedLedgerBytes = JSON.stringify(parkedRecord.effectLedger);
+  const parkedEvidenceBytes = JSON.stringify(parkedRecord.unresolvedEffects);
+
+  const reconcileRun = run(
+    process.execPath,
+    [driverPath, 'run', '--session', parkedEnvelope.sessionId, '--json'],
+    {
+      cwd: continuationCwd,
+      env: processEnv('effect-reconcile'),
+      input: 'Reconcile the unresolved repository effect.\n',
+    },
+  );
+  parseExactHeadlessReply(
+    reconcileRun.stdout,
+    parkedReply,
+    parkedEnvelope.sessionId,
+  );
+  const reconciledRecord = sessionRecord(parkedEnvelope.sessionId);
+  if (
+    reconciledRecord.state !== 'settled' ||
+    reconciledRecord.snapshot?.mode !== 'engaged.parked' ||
+    JSON.stringify(reconciledRecord.effectLedger) !== parkedLedgerBytes ||
+    JSON.stringify(reconciledRecord.unresolvedEffects) !== parkedEvidenceBytes ||
+    head() !== parkedHead
+  ) {
+    fail(
+      'reconciliation retry changed exhausted evidence or replayed work',
+      JSON.stringify({
+        state: reconciledRecord.state,
+        mode: reconciledRecord.snapshot?.mode,
+        effectLedger: reconciledRecord.effectLedger,
+        unresolvedEffects: reconciledRecord.unresolvedEffects,
+      }),
+    );
+  }
+  const reconciledStatus = run('git', ['status', '--porcelain'], { cwd: repo });
+  if (reconciledStatus.stdout.trim() !== '') {
+    fail(
+      'effect reconciliation changed the repository worktree or index',
+      reconciledStatus.stdout,
+    );
+  }
+
+  const abandonRun = run(
+    process.execPath,
+    [driverPath, 'run', '--session', parkedEnvelope.sessionId, '--json'],
+    {
+      cwd: continuationCwd,
+      env: processEnv('effect-abandon'),
+      input: 'Abandon the unresolved repository effect.\n',
+    },
+  );
+  parseExactHeadlessReply(
+    abandonRun.stdout,
+    unresolvedReply,
+    parkedEnvelope.sessionId,
+  );
+  const abandonedRecord = sessionRecord(parkedEnvelope.sessionId);
+  if (
+    abandonedRecord.schemaVersion !== 7 ||
+    abandonedRecord.state !== 'settled' ||
+    abandonedRecord.snapshot?.mode !== 'chat' ||
+    (abandonedRecord.snapshot?.frames?.length ?? 0) !== 0 ||
+    JSON.stringify(abandonedRecord.effectLedger) !== parkedLedgerBytes ||
+    JSON.stringify(abandonedRecord.unresolvedEffects) !== parkedEvidenceBytes ||
+    abandonedRecord.settledAbandonment?.phase !== 'final' ||
+    abandonedRecord.settledAbandonment?.rootPlaybookId !== 'effect' ||
+    JSON.stringify(abandonedRecord.settledAbandonment?.unresolvedEffects) !==
+      parkedEvidenceBytes ||
+    Object.hasOwn(abandonedRecord.retainedGenerations ?? {}, 'effect') ||
+    head() !== parkedHead
+  ) {
+    fail(
+      'abandonment did not preserve evidence while clearing the root',
+      JSON.stringify({
+        state: abandonedRecord.state,
+        mode: abandonedRecord.snapshot?.mode,
+        frames: abandonedRecord.snapshot?.frames,
+        unresolvedEffects: abandonedRecord.unresolvedEffects,
+        settledAbandonment: abandonedRecord.settledAbandonment,
+        retainedGenerations: abandonedRecord.retainedGenerations,
+      }),
+    );
+  }
+  const finalStatus = run('git', ['status', '--porcelain'], { cwd: repo });
+  if (finalStatus.stdout.trim() !== '') {
+    fail(
+      'unresolved-effect controls changed the repository worktree or index',
+      finalStatus.stdout,
+    );
+  }
+
+  const calls = readFileSync(callLog, 'utf8')
+    .trimEnd()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  const expectedKinds = {
+    'effect-resolved': ['player', 'judge', 'closing'],
+    'effect-parked': ['player', 'judge', 'judge', 'closing'],
+    'effect-reconcile': ['selection', 'closing'],
+    'effect-abandon': ['selection', 'closing'],
+  };
+  for (const [processName, kinds] of Object.entries(expectedKinds)) {
+    const processCalls = calls.filter((call) => call.process === processName);
+    const actualKinds = processCalls.map((call) => call.kind);
+    if (JSON.stringify(actualKinds) !== JSON.stringify(kinds)) {
+      fail(
+        `${processName} crossed unexpected player or judge boundaries`,
+        JSON.stringify({ expected: kinds, actual: actualKinds, processCalls }),
+      );
+    }
+    if (processName !== 'effect-resolved') {
+      const closingPrompt = processCalls.find(
+        (call) => call.kind === 'closing',
+      )?.prompt;
+      if (!closingPrompt?.includes(evidenceLine)) {
+        fail(
+          `${processName} closing prompt omitted canonical effect evidence`,
+          closingPrompt,
+        );
+      }
+    }
+  }
+
+  rmSync(driverPath);
+  return [
+    `resolved session ${resolvedEnvelope.sessionId} accepted ${resolvedHead}`,
+    'result-less Codex commentary and misleading Commit prose stayed opaque',
+    `parked session ${parkedEnvelope.sessionId} retained ${parkedHead}`,
+    'a successor reconciliation replayed no player or judge',
+    'a later successor abandoned the root with its exact evidence preserved',
   ];
 }
 
 function smokeConfig(tuning) {
   const suffix = tuning === 'a' ? 'a' : 'b';
   return [
-    `captain: { adapter: claude, model: release-smoke-captain-${suffix}, effort: low }`,
+    `captain: { adapter: claude, model: release-smoke-captain-${suffix}, effort: low, fastMode: false }`,
     'players:',
     `  release.shared: { adapter: codex, model: release-player-${suffix}, effort: high }`,
     `  release.isolated: { adapter: codex, model: release-player-${suffix}, effort: high }`,
@@ -1458,8 +2576,8 @@ function smokeConfig(tuning) {
     '  lanes:',
     '    from: ./lanes.playbook.mjs',
     '    roles:',
-    '      first: release.shared',
-    `      second: { player: release.shared, model: release-second-${suffix}, effort: low }`,
+    '      first: { player: release.shared, fastMode: true }',
+    `      second: { player: release.shared, model: release-second-${suffix}, effort: low, fastMode: false }`,
     '      isolated: release.isolated',
     '',
   ].join('\n');
@@ -1467,14 +2585,30 @@ function smokeConfig(tuning) {
 
 function smokeRetuneOverlay() {
   return [
-    'captain: { model: release-smoke-captain-b, effort: max }',
+    'captain: { model: release-smoke-captain-b, effort: max, fastMode: true }',
     'players:',
-    '  release.shared: { model: release-player-b, effort: max }',
-    '  release.isolated: { model: release-player-b, effort: max }',
+    '  release.shared: { model: release-player-b, effort: max, fastMode: false }',
+    '  release.isolated: { model: release-player-b, effort: max, fastMode: false }',
     'playbooks:',
     '  lanes:',
     '    roles:',
-    '      second: { player: release.shared, model: false, effort: false }',
+    '      first: { player: release.shared, fastMode: false }',
+    '      second: { player: release.shared, model: false, effort: false, fastMode: true }',
+    '      isolated: { player: release.isolated, fastMode: true }',
+    '',
+  ].join('\n');
+}
+
+function unsupportedFastModeConfig(fastMode) {
+  return [
+    'captain: { adapter: claude }',
+    'players:',
+    `  release.unsupported: { adapter: ${unsupportedFastModeAdapterMarker} }`,
+    'playbooks:',
+    '  unsupported:',
+    '    from: ./must-not-prepare.playbook.mjs',
+    '    roles:',
+    `      worker: { player: release.unsupported, fastMode: ${String(fastMode)} }`,
     '',
   ].join('\n');
 }
@@ -1500,7 +2634,7 @@ function expectOneOrderedLifecycle(stderr, id) {
 
 function assertSmokeCalls(calls) {
   const expected = [
-    ['first', 'closing', null, null, 'release-smoke-captain-a', 'low'],
+    ['first', 'closing', null, null, 'release-smoke-captain-a', 'low', false],
     [
       'continued',
       'selection',
@@ -1508,8 +2642,9 @@ function assertSmokeCalls(calls) {
       'release-smoke:closing:first:1',
       'release-smoke-captain-a',
       'low',
+      false,
     ],
-    ['lane-a', 'player', 'first', null, 'release-player-a', 'high'],
+    ['lane-a', 'player', 'first', null, 'release-player-a', 'high', true],
     [
       'lane-a',
       'player',
@@ -1517,8 +2652,9 @@ function assertSmokeCalls(calls) {
       'release-lane:shared:1',
       'release-second-a',
       'low',
+      false,
     ],
-    ['lane-a', 'player', 'isolated', null, 'release-player-a', 'high'],
+    ['lane-a', 'player', 'isolated', null, 'release-player-a', 'high', null],
     [
       'lane-a',
       'closing',
@@ -1526,6 +2662,7 @@ function assertSmokeCalls(calls) {
       'release-smoke:selection:continued:1',
       'release-smoke-captain-a',
       'low',
+      false,
     ],
     [
       'lane-b',
@@ -1534,6 +2671,7 @@ function assertSmokeCalls(calls) {
       'release-lane:shared:2',
       null,
       null,
+      true,
     ],
     [
       'lane-b',
@@ -1542,6 +2680,7 @@ function assertSmokeCalls(calls) {
       'release-lane:shared:3',
       'release-player-b',
       'max',
+      false,
     ],
     [
       'lane-b',
@@ -1550,6 +2689,7 @@ function assertSmokeCalls(calls) {
       'release-lane:isolated:1',
       'release-player-b',
       'max',
+      true,
     ],
     [
       'lane-b',
@@ -1558,6 +2698,7 @@ function assertSmokeCalls(calls) {
       'release-smoke:closing:lane-a:4',
       'release-smoke-captain-b',
       'max',
+      true,
     ],
   ];
   const actual = calls.map((call) => [
@@ -1567,6 +2708,7 @@ function assertSmokeCalls(calls) {
     call.resume,
     call.model,
     call.effort,
+    call.fastMode,
   ]);
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     fail(
@@ -1576,7 +2718,7 @@ function assertSmokeCalls(calls) {
   }
 }
 
-// Step 6 — every installed compiled runtime: each public playbook subpath
+// Step 7 — every installed compiled runtime: each public playbook subpath
 // imports and constructs with its declared required contract surface.
 function stepCompiledRuntimeIntegrity(state) {
   const probePath = join(
@@ -1597,7 +2739,7 @@ function stepCompiledRuntimeIntegrity(state) {
   return probe.stdout.trimEnd().split('\n');
 }
 
-// Step 7 — compiled-artifact fidelity WITHOUT an agentic recompile. The
+// Step 8 — compiled-artifact fidelity WITHOUT an agentic recompile. The
 // deterministic Source → GEARS checker proves the mechanically decidable
 // preservation contract for each external workflow. The checked-in suites
 // then prove each artifact's GEARS ↔ FSM ↔ runtime contract, and byte equality
@@ -1607,7 +2749,7 @@ function stepCompiledFidelity(state) {
     state.packedPackage,
   ]);
 
-  const workflows = ['code', 'review', 'decide'];
+  const workflows = ['code', 'review', 'decide', 'dev', 'branch', 'pr'];
   for (const id of workflows) {
     run(process.execPath, [
       join(repoRoot, 'scripts', 'check-slc-source-gears.mjs'),
@@ -1661,12 +2803,18 @@ function stepCompiledFidelity(state) {
     'review.playbook/review.playbook.test.ts',
     'decide.playbook/decide.gears-fsm.test.ts',
     'decide.playbook/decide.playbook.test.ts',
+    'dev.playbook/dev.gears-fsm.test.ts',
+    'dev.playbook/dev.playbook.test.ts',
+    'branch.playbook/branch.gears-fsm.test.ts',
+    'branch.playbook/branch.playbook.test.ts',
+    'pr.playbook/pr.gears-fsm.test.ts',
+    'pr.playbook/pr.playbook.test.ts',
   ];
   const absent = requiredSuites.filter((suite) => !output.includes(suite));
   if (absent.length > 0) {
     fail(
       `the conformance run did not include ${absent.join(', ')}`,
-      'RELEASE-28 step 7 rests on the recorded source, transition, prompt, ' +
+      'RELEASE-28 step 8 rests on the recorded source, transition, prompt, ' +
         `topology, and runtime suites.\n${tail(output)}`,
     );
   }
@@ -1712,7 +2860,7 @@ function compareAgainstCommitted(packedPackage, roots) {
   return compared;
 }
 
-// Step 8 — the nested cligent floor. The complete release contract is proven
+// Step 9 — the nested cligent floor. The complete release contract is proven
 // by one type-checking fixture per capability against the nested copy through
 // `scripts/cligent-release-capabilities.mjs`. This avoids name searching,
 // which stays green when a spelling survives on an unrelated declaration or
@@ -1759,18 +2907,825 @@ function stepCligentFloor(root, state) {
       ].join('\n'),
     );
   }
+  const messageBoundaryProbe = join(
+    cligentRoot,
+    'playbook-message-boundary-probe.mjs',
+  );
+  writeFileSync(messageBoundaryProbe, cligentMessageBoundaryProbeSource());
+  run(process.execPath, [messageBoundaryProbe], { cwd: cligentRoot });
+  rmSync(messageBoundaryProbe);
   return [
     `nested @sublang/cligent ${installedVersion} satisfies ${declared}`,
     `${surface.specifier} type-checks ${surface.proven.join(' and ')}`,
+    'Codex commentary and final response remain separate complete messages',
   ];
+}
+
+// Step 10 — an external package whose only direct dependency is this exact
+// tarball. Its emitted strict TypeScript consumer imports only the public
+// session-store facade, so neither a repository source path nor the private
+// store can make the declaration or runtime proof pass by accident.
+// Steps 10 and 11 — an external package declaring only the candidate tarball,
+// installed from it into its own throwaway root, with the facade artifacts it
+// consumes proven present in that installation.
+function installPackedConsumer(root, state, { name, artifacts }) {
+  const consumerRoot = join(root, `${name}-consumer`);
+  mkdirSync(consumerRoot, { recursive: true });
+  const manifest = {
+    name: `playbook-${name}-smoke`,
+    private: true,
+    type: 'module',
+    dependencies: {
+      '@sublang/playbook': pathToFileURL(state.tarball).href,
+    },
+  };
+  writeFileSync(
+    join(consumerRoot, 'package.json'),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  );
+  run(
+    'npm',
+    [
+      'install',
+      '--ignore-scripts',
+      '--no-audit',
+      '--no-fund',
+      '--prefer-offline',
+    ],
+    { cwd: consumerRoot },
+  );
+  const installedManifest = readJson(join(consumerRoot, 'package.json'));
+  if (
+    JSON.stringify(Object.keys(installedManifest.dependencies ?? {})) !==
+    JSON.stringify(['@sublang/playbook'])
+  ) {
+    fail(
+      'the external consumer declared more than @sublang/playbook',
+      JSON.stringify(installedManifest.dependencies ?? {}),
+    );
+  }
+
+  const installed = join(
+    consumerRoot,
+    'node_modules',
+    '@sublang',
+    'playbook',
+  );
+  if (
+    !existsSync(installed) ||
+    !lstatSync(installed).isDirectory() ||
+    lstatSync(installed).isSymbolicLink()
+  ) {
+    fail('the external consumer did not install a real candidate directory');
+  }
+  const installedReal = realpathSync(installed);
+  const consumerReal = `${realpathSync(consumerRoot)}${sep}`;
+  const repositoryReal = `${realpathSync(repoRoot)}${sep}`;
+  if (
+    !`${installedReal}${sep}`.startsWith(consumerReal) ||
+    `${installedReal}${sep}`.startsWith(repositoryReal)
+  ) {
+    fail(
+      'the external consumer resolved outside its tarball installation',
+      installedReal,
+    );
+  }
+  const candidateManifest = readJson(join(installed, 'package.json'));
+  if (
+    candidateManifest.name !== state.packedManifest.name ||
+    candidateManifest.version !== state.packedManifest.version
+  ) {
+    fail(
+      'the external consumer installed a different candidate',
+      JSON.stringify({
+        expected: {
+          name: state.packedManifest.name,
+          version: state.packedManifest.version,
+        },
+        actual: {
+          name: candidateManifest.name,
+          version: candidateManifest.version,
+        },
+      }),
+    );
+  }
+  for (const artifact of artifacts) {
+    if (!existsSync(join(installed, artifact))) {
+      fail(`the packed ${name} consumer is missing ${artifact}`);
+    }
+  }
+  return consumerRoot;
+}
+
+// Type-check and emit the consumer with the development tree's compiler under
+// the consumer's own strict tsconfig, then run the emitted JavaScript from the
+// consumer's package scope so every import resolves through the installed
+// candidate's exports map.
+function compileAndRunPackedConsumer(consumerRoot, source, tsconfig) {
+  writeFileSync(join(consumerRoot, 'consumer.ts'), source);
+  writeFileSync(
+    join(consumerRoot, 'tsconfig.json'),
+    `${JSON.stringify(tsconfig, null, 2)}\n`,
+  );
+  const compiler = join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc');
+  if (!existsSync(compiler)) {
+    fail('the release smoke development tree has no TypeScript compiler');
+  }
+  run(process.execPath, [compiler, '--project', 'tsconfig.json'], {
+    cwd: consumerRoot,
+  });
+  run(process.execPath, [join('dist', 'consumer.js')], {
+    cwd: consumerRoot,
+  });
+}
+
+function stepPackedSessionStore(root, state) {
+  const fixture = state.sessionStoreFixture;
+  if (fixture === undefined) {
+    fail('the installed CLI produced no session-store smoke fixture');
+  }
+  const oldManifest = readJson(fixture.oldSessionPath);
+  if (
+    oldManifest.schemaVersion !== 7 ||
+    oldManifest.sessionId !== fixture.oldSessionId
+  ) {
+    fail(
+      'the CLI-written old-schema source manifest is not current and valid',
+      JSON.stringify({
+        schemaVersion: oldManifest.schemaVersion,
+        sessionId: oldManifest.sessionId,
+      }),
+    );
+  }
+  const {
+    unresolvedEffects: _unresolvedEffects,
+    replay: _replay,
+    contextSeq: _contextSeq,
+    ...preUnresolvedEffectsManifest
+  } = oldManifest;
+  const oldSchemaBytes = `${JSON.stringify({
+    ...preUnresolvedEffectsManifest,
+    schemaVersion: 5,
+  })}\n`;
+  writeFileSync(fixture.oldSessionPath, oldSchemaBytes);
+
+  const consumerRoot = installPackedConsumer(root, state, {
+    name: 'session-store',
+    artifacts: [
+      'reference/sdlc/code.playbook/session-store.js',
+      'reference/sdlc/code.playbook/session-store.d.ts',
+    ],
+  });
+  compileAndRunPackedConsumer(
+    consumerRoot,
+    sessionStoreConsumerSource(fixture),
+    sessionStoreConsumerTsconfig(),
+  );
+  if (readFileSync(fixture.oldSessionPath, 'utf8') !== oldSchemaBytes) {
+    fail('the external consumer migrated or rewrote the old-schema manifest');
+  }
+
+  return [
+    'one tarball-only dependency; no repository or private-store import',
+    'strict declaration check passed with skipLibCheck false',
+    'exact token-free summary listed and read from the CLI manifest',
+    'independent follower saw readable advancement without durability claims',
+    'release equalized replay durability; schema 5 stayed byte-identical',
+  ];
+}
+
+function sessionStoreConsumerTsconfig() {
+  return {
+    compilerOptions: {
+      module: 'NodeNext',
+      moduleResolution: 'NodeNext',
+      target: 'ES2022',
+      lib: ['ES2022'],
+      strict: true,
+      skipLibCheck: false,
+      types: [],
+      rootDir: '.',
+      outDir: 'dist',
+      noEmitOnError: true,
+    },
+    files: ['consumer.ts'],
+  };
+}
+
+function sessionStoreConsumerSource(fixture) {
+  return `import {
+  RECORDS_STREAM_VERSION,
+  openSessionStore,
+  type PlaybookSessionSummary,
+  type ReplayStreamEntry,
+} from '@sublang/playbook/session-store';
+
+const sessionsDir = ${JSON.stringify(fixture.sessionsDir)};
+const sessionId = ${JSON.stringify(fixture.sessionId)};
+const oldSessionId = ${JSON.stringify(fixture.oldSessionId)};
+const expectedSummary: PlaybookSessionSummary = ${JSON.stringify(fixture.expectedSummary)};
+const credentials: readonly string[] = ${JSON.stringify(fixture.credentials)};
+
+function check(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+function exactKeys(value: object, expected: readonly string[], label: string) {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  check(
+    JSON.stringify(actual) === JSON.stringify(wanted),
+    label + ' keys: expected ' + JSON.stringify(wanted) +
+      ', got ' + JSON.stringify(actual),
+  );
+}
+
+function sameJson(actual: unknown, expected: unknown, label: string) {
+  check(
+    JSON.stringify(canonicalJson(actual)) ===
+      JSON.stringify(canonicalJson(expected)),
+    label + ': expected ' + JSON.stringify(expected) +
+      ', got ' + JSON.stringify(actual),
+  );
+}
+
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, canonicalJson(nested)]),
+    );
+  }
+  return value;
+}
+
+function hasOwnKey(value: unknown, key: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasOwnKey(entry, key));
+  }
+  if (value === null || typeof value !== 'object') return false;
+  if (Object.hasOwn(value, key)) return true;
+  return Object.values(value).some((entry) => hasOwnKey(entry, key));
+}
+
+function hasStringOwnValue(value: unknown, key: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasStringOwnValue(entry, key));
+  }
+  if (value === null || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  if (Object.hasOwn(record, key) && typeof record[key] === 'string') {
+    return true;
+  }
+  return Object.values(record).some((entry) => hasStringOwnValue(entry, key));
+}
+
+check(RECORDS_STREAM_VERSION === 1, 'records stream version is not 1');
+const store = openSessionStore(sessionsDir);
+exactKeys(
+  store,
+  ['sessionsDir', 'list', 'read', 'readStream', 'acquire'],
+  'store',
+);
+const listed = await store.list();
+exactKeys(listed, ['sessions', 'skipped'], 'list result');
+const listedSummary = listed.sessions.find(
+  (summary) => summary.sessionId === sessionId,
+);
+check(listedSummary !== undefined, 'CLI-written session was not listed');
+exactKeys(
+  listedSummary,
+  ['cwd', 'schemaVersion', 'sessionId', 'state', 'updatedAt'],
+  'listed summary',
+);
+sameJson(listedSummary, expectedSummary, 'listed summary');
+const skipped = listed.skipped.find((entry) => entry.sessionId === oldSessionId);
+check(skipped !== undefined, 'schema-5 session was not reported as skipped');
+exactKeys(skipped, ['sessionId', 'reason'], 'skipped session');
+check(
+  skipped.reason.includes('5') && /schema|cutover|current/i.test(skipped.reason),
+  'schema-5 skip reason did not identify the cutover',
+);
+
+const direct = await store.read(sessionId);
+exactKeys(
+  direct,
+  ['cwd', 'schemaVersion', 'sessionId', 'state', 'updatedAt'],
+  'direct summary',
+);
+sameJson(direct, expectedSummary, 'direct summary');
+const summaryJson = JSON.stringify(direct);
+for (const credential of credentials) {
+  check(!summaryJson.includes(credential), 'summary exposed a resume credential');
+}
+
+const follower = openSessionStore(sessionsDir);
+const baselineRead = await follower.readStream(sessionId);
+exactKeys(baselineRead, ['entries', 'lastReadableSeq'], 'baseline follower');
+const baselineJson = JSON.stringify(baselineRead);
+for (const credential of credentials) {
+  check(
+    !baselineJson.includes(credential),
+    'CLI-written replay exposed a resume credential',
+  );
+}
+check(
+  !hasOwnKey(baselineRead, 'resumeToken'),
+  'CLI-written replay retained a resumeToken member',
+);
+check(
+  !hasStringOwnValue(baselineRead, 'resume'),
+  'CLI-written replay retained a string resume selection',
+);
+const baseline = baselineRead.lastReadableSeq;
+check(
+  Number.isSafeInteger(baseline) && baseline >= 0,
+  'baseline readable sequence was invalid',
+);
+check(
+  baselineRead.entries.length === baseline,
+  'baseline full-prefix entry count did not equal its final sequence',
+);
+
+const lease = await store.acquire(sessionId);
+exactKeys(
+  lease,
+  ['sessionId', 'ownerToken', 'append', 'readStream', 'streamStatus', 'release'],
+  'lease',
+);
+sameJson(
+  lease.streamStatus(),
+  {
+    lastReadableSeq: baseline,
+    lastDurableSeq: baseline,
+    incomplete: false,
+  },
+  'initial lease status',
+);
+
+interface ExternalObservedRecord {
+  readonly type: 'external_peer_record';
+  readonly content: string;
+  readonly resume: false;
+  readonly resumeToken?: string;
+  readonly nested: {
+    readonly resume: string;
+    readonly resumeToken: string;
+    readonly retained: { readonly resume: false };
+  };
+}
+const observed: ExternalObservedRecord = {
+  type: 'external_peer_record',
+  content: 'packed facade replay',
+  resume: false,
+  resumeToken: 'strip-top-level',
+  nested: {
+    resume: 'strip-selection',
+    resumeToken: 'strip-nested',
+    retained: { resume: false },
+  },
+};
+const appendResult = await lease.append(observed, 'external');
+check(appendResult === undefined, 'append did not resolve undefined');
+const nextSequence = baseline + 1;
+const expectedEntry: ReplayStreamEntry = {
+  v: 1,
+  seq: nextSequence,
+  role: 'external',
+  record: {
+    type: 'external_peer_record',
+    content: 'packed facade replay',
+    resume: false,
+    nested: { retained: { resume: false } },
+  },
+};
+sameJson(
+  lease.streamStatus(),
+  {
+    lastReadableSeq: nextSequence,
+    lastDurableSeq: baseline,
+    incomplete: false,
+  },
+  'readable-ahead-of-durable status',
+);
+const leaseRead = await lease.readStream({ afterSeq: baseline });
+exactKeys(
+  leaseRead,
+  ['entries', 'lastReadableSeq', 'lastDurableSeq', 'incomplete'],
+  'lease read',
+);
+sameJson(leaseRead.entries, [expectedEntry], 'lease replay');
+check(
+  !JSON.stringify(leaseRead).includes('strip-'),
+  'replay exposed a resume credential',
+);
+
+const followed = await follower.readStream(sessionId, { afterSeq: baseline });
+exactKeys(followed, ['entries', 'lastReadableSeq'], 'independent follower');
+sameJson(followed.entries, [expectedEntry], 'independent follower replay');
+check(
+  followed.lastReadableSeq === nextSequence,
+  'independent follower missed readable advancement',
+);
+// @ts-expect-error lease-free results cannot claim durability
+followed.lastDurableSeq;
+// @ts-expect-error lease-free results cannot claim incompleteness
+followed.incomplete;
+
+const finalStatus = await lease.release();
+exactKeys(
+  finalStatus,
+  ['lastReadableSeq', 'lastDurableSeq', 'incomplete'],
+  'release status',
+);
+sameJson(
+  finalStatus,
+  {
+    lastReadableSeq: nextSequence,
+    lastDurableSeq: nextSequence,
+    incomplete: false,
+  },
+  'equalized release status',
+);
+const replayed = await follower.readStream(sessionId, { afterSeq: baseline });
+sameJson(replayed.entries, [expectedEntry], 'post-release replay');
+
+let oldSchemaRejected = false;
+try {
+  await store.read(oldSessionId);
+} catch (error) {
+  check(error instanceof Error, 'old-schema read rejected with a non-Error');
+  check(
+    !Object.hasOwn(error, 'code'),
+    'old-schema rejection used a reserved facade code',
+  );
+  oldSchemaRejected = true;
+}
+check(oldSchemaRejected, 'schema-5 record was not rejected');
+`;
+}
+
+// Step 11 — RELEASE-28 / DR-046: an external consumer of the packed
+// `@sublang/playbook/host-capabilities` facade constructs live capabilities on
+// a fresh Git worktree, drives one exclusive governed operation that commits,
+// spends the correction budget through `writeAhead` mid-completion, classifies
+// one unchanged operation, observes and classifies through the module
+// functions, and proves the fail-closed constructor — all under
+// `skipLibCheck: false` against the packed declaration.
+function stepPackedHostCapabilities(root, state) {
+  const repo = join(root, 'host-capabilities-worktree');
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(
+    join(repo, 'README.md'),
+    'Release smoke host-capabilities fixture.\n',
+  );
+  for (const args of [
+    ['init', '-b', 'main'],
+    ['config', 'user.name', 'Playbook Release Smoke'],
+    ['config', 'user.email', 'smoke@sublang.invalid'],
+    ['config', 'commit.gpgsign', 'false'],
+    ['add', '.'],
+    ['commit', '-m', 'Initialize host-capabilities fixture'],
+  ]) {
+    run('git', args, { cwd: repo });
+  }
+  const head = () =>
+    run('git', ['rev-parse', 'HEAD'], { cwd: repo }).stdout.trim();
+  const baselineHead = head();
+  const fixture = Object.freeze({ repo: realpathSync(repo), baselineHead });
+
+  const consumerRoot = installPackedConsumer(root, state, {
+    name: 'host-capabilities',
+    artifacts: [
+      'reference/sdlc/code.playbook/host-capabilities.js',
+      'reference/sdlc/code.playbook/host-capabilities.d.ts',
+      'reference/sdlc/code.playbook/bin/repository-effects.js',
+    ],
+  });
+  compileAndRunPackedConsumer(
+    consumerRoot,
+    hostCapabilitiesConsumerSource(fixture),
+    hostCapabilitiesConsumerTsconfig(),
+  );
+
+  const afterHead = head();
+  if (afterHead === baselineHead) {
+    fail('the external consumer created no governed commit');
+  }
+  run('git', ['merge-base', '--is-ancestor', baselineHead, afterHead], {
+    cwd: repo,
+  });
+  const count = run(
+    'git',
+    ['rev-list', '--count', `${baselineHead}..${afterHead}`],
+    { cwd: repo },
+  ).stdout.trim();
+  if (count !== '1') {
+    fail('the external consumer did not create exactly one descendant commit', count);
+  }
+  const status = run('git', ['status', '--porcelain'], { cwd: repo });
+  if (status.stdout.trim() !== '') {
+    fail('the external consumer left repository residue', status.stdout);
+  }
+  if (existsSync(join(repo, '.git', 'playbook-effect-claims', 'active'))) {
+    fail('the external consumer left the worktree claim active');
+  }
+
+  return [
+    'one tarball-only dependency; no repository or private-module import',
+    'strict declaration check passed with skipLibCheck false',
+    'exclusive governed commit classified one-descendant-commit with its OID',
+    'mid-completion correction-budget spend retained through writeAhead',
+    'unchanged operation classified; module observation and classification agree',
+    'fail-closed capabilities rejected every operation; worktree claim released',
+  ];
+}
+
+function hostCapabilitiesConsumerTsconfig() {
+  return {
+    compilerOptions: {
+      module: 'NodeNext',
+      moduleResolution: 'NodeNext',
+      target: 'ES2022',
+      lib: ['ES2022'],
+      strict: true,
+      skipLibCheck: false,
+      // The consumer's own Git and filesystem work needs Node's globals; the
+      // facade declaration itself imports nothing.
+      types: ['node'],
+      typeRoots: [join(repoRoot, 'node_modules', '@types')],
+      rootDir: '.',
+      outDir: 'dist',
+      noEmitOnError: true,
+    },
+    files: ['consumer.ts'],
+  };
+}
+
+function hostCapabilitiesConsumerSource(fixture) {
+  return `import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  REPOSITORY_RECEIPT_CLASSIFICATIONS,
+  captureRepositoryReceipt,
+  classifyRepositoryReceipt,
+  createFailClosedHostCapabilities,
+  createWorktreeHostCapabilities,
+  observeGitRepository,
+  type EffectBoundarySeed,
+  type PlaybookEffectLedger,
+  type PlaybookRepositoryDisposition,
+  type RepositoryCompletionEvidence,
+  type WorktreeHostCapabilities,
+} from '@sublang/playbook/host-capabilities';
+
+const repo = ${JSON.stringify(fixture.repo)};
+const baselineHead = ${JSON.stringify(fixture.baselineHead)};
+
+function check(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+function exactKeys(value: object, expected: readonly string[], label: string) {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  check(
+    JSON.stringify(actual) === JSON.stringify(wanted),
+    label + ' keys: expected ' + JSON.stringify(wanted) +
+      ', got ' + JSON.stringify(actual),
+  );
+}
+
+function git(...args: string[]): string {
+  return execFileSync('git', args, {
+    cwd: repo,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function seed(
+  dispositions: readonly PlaybookRepositoryDisposition[],
+): EffectBoundarySeed {
+  return {
+    boundaryId: randomUUID(),
+    runtimeSessionId: randomUUID(),
+    turnId: 1,
+    callId: 'player-1',
+    roleId: 'coder',
+    sourceStateId: 'work',
+    sourceOutcomeSchema: {},
+    dispositions,
+    correctionBudget: { limit: 1, spent: false },
+  };
+}
+
+function assertLedger(
+  ledger: PlaybookEffectLedger,
+  revision: number,
+  boundaries: number,
+  label: string,
+) {
+  check(ledger.schemaVersion === 1, label + ': ledger schema is not 1');
+  check(ledger.revision === revision, label + ': revision ' + ledger.revision + ' is not ' + revision);
+  check(ledger.boundaries.length === boundaries, label + ': boundary count is not ' + boundaries);
+  ledger.boundaries.forEach((boundary, index) => {
+    check(boundary.sequence === index + 1, label + ': boundary sequence is not contiguous');
+  });
+  check(ledger.logicalOperations.length === 0, label + ': unexpected logical operation');
+}
+
+check(
+  REPOSITORY_RECEIPT_CLASSIFICATIONS.length === 7 &&
+    REPOSITORY_RECEIPT_CLASSIFICATIONS.includes('unchanged') &&
+    REPOSITORY_RECEIPT_CLASSIFICATIONS.includes('one-descendant-commit') &&
+    REPOSITORY_RECEIPT_CLASSIFICATIONS.includes('observation-ambiguous'),
+  'receipt classifications are not the seven declared values',
+);
+
+const capabilities: WorktreeHostCapabilities =
+  await createWorktreeHostCapabilities({
+    cwd: repo,
+    playbookId: 'smoke',
+    requiredRoleIds: ['coder'],
+  });
+exactKeys(capabilities, ['repository', 'effectLedger'], 'capabilities');
+exactKeys(
+  capabilities.repository,
+  ['identity', 'observe', 'acquire', 'runExclusive', 'runDeferred'],
+  'repository',
+);
+exactKeys(capabilities.effectLedger, ['snapshot', 'writeAhead'], 'effect ledger');
+check(
+  capabilities.repository.identity.worktree === repo,
+  'canonical worktree differs from the fixture',
+);
+assertLedger(capabilities.effectLedger.snapshot(), 0, 0, 'initial ledger');
+
+const baseline = await capabilities.repository.observe();
+check(baseline.head === baselineHead, 'baseline observation did not report HEAD');
+check(
+  Object.keys(baseline.projection).length === 0,
+  'clean fixture reported a dirty projection',
+);
+
+let spentInsideCompletion = false;
+const committed = await capabilities.repository.runExclusive({
+  signal: new AbortController().signal,
+  effectBoundary: seed(['one-descendant-commit']),
+  operation: async ({ baseline: observed, identity }) => {
+    check(observed.head === baselineHead, 'operation baseline is not HEAD');
+    check(identity.worktree === repo, 'operation identity is not the fixture');
+    writeFileSync(join(repo, 'change.txt'), 'packed facade change\\n');
+    git('add', '--', 'change.txt');
+    git('commit', '-m', 'Record packed facade change');
+    return 'committed';
+  },
+  completeEffectBoundary: async ({
+    boundary,
+    operation,
+    receipt,
+    outcomeReceipt,
+  }): Promise<RepositoryCompletionEvidence> => {
+    check(
+      operation.status === 'fulfilled' && operation.value === 'committed',
+      'completion did not receive the fulfilled operation',
+    );
+    check(
+      receipt.classification === outcomeReceipt.classification,
+      'exclusive completion receipts disagree',
+    );
+    check(boundary.correctionBudget.spent === false, 'budget was spent early');
+    const spent = await capabilities.effectLedger.writeAhead([
+      {
+        kind: 'replace-boundaries',
+        replacements: [
+          {
+            expected: boundary,
+            next: { ...boundary, correctionBudget: { limit: 1, spent: true } },
+          },
+        ],
+      },
+    ]);
+    spentInsideCompletion =
+      spent.boundaries[0]?.correctionBudget.spent === true;
+    return { finalText: 'committed', semanticCandidate: { guard: 'complete' } };
+  },
+});
+const afterHead = git('rev-parse', 'HEAD');
+check(afterHead !== baselineHead, 'the governed operation did not commit');
+check(
+  committed.receipt.classification === 'one-descendant-commit',
+  'commit classified as ' + committed.receipt.classification,
+);
+check(
+  committed.receipt.commitOid === afterHead &&
+    committed.receipt.after?.head === afterHead,
+  'receipt did not carry the observed commit OID',
+);
+check(spentInsideCompletion, 'mid-completion writeAhead did not spend the budget');
+assertLedger(committed.effectLedger, 3, 1, 'committed ledger');
+const settled = committed.effectLedger.boundaries[0];
+check(
+  settled !== undefined &&
+    settled.correctionBudget.spent === true &&
+    settled.finalText === 'committed' &&
+    settled.physicalReceipt?.classification === 'one-descendant-commit' &&
+    settled.physicalReceipt.commitOid === afterHead,
+  'settled boundary lost its receipt or completion evidence',
+);
+check(
+  JSON.stringify(settled.semanticCandidate) === JSON.stringify({ guard: 'complete' }),
+  'settled boundary lost its semantic candidate',
+);
+
+const idle = await capabilities.repository.runExclusive({
+  effectBoundary: seed(['unchanged']),
+  operation: async () => 'idle',
+  completeEffectBoundary: () => ({ finalText: 'idle' }),
+});
+check(
+  idle.receipt.classification === 'unchanged' && idle.receipt.commitOid === undefined,
+  'idle operation classified as ' + idle.receipt.classification,
+);
+assertLedger(idle.effectLedger, 5, 2, 'idle ledger');
+check(
+  JSON.stringify(capabilities.effectLedger.snapshot()) ===
+    JSON.stringify(idle.effectLedger),
+  'snapshot diverged from the acknowledged ledger',
+);
+
+const observation = await observeGitRepository(repo);
+check(
+  observation.head === afterHead &&
+    observation.gitDir === capabilities.repository.identity.gitDir,
+  'module observation disagrees with the capability',
+);
+const captured = await captureRepositoryReceipt(observation, {
+  allowedDispositions: ['unchanged'],
+});
+check(captured.classification === 'unchanged', 'capture classified as ' + captured.classification);
+const classified = await classifyRepositoryReceipt(
+  committed.receipt.baseline,
+  observation,
+  { allowedDispositions: ['one-descendant-commit'] },
+);
+check(
+  classified.classification === 'one-descendant-commit' &&
+    classified.commitOid === afterHead,
+  'module classification disagrees with the exclusive receipt',
+);
+
+const closed = createFailClosedHostCapabilities();
+exactKeys(closed, ['repository', 'effectLedger'], 'fail-closed capabilities');
+exactKeys(closed.repository, ['runExclusive', 'runDeferred'], 'fail-closed repository');
+let closedRejected = false;
+try {
+  await closed.repository.runExclusive({
+    effectBoundary: seed(['unchanged']),
+    operation: async () => undefined,
+    completeEffectBoundary: () => ({}),
+  });
+} catch {
+  closedRejected = true;
+}
+check(closedRejected, 'fail-closed repository ran a governed operation');
+assertLedger(closed.effectLedger.snapshot(), 0, 0, 'fail-closed ledger');
+check(
+  !existsSync(join(repo, '.git', 'playbook-effect-claims', 'active')),
+  'the worktree claim was not released',
+);
+const claim = await capabilities.repository.acquire();
+await claim.assertOwner();
+await claim.release();
+// @ts-expect-error the worktree claim carries no session lease
+claim.sessionLease;
+// @ts-expect-error the facade carries no cohort transaction
+capabilities.repository.runCohort;
+`;
 }
 
 export const _testing = Object.freeze({
   stepHermetic,
+  stepEffectReconciliation,
   smokeConfig,
   smokeRetuneOverlay,
+  unsupportedFastModeAdapterMarker,
+  unsupportedFastModeConfig,
   assertSmokeCalls,
+  effectArtifactSource,
+  installedEffectReconciliationDriverSource,
+  installedFastModeBoundaryDriverSource,
   compiledRuntimeImportProbeSource,
+  cligentMessageBoundaryProbeSource,
+  sessionStoreConsumerSource,
+  sessionStoreConsumerTsconfig,
+  hostCapabilitiesConsumerSource,
+  hostCapabilitiesConsumerTsconfig,
 });
 
 if (

@@ -8,9 +8,10 @@
 
 # The Captain and each stable session player carries its own defaults inline:
 # an adapter shorthand (claude, codex) or a block with
-# adapter/model/effort/permissions. A role may override only model or effort.
-# Omit an override to inherit the player default; set it to false to select
-# that provider's current default explicitly.
+# adapter/model/effort/fastMode/permissions. A role may override only model,
+# effort, or fastMode.
+# Omit an override to inherit the player default. For model and effort, false
+# selects the provider default; fastMode false is a literal disabled request.
 
 # Each adapter needs its vendor SDK installed as its own top-level
 # install root — they are optional peer dependencies, so you pay only
@@ -20,7 +21,8 @@
 # Drop an adapter from this file and you can skip its SDK entirely.
 # Every seeded agent runs in cligent's protected auto mode
 # (permissions.mode: auto): claude maps it to permissionMode auto, codex to
-# on-request + auto_review. Codex roles also grant writablePaths: ['.git']
+# on-request + auto_review. A codex agent additionally needs
+# writablePaths: ['.git'] to write git metadata under its sandbox.
 # so they can inspect and work with repository metadata under the sandbox.
 
 # The Captain/Judge agent.
@@ -29,7 +31,7 @@
 # list, so those captains degrade to a prompt-level restriction (DR-013 A1).
 captain:
   adapter: claude
-  model: claude-opus-4-8
+  model: claude-opus-5-5
   effort: high
   permissions:
     mode: auto
@@ -46,26 +48,38 @@ notifications:
 players:
   dev.coder:
     adapter: claude
-    model: claude-opus-4-8[1m]
-    effort: xhigh
+    model: claude-opus-5-5
+    effort: high
+    # Adapter-scoped fast mode is validated by the installed Cligent contract;
+    # omitting it takes the provider default.
     permissions:
       mode: auto
 
   dev.reviewer:
-    adapter: codex
-    model: gpt-5.5
+    adapter: claude
+    model: claude-opus-5-5
     effort: xhigh
     permissions:
       mode: auto
-      writablePaths: ['.git']
+
+  # DEV's planner stays a distinct player: equal ids deliberately share one
+  # provider conversation, and planning context must not bleed into review
+  # conversations (DR-044).
+  dev.analyst:
+    adapter: claude
+    model: claude-opus-5-5
+    effort: xhigh
+    permissions:
+      mode: auto
 
 # Enabled playbooks. Each is loaded from its explicit `from` module; the
 # `<id>` key must equal that module's manifest id. `from`, `command`, and
 # `roles` are launcher-owned; every other key is that playbook's option
 # slice.
 #
-# Every manifest role is bound explicitly. These three playbooks intentionally
-# reuse the same two stable players; change an id to isolate its conversation.
+# Every manifest role is bound explicitly. CODE, REVIEW, DECIDE, BRANCH, and
+# PR intentionally reuse the same two stable players, while DEV keeps its own
+# Analyst; change an id to isolate its conversation.
 playbooks:
   code:
     from: "@sublang/playbook/code/registry"
@@ -83,3 +97,22 @@ playbooks:
     roles:
       coder: dev.coder
       reviewer: dev.reviewer
+
+  dev:
+    from: "@sublang/playbook/dev/registry"
+    roles:
+      analyst: dev.analyst
+
+  # Pull-request delivery for DEV (DR-050). BRANCH and PR bind Coder to the
+  # same dev.coder player as CODE and REVIEW on purpose: the Coder that read
+  # the issue and named the branch makes the commits and then describes
+  # them in the pull request. Change an id to isolate its conversation.
+  branch:
+    from: "@sublang/playbook/branch/registry"
+    roles:
+      coder: dev.coder
+
+  pr:
+    from: "@sublang/playbook/pr/registry"
+    roles:
+      coder: dev.coder

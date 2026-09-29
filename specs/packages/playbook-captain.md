@@ -74,6 +74,7 @@ explicit stop request dismisses; an explicit replacement request
 switches; and an explicit recovery or resume request may execute one
 runtime-advertised action
 ([[playbook-captain-8](playbook-captain.md#playbook-captain-8)]).
+While an engagement is live, its delivered text and advertised runtime actions shall take precedence over retained-generation adoption, and a `resume` selection shall reject without changing either generation.
 While an acting-agent question is pending on the active leaf, when the Boss
 answers, the shell shall deliver the answer to that same leaf, which
 shall resume its suspended state with the answer in context.
@@ -85,11 +86,12 @@ shall resume its suspended state with the answer in context.
 Where the Playbook Captain shell is running under tmux-play, while
 a playbook is engaged, when the engaged runtime emits status or
 telemetry, the shell shall pass those emissions through to the host
-in order.
+in order, except question statuses marked `{ kind: "boss-question" }`, whose wording the Captain supplies from the complete pending questions [[playbook-captain-9](#playbook-captain-9)] in its closing reply.
 Where the Playbook Captain shell is running under tmux-play, when
 the shell engages, dismisses, or disposes an enabled external root playbook,
 the shell shall emit Boss-visible Captain status lines
 `◇ /<command> started` when it engages the playbook,
+`◇ /<command> resumed` when it adopts a retained generation,
 `◇ /<command> stopped` when the engagement is dismissed, and
 `◇ /<command> finished` when it disposes the playbook after final
 completion, using the registered slash command such as `/code`
@@ -124,6 +126,7 @@ for a validated `switch`, that idle state lasts only until the same
 turn starts the target playbook ([[playbook-captain-2](#playbook-captain-2)]).
 Nested child completion and dismissal shall instead follow
 [[playbook-captain-28](#playbook-captain-28)].
+A Boss-turn cancellation signal shall reach a runtime operation only while that operation is active; a previously returned parked child shall remain owned by its suspended parent until explicit return, dismissal or disposal ([DR-071](../decisions/071-interrupted-continuation-settlement.md)).
 
 #### playbook-captain-19
 
@@ -140,7 +143,7 @@ This single-attempt rule applies to every captain reply, including a
 `respond` reply and a recovery failure reply.
 The closing reply shall use a natural chat-like tone and clear
 formatting while remaining brief.
-It shall state only what was done or what changed, composed from the
+It shall state what was done or changed and relay all current pending questions [[captain-playbook-5](captain-playbook.md#captain-playbook-5)], grounding effects in the
 turn's reported outcome — the settlement facts — and shall claim no
 work the outcome report does not contain.
 When the closing reply mentions progress detail, it shall use only
@@ -153,24 +156,26 @@ The closing reply shall not include counts for plan or
 implementation steps, tests-green state ids, other internal states,
 raw state names, transitions, guard names, prompts, tools, hidden
 calls, or reasoning.
-Where the engaged playbook's registry entry declares a summary
+Where the counting owner defined by [[playbook-captain-20](#playbook-captain-20)] declares a summary
 policy, while the turn's counted activity — the saved interruptions,
 saved copy-pastes, and summary-visible rounds counted per
 [[playbook-captain-20](playbook-captain.md#playbook-captain-20)] — is nonzero,
 the closing reply shall then append one saved-counts line whose
-wording the engaged playbook's registry entry supplies through its
+wording that entry supplies through its
 summary policy; for CODE that line has the format:
 `Saved you X interruptions and Y copy-pastes across Z rounds of reviews/rebuttals.`
 The saved-counts line shall use natural singular forms when a count
 is one.
 In that line, `X`, `Y`, and `Z` are decimal counts for that turn.
-Interruptions are player replies that Boss did not have to relay,
+Interruptions are player replies that Boss did not have to relay —
+a player's Boss-question suspension (`needsBossReply`) parks on Boss
+instead and is never one —
 copy-pastes are inter-player handoffs — including reviews,
 rebuttals, revisions, approvals, and passes — that Boss did not
 have to transfer manually, and review/rebuttal rounds are the
 counted review-round and rebuttal occurrences for that turn.
-When the turn's counted activity is zero, when the active registry
-entry declares no summary policy, or when the Boss turn settles as
+When the turn's counted activity is zero, when the counting owner defined by
+[[playbook-captain-20](#playbook-captain-20)] declares no summary policy, or when the Boss turn settles as
 `respond`, the saved-counts line shall not appear, so text
 beginning `Saved you` never follows a turn that saved nothing.
 
@@ -237,13 +242,15 @@ from the remembered result without requiring the Boss to restate it.
 
 When the Captain cannot produce the normal reply after bounded
 recovery, the shell shall attempt one Boss-appropriate failure reply
-that states only established facts, preserves the engagement, and
-names a safe next step.
+that states only established facts, assembled as
+[[playbook-captain-69](#playbook-captain-69)] states, preserves the
+engagement, and names a safe next step.
+It shall append the complete original pending question as a clearly identified quote without replacing the truthful action-result reply ([DR-071](../decisions/071-interrupted-continuation-settlement.md)).
 If that presentation rejects, the shell shall surface the boundary
 failure without another presentation attempt.
 It shall not claim that nothing changed or invite a retry when work may
 already have completed, and shall expose no internal control data
-([[playbook-captain-9](playbook-captain.md#playbook-captain-9)]).
+outside a code span ([[playbook-captain-9](playbook-captain.md#playbook-captain-9)]).
 
 ### Registry and shell state
 
@@ -254,17 +261,23 @@ Captain, the shell shall own a registry of playbook entries.
 Each entry shall be a manifest carrying `id` (stable playbook id and
 default options-namespace key), `command` (default slash command
 without `/`, overridable by config), `intent` (routing description
-for the compiled Captain catalog), required integer `artifactSchema` (the linked runtime profile schema under [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)]), `requiredRoleIds` (local role ids the
+for the compiled Captain catalog), required integer `artifactSchema` (the linked runtime profile schema under [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)]), required `runtimeProfile` (either exact `{ kind: 'shared-factory', compat: { artifactSchema, runtimeAbi } }` captured immutably from the validated shared factory or exact `{ kind: 'bespoke', artifactSchema }` declared by that bespoke implementation), `requiredRoleIds` (local role ids the
 runtime may pass to `callPlayer`), `concurrentRoleSets` (ordered arrays of at least two pairwise-distinct `requiredRoleIds` members whose calls may overlap), an optional `summaryPolicy`
 ([[playbook-captain-20](#playbook-captain-20)]), a `validateOptions` function for that
 entry's own option slice, and a `createRuntime` factory for the
 linked runtime.
-The CODE entry shall declare `id` and command `code` with artifact schema `2`, required role `coder`, and no concurrent role set; REVIEW shall declare `review` with schema `2`, roles `coder` and `reviewer`, and no concurrent role set; and DECIDE shall declare `decide` with schema `2`, roles `coder` and `reviewer`, and exact concurrent role sets `[['coder', 'reviewer']]`.
-The shell shall reject a missing or unsupported advertisement or a shared-factory entry whose advertised artifact schema differs from its factory `spec.compat.artifactSchema` under [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)] before runtime construction; a bespoke runtime profile shall advertise the schema it implements directly.
+The registry-entry contract shall require schema `3` and expose `createRuntime(configuredOptions, hostCapabilities)` with the second input required and host-owned while retaining the common manifest fields above.
+The CODE entry shall declare `id` and command `code` with artifact schema `3`, required role `coder`, and no concurrent role set; REVIEW shall declare `review` with schema `3`, roles `coder` and `reviewer`, and no concurrent role set; DECIDE shall declare `decide` with schema `3`, roles `coder` and `reviewer`, exact concurrent role sets `[['coder', 'reviewer']]`, and the shared-factory runtime profile; DEV shall declare `dev` with schema `3`, required role `analyst`, no concurrent role set, and the shared-factory runtime profile; and BRANCH and PR shall declare `branch` and `pr` respectively, each with schema `3`, required role `coder`, no concurrent role set, and the shared-factory runtime profile.
+The shell shall capture each imported manifest member once, reject a missing or malformed runtime profile, and reject an advertised artifact schema that differs from the shared factory's captured `spec.compat.artifactSchema` or from the bespoke implementation's directly declared schema under [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)] before option validation or runtime construction.
 The shell shall take each playbook's artifact schema, required roles, concurrent role sets, summary policy,
 option validator, and runtime factory
 from its manifest entry.
-The shell shall take each enabled playbook's option slice and exact role-to-player map from its normalized `captain.options.playbooks.<id>` config ([[playbook-captain-16](#playbook-captain-16)]), require artifact schema `2` under [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], require the role keys to equal that entry's `requiredRoleIds`, validate the options against that entry, and retain the bindings under [[playbook-captain-10](#playbook-captain-10)].
+The shell shall take each enabled playbook's option slice and exact role-to-player map from its normalized `captain.options.playbooks.<id>` config ([[playbook-captain-16](#playbook-captain-16)]), require artifact schema `3` under [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], require the role keys to equal that entry's `requiredRoleIds`, validate the options against that entry, and retain the bindings under [[playbook-captain-10](#playbook-captain-10)].
+The shell shall pass only the registry-validated plain-JSON option slice as configured options and shall reject a raw or validator-produced own `hostCapabilities` key.
+Its live capability input shall be an exact data-property record keyed by every and only enabled playbook id; for each member the shell shall require the exact capability structure of [[playbook-runtime-50](playbook-runtime.md#playbook-runtime-50)], identical canonical identities, and authority whose id, schema, required roles, and concurrent role sets equal the captured manifest, then pass that same member as the distinct second factory argument for every fresh, restored, or retained-generation runtime construction.
+An absent, extra, malformed, or authority-mismatched capability shall reject before calling the affected runtime factory or beginning governed work.
+The shell shall never copy a capability member, callback, lease token, or live repository claim or store handle into configured options, frame state, the player ledger, a shell or runtime snapshot, a retained generation, or continuation comparison.
+Only the detached effect-ledger data and canonical identities acknowledged under [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)] may enter the corresponding versioned snapshot members, and they shall not participate in configured-option or continuation equality.
 The shell shall use run-result outcomes and normalized descriptor tags
 for lifecycle and shall not hardcode CODE state ids or CODE-specific
 summary labels.
@@ -312,8 +325,9 @@ telemetry that it passes through.
 #### playbook-captain-7
 
 Where the Playbook Captain shell receives a Boss turn, the shell
-shall parse registered commands first and resolve the parse
-deterministically, with no model call parsing the command:
+shall resolve it deterministically before any model call — a host
+selection first, then a registered-command parse — with no model call
+parsing the command:
 
 | Input | Shell state | Resolution |
 | --- | --- | --- |
@@ -322,8 +336,22 @@ deterministically, with no model call parsing the command:
 | `/<command> <text>`, enabled command absent from the active path | engaged | `switch` to that playbook with `<text>` |
 | `/<command> <text>`, command names an active non-leaf ancestor | engaged | `respond` only |
 | bare `/<command>`, enabled command | any | `respond` only — status or clarification, never a restart |
+| the text a host selection of an advertised runtime action returned, on the turn carrying it [[playbook-captain-60](#playbook-captain-60)] | engaged | `runtime` that selected action id |
+| the text a host selection of the shell's give-up control returned, on the turn carrying it [[playbook-captain-62](#playbook-captain-62)] | engaged | `dismiss` |
+| exact input armed by `selectInterruptedReport(text, report)` [[recovery-27](recovery.md#recovery-27)] | any | reporting only, without calling the Captain runtime |
 | unregistered `/<x>` or ordinary text | any | the session Captain's decision call |
 
+A host selection ([DR-051](../decisions/051-host-selected-runtime-recovery.md))
+shall name one action the active leaf currently advertises
+[[playbook-captain-60](#playbook-captain-60)], shall be refused with a reason and
+start nothing when it names any other, shall return that action's
+Boss-facing label as the text of the turn the host then submits, and
+shall decide only the turn carrying exactly that text: any other turn
+drops the selection and resolves as this table states.
+A host selection of the shell's own give-up control
+([DR-052](../decisions/052-host-selected-give-up.md)) shall obey those same
+rules against the control the shell currently advertises
+[[playbook-captain-62](#playbook-captain-62)].
 A parse-resolved turn shall bypass only the decision model call: the
 shell shall inject the parsed resolution into the session Captain's
 controller FSM as that turn's decision object
@@ -331,6 +359,16 @@ controller FSM as that turn's decision object
 execution, the outcome report, and the closing reply shall flow
 through the controller loop identically to a model-decided turn; the
 shell shall execute no parsed action outside that loop.
+A host-decided `runtime` turn shall bypass only that same call: the
+shell shall supply the selected action id to the session Captain's
+decision state as that turn's decision, spending no decision call and
+no durable conversation call on it, and that selection shall reach the
+shell for validation and execution through the controller port like
+every other ([[captain-playbook-9](captain-playbook.md#captain-playbook-9)]).
+A host-decided give-up turn shall bypass that call the same way, supplying
+`dismiss` as that turn's decision, and shall settle its result phase in the
+shell as well, so the turn makes no model call at all
+[[playbook-captain-63](#playbook-captain-63)].
 For a parse-resolved `respond`, the session Captain's one durable
 prose call settles the turn as captain speech
 ([[playbook-captain-9](#playbook-captain-9)]), and the shell shall execute no action for
@@ -339,18 +377,18 @@ Empty or whitespace-only input shall allocate no call, session, or
 telemetry.
 The shell shall submit every other non-empty Boss turn to the
 session Captain for its hidden decision call, and every selection —
-parse-injected or model-decided — arrives through the host-supplied
-controller port ([[captain-playbook-9](captain-playbook.md#captain-playbook-9)]) as one
-of `respond`, `start`, `switch`, `dismiss`, `deliver`, or `runtime`,
+parse-injected, host-selected, or model-decided — arrives through the
+host-supplied controller port ([[captain-playbook-9](captain-playbook.md#captain-playbook-9)]) as one
+of `respond`, `resume`, `start`, `switch`, `dismiss`, `deliver`, `runtime`, or `recover`,
 a model-decided `respond` carrying the turn's reply prose so a chat
 turn settles in that one decision call.
 The shell shall validate a selection against host state before any
 effect: `start` and `switch` targets shall be enabled registry
 entries; `start` and `switch` inputs shall be nonempty standalone
 request strings ([[captain-playbook-9](captain-playbook.md#captain-playbook-9)]); `start` shall require
-an idle shell; `switch` shall require
+an idle shell; `resume` shall require an idle shell and an installed retained generation for an enabled root whose freshly constructed frame runtimes carry the complete participation capability of [[playbook-captain-46](#playbook-captain-46)]; `switch` shall require
 an active root and a target absent from the active path; `dismiss`,
-`deliver`, and `runtime` shall require an active leaf; and `runtime`
+`deliver`, ordinary `recover`, and `runtime` shall require an active leaf; a host-selected interrupted report may run in chat [[recovery-27](recovery.md#recovery-27)]; `recover` shall require an advertised recovery offer and execute bounded preparation followed by the same leaf continuation [[recovery-7](recovery.md#recovery-7)] [[recovery-8](recovery.md#recovery-8)]; and `runtime`
 shall require the active leaf's current `describe()` to advertise
 the selected action id.
 An invalid selection shall settle `rejected` with a reason and no
@@ -373,8 +411,8 @@ A missing, empty, or non-string `input` shall settle `rejected` with a
 reason and no effect at the controller port, and shall be a malformed
 required payload field for decision validation and its corrective
 re-ask ([[captain-playbook-18](captain-playbook.md#captain-playbook-18)]).
-The shell shall execute at most one validated action per Boss turn and settle
-the selection with `status`, outcome-report facts, an optional rejection
+The shell shall execute at most one validated controller selection per Boss turn, permit its bounded automatic prerequisite recovery [[recovery-14](recovery.md#recovery-14)], and settle
+the selection with `status`, outcome-report facts, the required exact `unresolvedEffects` list of [[playbook-captain-58](#playbook-captain-58)], an optional rejection
 reason, the receipt where a `runtime` action executed, and the resulting
 `leafStateSummary` ([[playbook-captain-20](#playbook-captain-20)]); settlements shall carry no
 reply-prose or counted-activity field.
@@ -415,6 +453,41 @@ The shell shall not pre-classify playbook events, choose
 `BOSS_INTERRUPT` targets, expose jumpable state lists through the
 registry, or otherwise decide in-playbook FSM events.
 
+#### playbook-captain-60
+
+While no Boss turn is active, when its embedding host asks which runtime actions the active leaf currently advertises, the Playbook Captain shell shall answer with the `{ id, label, standing, reason? }` records that turn's ControlView digest would name [[playbook-captain-9](#playbook-captain-9)], stating each action's standing as the leaf reads it — `ready` where the leaf declares none [[playbook-runtime-97](playbook-runtime.md#playbook-runtime-97)] — detached and frozen, taking that digest's own rules for what is advertised ([DR-051](../decisions/051-host-selected-runtime-recovery.md), [DR-063](../decisions/063-failures-explain-themselves.md)):
+
+| Shell state | Answer |
+| --- | --- |
+| idle, or a leaf whose runtime declares no `describe` | nothing |
+| a leaf whose `describe` throws | nothing |
+| a leaf under the retained-effect fence of [[playbook-captain-54](#playbook-captain-54)] | only that fence's two controls, and nothing at all unless the leaf also declares `apply` |
+| any other engaged leaf | every pair its control view advertises, in its order |
+
+- while a Boss turn is active the shell shall advertise nothing and read no leaf's control view for this answer, because that view is then the turn's decision grounding [[playbook-captain-9](#playbook-captain-9)];
+- the answer shall be read from the leaf when asked and shall enter no shell snapshot or settlement, so nothing durable claims an action a leaf no longer offers [[playbook-captain-41](#playbook-captain-41)].
+
+#### playbook-captain-62
+
+While no Boss turn is active, when its embedding host asks which controls the shell itself offers, the Playbook Captain shell shall answer with the `{ id, label, standing }` records it effects on its own behalf, disjoint from the leaf's advertised runtime actions [[playbook-captain-60](#playbook-captain-60)], detached and frozen ([DR-052](../decisions/052-host-selected-give-up.md), [DR-063](../decisions/063-failures-explain-themselves.md)):
+
+| Shell state | Answer |
+| --- | --- |
+| idle | nothing |
+| an engaged root, whether or not its leaf stands behind the retained-effect fence of [[playbook-captain-54](#playbook-captain-54)] | exactly one `ready` give-up control, its Boss-facing label naming the root's registered command |
+
+- while a Boss turn is active the shell shall advertise nothing here, as it advertises no runtime action then [[playbook-captain-60](#playbook-captain-60)];
+- the answer shall enter no shell snapshot or settlement, so nothing durable claims a control the shell no longer offers [[playbook-captain-41](#playbook-captain-41)].
+
+#### playbook-captain-63
+
+Where a Boss turn's decision came from a give-up selection [[playbook-captain-62](#playbook-captain-62)], the Playbook Captain shell shall settle that turn without any session-Captain call, leaving the ordered unresolved-effect report of [[playbook-captain-58](#playbook-captain-58)] unchanged ([DR-052](../decisions/052-host-selected-give-up.md)):
+
+- no decision call shall be allocated, the host having supplied that turn's decision [[playbook-captain-7](#playbook-captain-7)];
+- the shell shall compose the closing reply of [[playbook-captain-19](#playbook-captain-19)] itself from that settlement's outcome-report facts, assembled as [[playbook-captain-69](#playbook-captain-69)] states, and present it through the one presentation seam under the same single-attempt rule, making no result-phase call [[playbook-captain-20](#playbook-captain-20)];
+- the durable conversation shall learn of the turn through the catch-up suffix of [[playbook-captain-35](#playbook-captain-35)] rather than through a call of its own.
+- the give-up shall pass the retained-effect fence without reconciling or executing a leaf action, freeze unresolved evidence before removing any frame, and, where that evidence is nonempty, use the durable root-abandonment transaction of [[playbook-captain-58](#playbook-captain-58)]; any failure shall preserve that transaction's unsafe settlement boundary, and the closing reply shall claim a successful stop only after an `ok` settlement.
+
 ### Captain calls and ports
 
 #### playbook-captain-9
@@ -423,6 +496,7 @@ Where the Playbook Captain shell uses cligent Captain primitives,
 the shell shall use one Captain agent configuration and shall
 serialize durable session-Captain calls and hidden sub-runtime judge
 calls through one abort-aware concurrency-one queue.
+The ControlView digest shall state whether recovery preparation is available and its published description, shall direct `recover` only at a prerequisite that must be repaired or checked before the task continues while a retry needing none keeps the advertised runtime action and an answer keeps delivery [[recovery-6](recovery.md#recovery-6)], and shall reserve the full context for preparation [[recovery-5](recovery.md#recovery-5)].
 Every session-Captain call and sub-runtime judge call shall pass
 `{ visibility: 'hidden' }` to `callCaptain`; no visible Captain call
 shall exist.
@@ -444,10 +518,14 @@ context members the
 leaf's runtime authored into its ControlView projection
 ([[playbook-runtime-52](playbook-runtime.md#playbook-runtime-52)]),
 pending questions verbatim with their question ids, the last error
-as `{ name, message }`, and the advertised actions as id plus label,
+as `{ name, message }`, and each advertised action as its id plus label,
+followed by its standing and reason where the standing that action reads as is
+not `ready` ([[playbook-runtime-97](playbook-runtime.md#playbook-runtime-97)]) plus one sentence
+that a no-op action changes nothing, so a model is never invited to select one,
 composed from the active leaf's `describe()`
-([[playbook-runtime-52](playbook-runtime.md#playbook-runtime-52)]) — and the catalog digest —
+([[playbook-runtime-52](playbook-runtime.md#playbook-runtime-52)]), plus the idle shell's capability-bearing retained resumptions as root playbook id, effective command, and retained root-state description — and the catalog digest —
 each enabled playbook's id, effective command, and intent.
+An installed generation lacking `rootStateDescription` shall remain resumable and shall be labeled as having no retained published description rather than exposing its state id; while an engagement is live the digest shall advertise no retained resumption.
 Where the active leaf's runtime implements no control surface, the shell
 shall compose the degraded ControlView digest rather than omit the block:
 the engagement frame — the active path as commands root to leaf — plus the
@@ -489,11 +567,12 @@ opens a labeled block the model reads as host-authored. The shell shall
 therefore escape and bound at the one seam through which a value it did
 not author becomes part of a digest line, so a line added to a digest
 later carries the property without restating it.
+Pending question text is an exception to length bounding: it shall enter every decision and reply digest complete, JSON-quoted on one physical line so its final choices and constraints remain available without forging prompt blocks.
 Digests and session-Captain prompts shall exclude session and call
 UUIDs, resume tokens, trace payloads, module specifiers, option
 values, player rosters, raw recovery records, and ledger JSON; player
 output shall enter the conversation only as fenced quotes.
-A raw recovery record shall reach no prompt, ever; the sole
+A raw recovery record shall reach no prompt, ever; outside the bounded question check [[recovery-14](recovery.md#recovery-14)], the sole
 history-derived text any prompt may carry is the deterministic
 reseed digest the shell composes from those records
 ([[playbook-captain-35](#playbook-captain-35)]), permitted on exactly the first call of a
@@ -515,6 +594,7 @@ not be surfaced, and the shell shall read all three identifier sets
 from live shell state and from its own record of what it composed this
 turn rather than from a fixed list, so an identifier minted or
 recompiled later is covered without one.
+Before that validation, the shell shall read a reply that is exactly one JSON object `{"action": "respond", "text": <string>}`, with no other member and nothing but whitespace around it, as that `text`, so prose returned in the routing shape is validated and surfaced as prose while every other reply carrying control JSON stays refused.
 The state-identifier duty holds only because the grounding no longer
 depends on the identifier: the digest's state line supplies the
 runtime's published state description
@@ -606,12 +686,13 @@ Where the Playbook Captain shell constructs a sub-runtime, the
 shell shall wrap that runtime's `PlaybookPorts` and shall apply the
 active frame's effective local-role-to-host-player binding.
 The frame shall resolve each local role only through its persisted explicit map, with no same-name, ancestor, or generated fallback ([DR-032](../decisions/032-explicit-roles-session-players.md)).
-Before each call, the shell shall combine the current normalized player instruction and permissions with that binding's complete model and effort selections, require the player's adapter to equal any established ledger adapter, and call `context.callPlayer(playerId, prompt, { resume, settings: { model, effort, instruction?, permissions? } })` with those complete tmux-play host settings and the selected token.
-The host shall interpret a value selection literally and a provider-default selection as an explicit reset rather than omission; inability to enforce either selection on the resumed conversation shall reject the call.
-The wrapper shall route a sub-runtime `callPlayer(localRole, …, { resume })` to `context.callPlayer(<effectiveHostPlayerId>, …)`, return the host result's `resumeToken`, and reject a setting or provider-continuation failure without clearing the prior token or retrying fresh.
+Before each call, the shell shall combine the current normalized player instruction and permissions with that binding's complete model and effort selections plus optional effective fast mode, require the player's adapter to equal any established ledger adapter, and call `context.callPlayer(playerId, prompt, { resume, settings: { model, effort, fastMode?, instruction?, permissions? } })` with those complete tmux-play host settings and the selected token.
+The host shall interpret a value selection literally and a provider-default selection as an explicit reset rather than omission, interpret a present fast-mode boolean literally and absence as the provider default, and reject an unsupported present boolean before provider work; inability to enforce any selection on the resumed conversation shall reject the call.
+The wrapper shall route a sub-runtime `callPlayer(localRole, …, { resume })` to `context.callPlayer(<effectiveHostPlayerId>, …)`, return the host result's `resumeToken`, and preserve ordinary setting/execution failures without retry; only the shared host's definite pre-execution session-rejection rule may clear a hint and attempt fresh within that logical call [[session-storage-8](session-storage.md#session-storage-8)].
 The shell shall track one delegated-call transaction by resolved player id across the logical session and reject a simultaneous second call to the same id rather than fork or serialize its continuation.
 A token-changing result shall remain logically in flight after the host promise resolves until the owning runtime synchronously validates it and `PlayerSessionStore.update` atomically publishes the exact returned transition ([[playbook-runtime-55](playbook-runtime.md#playbook-runtime-55)], [[playbook-runtime-58](playbook-runtime.md#playbook-runtime-58)]); no other frame, role, or unsourced store call may publish, clear, cancel, or reuse that lane meanwhile.
-A resolved result that is malformed, arrives after its runtime operation, or is not committed by that exact update shall quarantine the player lane for the rest of the logical session, block later calls on its uncertain prior token, and make snapshot capture unsafe; a rejected call that produced no result shall preserve and release the prior token after the provider promise settles.
+A resolved result that is malformed, arrives after its runtime operation, or is not committed by that exact update shall quarantine the player lane, block later calls on its uncertain prior token, and make snapshot capture unsafe until the cancelled-turn exception below or the logical session ends; a rejected call that produced no result shall preserve and release the prior token after the provider promise settles.
+After a cancelled Boss turn drains all admitted calls, the shell shall clear only that turn’s quarantined lanes whose invocation signal was aborted, delete their uncertain provider hints from the shared player ledger, and retain the parked runtime for a fresh provider call; it shall accept no late result and change no repository evidence ([DR-072](../decisions/072-host-owned-interrupted-work-settlement.md)).
 The wrapper shall route sub-runtime
 `callCaptain(prompt, signal, options)` through the shared Captain queue to
 `context.callCaptain(prompt, options)`, preserving the required `visibility`
@@ -621,7 +702,7 @@ final text, and error without player or resume-token fields, route
 sub-runtime `callJudge` through that same queue to hidden
 `context.callCaptain`, route `callPlaybook` through the stack protocol
 in [[playbook-captain-29](#playbook-captain-29)], and pass sub-runtime
-`emitStatus` and `emitTelemetry` calls through to the host in order.
+`emitStatus` and `emitTelemetry` calls through to the host in order, except the marked question statuses suppressed by [[playbook-captain-3](#playbook-captain-3)].
 Hidden sub-runtime judge calls shall stay fresh and isolated and
 shall never resume or replace the pinned durable-conversation token
 ([[playbook-captain-31](#playbook-captain-31)]).
@@ -653,7 +734,7 @@ shell did not author.
 #### playbook-captain-31
 
 Where the shell hosts the session Captain, every session-Captain call — the per-turn decision call, the result-phase closing-reply call, and a parse-resolved `respond` call — shall run hidden on the one durable conversation: the shell shall request `resume` with the pinned token, shall request a fresh conversation (`resume: false`) for the session's first call and for the [[playbook-captain-35](#playbook-captain-35)] reseed, shall use the retained token or `false` selected by that item's typed settings-preflight catch-up, and shall pin each returned `resumeToken` in place of the prior state.
-Once the Captain conversation is established, ordinary reopen shall require its configured adapter, instruction, and permissions to remain unchanged, pass `{ resume, settings: { model, effort, instruction?, permissions? } }` with the complete effective settings on the next `context.callCaptain`, and preserve the prior pin without a fresh fallback when the provider rejects those settings.
+Once the Captain conversation is established, ordinary reopen shall require its configured adapter, instruction, and permissions to remain unchanged, pass `{ resume, settings: { model, effort, fastMode?, instruction?, permissions? } }` with the complete effective settings on the next `context.callCaptain`, and preserve the prior pin without a fresh fallback when the provider rejects those settings.
 The shell shall preserve the runtime prompt as the exact host prompt
 and shall pass the original Boss text unchanged into the decision
 call's labeled block; no model call shall replace or paraphrase Boss
@@ -675,15 +756,12 @@ shall serialize these calls.
 
 Where the Playbook Captain shell settles a non-`respond` selection for
 a Boss turn, the shell shall collect turn-summary counts only for the
-duration of any action execution — the sub-runtime
+combined duration of action execution and its automatic continuation [[recovery-14](recovery.md#recovery-14)] — the sub-runtime
 `handleBossInput` call, the `apply()` call, or a `switch`'s
-dismissals and start — and only when the active registry entry
-declares a `summaryPolicy`.
-When the active registry entry declares no `summaryPolicy`, the
-shell shall skip turn-summary counting for that turn.
-The `summaryPolicy` maps counted state ids and adjudication guard
-names to Boss-visible labels and supplies the saved-counts line
-template or equivalent wording policy.
+dismissals and start — and only when an action executed in this turn declares a `summaryPolicy`.
+The first such action shall begin counting with its own entry as owner; an ancestor that actually resumes during that window shall become owner if it declares a policy, preserving all accumulated counts; a merely suspended ancestor shall never supply the line.
+Automatic continuation windows shall keep that owner and accumulated counts.
+The `summaryPolicy` maps counted state ids to Boss-visible labels, its `copyPasteGuardNames` names the accepted outcomes that represent inter-player handoffs, and it supplies the saved-counts line template or equivalent wording policy.
 For that same duration, the shell shall aggregate sub-runtime
 `playbook.fsm.state` telemetry into a summary-visible progress
 phrase for the result-phase prompt, including descendant frames but counting each state only under the registry entry of the frame that emitted it.
@@ -696,18 +774,11 @@ under the provided label.
 When that frame's `summaryPolicy` does not provide a state-count label for a
 state id, the shell shall not count that state in the result-phase
 prompt and shall not derive a fallback label from the state id.
-When a wrapped sub-runtime `callPlayer` call returns a player
-reply, the shell shall count one saved interruption for that reply.
-When a wrapped hidden sub-runtime adjudication call returns a guard
-whose name appears in that frame registry entry's `summaryPolicy`
-copy-paste guard names, the shell shall count one saved copy-paste
-for that inter-player handoff.
+Each distinct confirmed `outcome.accepted` event of [[playbook-runtime-81](playbook-runtime.md#playbook-runtime-81)] carried by the schema-4 public trace of [[playbook-runtime-37](playbook-runtime.md#playbook-runtime-37)] that is successfully published through the host sink during the active action-counting window, matches the active frame and public trace identity, and carries a positive runtime-local turn id shall count one saved interruption unless its `acceptedOutcome` is the Boss-question suspension `needsBossReply`, which parks on Boss and counts nothing; its `acceptedOutcome` shall count one saved copy-paste exactly when it appears in that frame registry entry's `summaryPolicy` copy-paste guard names, while an earlier trace schema, duplicate sequence, foreign frame or causality, missing or nonpositive runtime turn, rejected host emission, direct player return, and raw judge reply shall count nothing.
 The shell shall count one saved copy-paste per adjudicated
 handoff, regardless of how many individual review findings or
 rebuttal items the handoff text contains.
-Each registry entry's `summaryPolicy` shall own its exact copy-paste
-guard names, so an adjudicated guard removed from that list is not
-counted.
+Each registry entry's `summaryPolicy` shall own its exact copy-paste outcome names, so an accepted outcome removed from that list is not counted.
 The shell shall not count session-Captain decision, reply, or
 result-phase calls, sub-runtime classifier/event JSON, or malformed
 adjudication replies as saved copy-pastes.
@@ -721,18 +792,22 @@ not make that call itself, and shall supply, inside that call's
 facts verbatim, the exact saved interruption and copy-paste counts,
 and the aggregate summary-visible progress phrase and round total,
 and shall instruct Captain to compose the closing reply required by
-[[playbook-captain-19](playbook-captain.md#playbook-captain-19)] only from that
-outcome report.
+[[playbook-captain-19](playbook-captain.md#playbook-captain-19)] from that
+outcome report and the current complete pending questions.
 While the turn's counted activity — the saved interruptions plus
 saved copy-pastes plus the summary-visible round total — is nonzero,
-the result-phase prompt shall instruct Captain to append the active
-entry's `summaryPolicy` saved-counts line verbatim with the supplied
+the result-phase prompt shall instruct Captain to append the
+counting owner defined by [[playbook-captain-20](#playbook-captain-20)]'s `summaryPolicy` saved-counts line verbatim with the supplied
 counts and natural singular forms when a count is one; when that
 counted activity is zero or the entry declares no `summaryPolicy`,
 it shall instruct Captain to append no saved-counts line.
 When the Boss turn settles as `respond`, the shell shall supply no
 result-phase outcome report and no result-phase call shall occur
 ([[captain-playbook-6](captain-playbook.md#captain-playbook-6)]).
+When the Boss turn was decided by a give-up selection
+[[playbook-captain-62](#playbook-captain-62)], no result-phase call shall occur
+either, and the shell shall compose that turn's closing reply itself from the
+same settlement facts [[playbook-captain-63](#playbook-captain-63)].
 The result-phase prompt shall instruct Captain not to include counts
 for state ids the `summaryPolicy` does not label and not to repeat
 the exact summary-visible progress round count outside the
@@ -741,7 +816,7 @@ The result-phase prompt shall include no shell ledger JSON and shall
 not render the current or resulting runtime state by raw state id;
 state meaning shall come from the runtime-published description and
 the `summaryPolicy` labels above.
-Before disposing a terminal root, the shell shall append exactly one settlement fact stating that the root command completed and carrying the escaped, bounded Boss-facing `stateDescription` published by the still-live runtime, or stating that the runtime published no result description when that field is absent or empty; this central fact shall apply whether completion follows start, delivery, a runtime action, or a nested return, shall survive in the durable outcome journal, and shall never include the opaque `PlaybookRunResult.output`.
+Before disposing a terminal root, the shell shall append exactly one settlement fact stating that the root command completed and carrying the escaped, bounded Boss-facing `stateDescription` from its terminal result under [[playbook-runtime-41](playbook-runtime.md#playbook-runtime-41)]; when an older runtime omits that optional field, the shell shall fall back to the still-live control view and then to an honest no-description statement, never to a state id or opaque `PlaybookRunResult.output`; this central fact shall apply whether completion follows start, delivery, a runtime action, or a nested return and shall survive in the durable outcome journal.
 
 ### Lifecycle
 
@@ -799,9 +874,9 @@ controller port, while constructing no working-playbook sub-runtime.
 The shell shall require `captain.options.playbooks` and shall reject
 `init` when it is missing or empty; it shall not infer a CODE-only
 default from `captain.options.code`.
-Each `captain.options.playbooks.<id>` entry in the normalized shell config shall carry a `from` module specifier, an optional `command` override, exact `roles: Readonly<Record<roleId, { playerId: string; model: TuningSelection; effort: TuningSelection }>>`, and an `options` slice, where `TuningSelection` has the exact shape defined by [[playbook-cli-8](playbook-cli.md#playbook-cli-8)].
-The shell shall require `captain.options.sessionAgents` from [[playbook-cli-8](playbook-cli.md#playbook-cli-8)] to be exactly `{ captain: SessionAgent; players: Readonly<Record<playerId, SessionAgent>> }`, with each `SessionAgent` carrying the top-level defaults `{ adapter: string; model: TuningSelection; effort: TuningSelection; instruction?: string; permissions?: PermissionPolicy }` under that same normalized contract, and shall reject a referenced player absent from that exact map or any unreferenced entry.
-The shell shall consume those exact blocks and bindings without deriving a binding from names, and every call shall pass both normalized selections even when either requests the provider default.
+Each `captain.options.playbooks.<id>` entry in the normalized shell config shall carry a `from` module specifier, an optional `command` override, exact `roles: Readonly<Record<roleId, { playerId: string; model: TuningSelection; effort: TuningSelection; fastMode?: boolean }>>`, and a configured-only plain-JSON `options` slice under [[playbook-cli-8](playbook-cli.md#playbook-cli-8)], where `TuningSelection` has the exact shape defined by that same contract.
+The shell shall require `captain.options.sessionAgents` from [[playbook-cli-8](playbook-cli.md#playbook-cli-8)] to be exactly `{ captain: SessionAgent; players: Readonly<Record<playerId, SessionAgent>> }`, with each `SessionAgent` carrying the top-level defaults `{ adapter: string; model: TuningSelection; effort: TuningSelection; fastMode?: boolean; instruction?: string; permissions?: PermissionPolicy }` under that same normalized contract, and shall reject a referenced player absent from that exact map or any unreferenced entry.
+The shell shall consume those exact blocks and bindings without deriving a binding from names, and every call shall pass both normalized selections plus the optional effective fast mode, including literal `false`, while absence selects the provider default.
 For each enabled playbook the shell shall import the module named by
 `from` and read its default export as the registry entry, treating a
 module whose default export is not a manifest entry carrying the
@@ -816,7 +891,7 @@ The shell shall reject `init` when `from` is missing, the import
 fails, the module exposes no valid registry entry, a map key differs
 from its module's manifest `id`, two enabled playbooks share an `id`,
 two enabled playbooks resolve to the same effective command, or an enabled
-playbook's id or effective command is the reserved internal name `captain`, or the manifest omits artifact schema `2`.
+playbook's id or effective command is the reserved internal name `captain`, or the manifest does not declare supported artifact schema `3`.
 The shell shall pass each entry only its normalized option slice and
 shall not extract an entry's namespace from the full Captain options
 bag.
@@ -898,12 +973,13 @@ registry without imposing a separate numeric limit.
 When the initial child turn parks or suspends, `callPlaybook` shall
 return its suspended child session id so the parent runtime can settle
 its Boss turn; only the top frame shall receive later Boss turns.
-When a child returns terminal output, rejects at the runtime boundary,
-is aborted, or is dismissed, the
+When a child returns terminal output, rejects without a retainable parked invocation [[recovery-16](recovery.md#recovery-16)],
+is aborted without a retainable accepted invocation [[recovery-16](recovery.md#recovery-16)], or is dismissed, the
 shell shall dispose and pop it, restore the parent's player
 visibility, and call the parent's `resumePlaybookCall` with the same call id
 and current-turn signal, continuing until the top frame parks, suspends, or waits for
 Boss, or the root finishes.
+A terminal child's `ok` call result shall carry that terminal run result's published terminal record unchanged when it has one and omit it otherwise [[playbook-runtime-83](playbook-runtime.md#playbook-runtime-83)], so the parent's bridge alone decides whether the completion resolves or rejects its actor.
 Where a child returns workflow outcome `failed` in a recoverable parked
 state, the shell shall retain it as the active leaf for later Boss recovery
 rather than return an error to its parent.
@@ -976,7 +1052,11 @@ history.
 
 Every non-`respond` action result shall reach the healthy durable
 conversation through the result-phase call of the same turn
-([[playbook-captain-20](#playbook-captain-20)]).
+([[playbook-captain-20](#playbook-captain-20)]), except a turn the shell settled
+itself under [[playbook-captain-63](#playbook-captain-63)], whose result shall
+reach that same conversation as the catch-up suffix this item already defines:
+the shell shall record the latest journal sequence represented to it and carry
+the later records on the next durable call.
 There shall be no separate refusal notice, status-only refusal path, or
 second memory channel.
 The recovery history shall never be Boss-visible and shall be used to
@@ -984,7 +1064,7 @@ restore a replacement conversation, not as an additional prompt on a
 healthy one.
 After every durable session-Captain call the shell shall pin the
 returned `resumeToken`, replacing the prior pin.
-When a durable call throws for a reason other than a typed complete-settings preflight rejection, returns a non-`ok` status, or returns `ok` without a token, the shell shall treat the conversation as unsynchronized and re-issue only that failed call once on a fresh conversation seeded from the complete recovery history and current runtime observation.
+When a durable call loses continuity, the shell shall mark the conversation for reseeding from the complete recovery history; only definite pre-execution session rejection permits the immediate single fresh attempt [[session-storage-8](session-storage.md#session-storage-8)], while a throw, ambiguous failure or missing successful token makes no same-call retry.
 When the exact Captain host call instead rejects with the typed complete-settings preflight error before provider work, the shell shall make no same-turn fresh fallback, retain the selected token or `false`, and record the latest journal sequence already represented to that conversation.
 The next supported durable call shall use that retained resume selection and one deterministic authoritative suffix containing only later journal records; repeated preflight rejections shall retain the same safe watermark so missed turns accumulate, while a successful call shall pin its new token and clear the catch-up obligation.
 An abort shall take precedence even when its reason carries the typed marker and shall propagate the exact signal reason.
@@ -1006,9 +1086,10 @@ Only the model-side conversation shall be replaced: the engagement
 stack, player sessions, recovery history, and completed turn work shall
 survive, and an action whose outcome is already established shall never
 be re-executed.
-When a selected action's turn fails, its outcome-report facts shall say
-the action may have changed the session only when that same error
-escaped the effect invocation itself. A failure outside that invocation
+When a selected action's turn fails, its outcome-report facts shall
+state that failure as [[playbook-captain-71](#playbook-captain-71)]
+states and say the action may have changed the session only when that
+same error escaped the effect invocation itself, including the isolated recovery preparation call [[recovery-7](recovery.md#recovery-7)]. A failure outside that invocation
 shall make no such claim, and every completed sub-step shall remain an
 explicit established fact.
 When recovery also fails, the shell shall preserve that state for the
@@ -1020,38 +1101,41 @@ the underlying diagnostic outside Boss-visible prose.
 
 #### playbook-captain-41
 
-Where `@sublang/playbook/playbook-captain` exposes the Playbook Captain shell, the module shall export `PlaybookCaptainShellSnapshot`, `assertPlaybookCaptainShellSnapshot(value: unknown): PlaybookCaptainShellSnapshot`, and `PlaybookCaptainShell`, with `PlaybookCaptainShell` extending tmux-play's `Captain` by exactly `exportSnapshot(): PlaybookCaptainShellSnapshot | undefined` and `restore(session: CaptainSession, snapshot: PlaybookCaptainShellSnapshot): Promise<void>`.
+Where `@sublang/playbook/playbook-captain` exposes the Playbook Captain shell, the module shall export `projectUnresolvedEffects(ledger, references)` for the host’s bounded evidence projection [[playbook-captain-58](#playbook-captain-58)], `PlaybookCaptainShellSnapshot`, `assertPlaybookCaptainShellSnapshot(value: unknown): PlaybookCaptainShellSnapshot`, `PlaybookCaptainFrameSnapshot`, `PlaybookCaptainRetainedGeneration`, `PlaybookCaptainRetentionUpdate`, `PlaybookCaptainUnresolvedEffect`, `assertPlaybookCaptainUnresolvedEffects(value: unknown): readonly PlaybookCaptainUnresolvedEffect[]`, `PlaybookCaptainSettlement`, and `PlaybookCaptainShell`, with `PlaybookCaptainShell` extending tmux-play's `Captain` by exactly `installRetainedGenerations(generations: Readonly<Record<string, PlaybookCaptainRetainedGeneration>>): Promise<void>`, `exportSnapshot(): PlaybookCaptainShellSnapshot | undefined`, `exportSettlement(): PlaybookCaptainSettlement | undefined`, `restore(session: CaptainSession, snapshot: PlaybookCaptainShellSnapshot): Promise<void>`, optional `describeRuntimeActions?(): readonly PlaybookControlAction[]` [[playbook-captain-60](#playbook-captain-60)], optional `submitRuntimeAction?(actionId: string): string` [[playbook-captain-7](#playbook-captain-7)], optional `describeShellActions?(): readonly PlaybookControlAction[]` [[playbook-captain-62](#playbook-captain-62)], and optional `submitShellAction?(actionId: string): string` [[playbook-captain-7](#playbook-captain-7)], and optional `selectInterruptedReport?(text: string, report: InterruptedReport): void` for the host-derived interruption report [[recovery-27](recovery.md#recovery-27)], with host controls optional so a shell publishing none advertises nothing.
 The module's default shell factory shall return `PlaybookCaptainShell`.
-`PlaybookCaptainShellSnapshot` shall be a detached JSON-safe schema-version-3 value with these exact common and mode-discriminated members:
+`PlaybookCaptainShellSnapshot` shall be a detached JSON-safe schema-version-4 value with these exact common and mode-discriminated members:
 
 | Part | Exact content |
 | --- | --- |
-| Common | `schemaVersion: 3`; `captain: { sessionId: UUID, runtime: PlaybookRuntimeSnapshot, agent: { adapter, instruction?, permissions? }, conversation }`; `playerSessions: Readonly<Record<playerId, { adapter, instruction?, permissions?, resumeToken? }>>`; `issuedSessionIds: readonly UUID[]`; nonnegative-integer `sequences: { turn, journal }`; `journal: readonly JournalRecord[]`; optional `lastAction: 'respond' \| 'start' \| 'switch' \| 'dismiss' \| 'deliver' \| 'runtime'`; optional `lastSettlementStatus: 'ok' \| 'rejected' \| 'failed'` |
+| Common | `schemaVersion: 4`; required `effectLedger: PlaybookEffectLedger`; `captain: { sessionId: UUID, runtime: PlaybookRuntimeSnapshot, agent: { adapter, instruction?, permissions? }, conversation }`; `playerSessions: Readonly<Record<playerId, { adapter, instruction?, permissions?, resumeToken? }>>`; `issuedSessionIds: readonly UUID[]`; nonnegative-integer `sequences: { turn, journal }`; `journal: readonly JournalRecord[]`; optional `lastAction: 'respond' \| 'resume' \| 'start' \| 'switch' \| 'dismiss' \| 'deliver' \| 'runtime' \| 'recover'`; optional `lastSettlementStatus: 'ok' \| 'rejected' \| 'failed'`; optional nonnegative-integer `presentedEffectPrefix` no greater than `effectLedger.boundaries.length`, whose omission means that length |
 | Captain conversation | Exactly `{ kind: 'unopened' }`, `{ kind: 'pinned', token: nonempty string }`, `{ kind: 'needsCatchUp', resume: nonempty string \| false, afterJournalSeq: nonnegative integer }`, or `{ kind: 'needsSeeding' }` |
 | Journal record | `{ seq, turnId, kind, payload }`, where `kind` is `boss`, `reply`, `handoff`, `action`, or `outcome`, and `payload` is JSON-safe |
 | `mode: 'chat'` | No frame, pending-question, last-error, or separately derived control-ledger member |
-| `mode: 'engaged.parked'` | Nonempty ordered `frames`; optional JSON-safe `pendingBossQuestions` whose entries use the runtime snapshot's discriminated Captain-or-role asker; optional `lastError: { name: string, message: string }`; and no separately derived control-ledger member |
-| Frame | Exactly `playbookId: string`, `sessionId: UUID`, `rootSessionId: UUID`, nonnegative-integer `depth`, optional `parentSessionId: UUID`, optional nonempty `parentCallId: string`, JSON-safe `options`, exact `roleBindings: Readonly<Record<roleId, playerId>>`, and `runtime: PlaybookRuntimeSnapshot` |
+| `mode: 'engaged.parked'` | Nonempty ordered `frames`; optional JSON-safe `pendingBossQuestions` whose entries use the runtime snapshot's discriminated Captain-or-role asker; optional `lastError: { name: string, message: string }`; optional exact `retainedEffectReconciliation: { sourceGenerationId: UUID, checkpoint: PlaybookEffectLedger }`; and no separately derived control-ledger member |
+| Frame | Exactly `playbookId: string`, `sessionId: UUID`, `rootSessionId: UUID`, nonnegative-integer `depth`, optional `parentSessionId: UUID`, optional nonempty `parentCallId: string`, optional nonempty root-only `request: string` and optional root-only `inputs: readonly string[]` of nonempty delivered text [[recovery-14](recovery.md#recovery-14)], JSON-safe `options`, exact `roleBindings: Readonly<Record<roleId, playerId>>`, and `runtime: PlaybookRuntimeSnapshot` |
 
 The Captain and frame `runtime` members shall be complete `PlaybookRuntimeSnapshot` values exported under [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)].
+The shell `effectLedger` shall be the complete detached current-host mirror of [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)]; the internal Captain runtime snapshot shall carry the canonical empty ledger, while every workflow-frame runtime snapshot shall carry a ledger exactly equal to the shell member.
 `issuedSessionIds` shall contain every UUID the logical shell session has issued, including the Captain identity, live frame identities, and identities of removed frames, so restoration cannot make a historical identity reusable ([[playbook-captain-26](#playbook-captain-26)]).
 `sequences` and the full ordered journal shall preserve the shell's turn and recovery-history ownership: an empty journal shall coincide exactly with turn zero; each contiguous turn from one through the saved turn sequence shall begin with exactly one `boss` record before any other record for that turn; journal record sequence numbers shall be contiguous from one; and the journal sequence shall equal the record count ([[playbook-captain-35](#playbook-captain-35)]).
 Empty history shall coincide exactly with an unopened Captain conversation.
 For `needsCatchUp`, the watermark shall precede the current journal sequence, `resume: false` shall coincide exactly with watermark zero, and a retained token shall require a positive watermark.
-The Captain agent envelope shall preserve its established adapter, instruction, and permissions, and the Captain conversation shall preserve its exact unopened, pinned, catch-up-required, or reseed-required state ([[playbook-captain-35](#playbook-captain-35)]).
-The Captain runtime snapshot's turn sequence shall equal the shell snapshot's turn sequence.
+The Captain agent envelope shall preserve its established adapter, instruction, and permissions while excluding model, effort, and fast mode, and the Captain conversation shall preserve its exact unopened, pinned, catch-up-required, or reseed-required state ([[playbook-captain-35](#playbook-captain-35)]).
+The Captain runtime's turn sequence shall not exceed the shell's: interruption-report turns advance shell history without running the Captain.
 The common player ledger shall preserve every referenced player id and its fixed agent envelope in chat and engaged modes, and every frame runtime's local-role token view shall equal the projection of that ledger through its exact saved bindings; two roles bound to one player shall project the same optional token ([[playbook-captain-26](#playbook-captain-26)]).
 For each adjacent parent and child frame, the child's `parentSessionId` shall equal the parent's `sessionId`, the child's `parentCallId` shall equal the parent runtime's suspended `callId`, and that descriptor's `playbookId` and `childSessionId` shall equal the child's `playbookId` and `sessionId`; the root shall have no parent fields, every child shall use the root's `rootSessionId` at the next depth, and the leaf shall have no suspended child ([[playbook-captain-29](#playbook-captain-29)]).
 When `exportSnapshot()` is called after initialization and between Boss turns, while the shell is in `chat` or `engaged.parked`, no child is opening, no turn-summary or controller-call transient remains, the Captain queue, host calls, emission drains, and frame removals are idle, disposal has not begun, and every included runtime exports a safe snapshot, the shell shall return that complete snapshot without moving state or emitting any record.
-At any other point, or when an identity, token projection, frame edge, nested-call descriptor, or runtime safe point is inconsistent, `exportSnapshot()` shall return `undefined` without changing the shell.
-`assertPlaybookCaptainShellSnapshot` shall be a pure boundary that performs all intrinsic closed-schema, JSON, conversation, journal, Captain-runtime contribution, identity, frame-topology, suspended-edge, role-question, player-token projection, and leaf-projection validation without reading configuration, importing modules, or constructing runtimes; it shall return a detached recursively frozen snapshot.
+At any other point, or when an identity, token projection, effect-ledger mirror, retained source lineage or reconciliation checkpoint, frame edge, nested-call descriptor, or runtime safe point is inconsistent, `exportSnapshot()` shall return `undefined` without changing the shell.
+`assertPlaybookCaptainShellSnapshot` shall be a pure boundary that performs all intrinsic closed-schema, JSON, effect-ledger, retained-lineage, retained-reconciliation, conversation, journal, Captain-runtime contribution, identity, frame-topology, suspended-edge, role-question, player-token projection, and leaf-projection validation without reading configuration, importing modules, or constructing runtimes; it shall return a detached recursively frozen snapshot.
+
+`projectUnresolvedEffects(ledger,references)` shall export its `PlaybookCaptainUnresolvedEffectReference` input union as `{kind:'boundary',boundaryId:string}` or `{kind:'logical-operation',operationId:string}`, returning ordered bounded evidence [[playbook-captain-58](#playbook-captain-58)].
 
 #### playbook-captain-42
 
 Where a fresh unused Playbook Captain shell was constructed from the authoritative stored catalog and the compatible current settings projection already checked against the durable session record under [[playbook-cli-23](playbook-cli.md#playbook-cli-23)], when `restore(session, snapshot)` receives a `PlaybookCaptainShellSnapshot`, the shell shall first apply [[playbook-captain-41](#playbook-captain-41)]'s pure intrinsic validator before reading configuration, importing a module, or constructing a runtime.
-Validation shall reject cycles, accessors, symbol or unknown keys, non-plain instances, sparse or undefined values, non-finite numbers, a schema or mode mismatch, malformed Captain envelope, conversation, player ledger, or journal data, an empty history whose conversation is not unopened, an absent, duplicate, out-of-order, or out-of-range turn owner in the journal, a journal-counter mismatch, a Captain-runtime/shell turn-sequence mismatch, malformed or duplicate UUIDs, a Captain identity reused by a live frame, another duplicate live identity, a live identity absent from `issuedSessionIds`, a Captain contribution inconsistent with [[captain-playbook-21](captain-playbook.md#captain-playbook-21)], a current Captain or referenced-player adapter, instruction, or permissions different from its saved envelope, an active frame whose current manifest, options, required-role set, or role-to-player map differs from its saved structure, a runtime/playbook mismatch, an invalid frame chain, a parent/child suspended-call mismatch, a non-leaf runtime without its matching suspended call, a leaf that is suspended or is not active, quiescent, and tagged `playbook.parked`, or a live frame's local token view different from the saved ledger projection.
-Only current-config compatibility — enabled catalog membership, fixed Captain and player envelopes, frame options, and exact role maps — shall remain restore-owned; current model and effort selections may differ and shall govern the next call without changing the snapshot.
-After validation, the shell shall rebuild the same compiled Captain, catalog, and controller, reconstruct working frames from root to leaf under their saved options, bindings, session, root, parent-call, and depth identities, and give every frame a view of the one restored Captain-session player ledger ([[playbook-captain-26](#playbook-captain-26)], [[playbook-captain-29](#playbook-captain-29)]).
+Validation shall reject cycles, accessors, symbol or unknown keys, non-plain instances, sparse or undefined values, non-finite numbers, a schema or mode mismatch, malformed Captain envelope, effect ledger, retained-reconciliation marker, conversation, player ledger, or journal data, an empty history whose conversation is not unopened, an absent, duplicate, out-of-order, or out-of-range turn owner in the journal, a journal-counter mismatch, a Captain-runtime turn sequence exceeding the shell sequence, a nonempty internal-Captain ledger, a frame ledger different from the shell ledger, a retained checkpoint that is not a strict monotonic baseline of the shell ledger, a shell marker without a corresponding frame marker, a marked frame whose checkpoint differs from the root-wide checkpoint, a marked root whose source identity differs from the shell marker's source generation, malformed or duplicate UUIDs, a Captain identity reused by a live frame, another duplicate live identity, a live identity absent from `issuedSessionIds`, a Captain contribution inconsistent with [[captain-playbook-21](captain-playbook.md#captain-playbook-21)], a current Captain or referenced-player adapter, instruction, or permissions different from its saved envelope, an active frame whose current manifest, options, required-role set, or role-to-player map differs from its saved structure, a runtime/playbook mismatch, an invalid frame chain, a parent/child suspended-call mismatch, a non-leaf runtime without its matching suspended call, a leaf that is suspended or is not active, quiescent, and tagged `playbook.parked`, or a live frame's local token view different from the saved player ledger projection.
+Only current-config compatibility — enabled catalog membership, fixed Captain and player envelopes, frame options, and exact role maps — shall remain restore-owned; current model, effort, and fast-mode settings may differ and shall govern the next call without changing the snapshot.
+After validation, the shell shall require its saved ledger to equal the current host's synchronous mirror, rebuild the same compiled Captain, catalog, and controller, reconstruct working frames from root to leaf under their saved options, bindings, session, root, parent-call, and depth identities, give every frame a view of the one restored Captain-session player ledger, and construct each schema-3 frame only with its current lease-owning host capability rather than any saved authority ([[playbook-captain-5](#playbook-captain-5)], [[playbook-captain-26](#playbook-captain-26)], [[playbook-captain-29](#playbook-captain-29)]).
 The shell shall keep every host-facing emission and call gate closed while it restores the Captain runtime and each working runtime through [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)], and shall verify before commit that no restore-time host emission or call was attempted, every restored normalized runtime state equals its snapshot, and every local and session-ledger token view remains exact.
 `PlayerSessionStore.restore` shall mutate the common ledger only for the exact frame while the shell awaits that frame's runtime restore ([[playbook-runtime-55](playbook-runtime.md#playbook-runtime-55)], [[playbook-runtime-58](playbook-runtime.md#playbook-runtime-58)]); the same call during initialization, a Boss turn, resume, apply, or disposal shall reject before mutation.
 Only after every validation, reconstruction, restore, and verification succeeds shall the shell install the saved mode, conversation, recovery journal, counters, issued identities, last action, and last settlement status and open the host gate as a final non-failing commit.
@@ -1061,6 +1145,218 @@ Each restored child frame shall carry no synthesized process-crossing invocation
 When validation or any pre-commit reconstruction, restore, emission-gate, state, or token check fails, the shell shall keep the host gate closed, attempt to dispose every partially restored working runtime from leaf to root and the Captain runtime last, aggregate any cleanup rejection, discard every partial reference, and reject, with no host record, model or player call, controller submission, child abort, or false nested-call finish escaping.
 When that cleanup succeeds, the shell shall remain fresh for a later `init` or `restore`; when cleanup rejects, the shell shall remain closed and reject later initialization or restoration rather than claim safe reuse.
 `restore` shall reject reuse after successful `init` or `restore` and shall reject once disposal has begun.
+
+#### playbook-captain-50
+
+Where a current lease-owning host supplies one effect-ledger capability for every enabled artifact, the shell shall require every artifact capability's synchronous ledger mirror to be exact and equal, capture that one detached value as its session mirror, and reject an absent, malformed, or disagreeing mirror before initializing or restoring any runtime ([[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)]).
+Each fresh, restored, nested, and retained workflow-runtime construction shall receive the same current complete mirror, while the internal Captain runtime shall receive only the canonical empty ledger; no live capability object or writer shall enter the detached session mirror or either snapshot schema ([[playbook-captain-5](#playbook-captain-5)]).
+After any successful durable write acknowledgement, every later workflow-runtime construction and safe capture shall use that acknowledged ledger revision, and a stale or divergent frame export shall make the shell capture unsafe rather than select one mirror arbitrarily.
+During teardown the shell shall preserve the last acknowledged detached mirror until every runtime is disposed, and disposal shall neither clear an unresolved or deferred logical operation nor synthesize a receipt.
+On restore, the current host shall complete or reconstruct every incomplete authoritative boundary under [[playbook-cli-49](playbook-cli.md#playbook-cli-49)] before the shell validates its version-4 snapshot or restores a runtime source state; the shell shall then require the recovered host mirror, its own snapshot member, and every frame member to be exactly equal before opening a host-facing gate, so a recovered authoritative extension of the immutable pre-turn snapshot remains closed until the host restores interrupted progress [[recovery-27](recovery.md#recovery-27)] ([[playbook-captain-42](#playbook-captain-42)]).
+
+#### playbook-captain-52
+
+Where an active schema-3 frame enters, continues, or reconciles the deferred Boss-question operation of [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)], the shell shall keep that frame's pending-question projection, runtime snapshot ledger, and the shared session mirror mutually exact before publishing the question, returning a Boss-visible settlement, or accepting another turn.
+The shell shall update its session mirror only from the current lease-owning host's durable acknowledgement under [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)], preserve that complete mirror through teardown, and on ordinary restore give the frame the same logical operation and the Captain-session player's exact bound continuation before reopening the host-facing gate.
+A later turn shall route an invalid reply, valid reply, other exit, or explicit reconciliation action to that same frame without substituting another pending question or player continuation, and shall publish a restored wait only after the exact checkpoint-restoration acknowledgement required by [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)].
+
+### Retained generation settlement
+
+#### playbook-captain-44
+
+After a nonempty Boss turn settles at the same safe boundary where the complete shell snapshot can be exported ([[playbook-captain-41](#playbook-captain-41)]), `exportSettlement()` shall return one detached JSON-safe `PlaybookCaptainSettlement` containing exactly `snapshot`, the required ordered `unresolvedEffects` list of [[playbook-captain-58](#playbook-captain-58)], and `retentionUpdates` with zero or more unique per-root `PlaybookCaptainRetentionUpdate` values; before a turn, during work, after unsafe settlement, or after disposal it shall return `undefined`.
+`PlaybookCaptainRetainedGeneration` shall contain required detached capture-time `effectLedger`, the exact nonempty root-to-leaf `PlaybookCaptainFrameSnapshot` stack from [[playbook-captain-41](#playbook-captain-41)], including each nested call bridge and active quiescent schema-4 runtime snapshot exported under [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)], optional exact `retainedEffectReconciliation: { sourceGenerationId: UUID }`, and optional nonblank `rootStateDescription` published by the root runtime's matching ControlView at capture, and shall never contain a final runtime snapshot.
+For an ordinary capture, every frame shall carry that same complete checkpoint; for a fenced recapture, the generation shall preserve its original checkpoint and source generation while every frame and the shell carry one identical capture-time authoritative mirror that strictly extends the checkpoint plus the corresponding durable marker of [[playbook-runtime-75](playbook-runtime.md#playbook-runtime-75)], and that captured mirror shall remain immutable when a later host mirror extends it.
+Failure or absence of that matching published description shall omit the member without making the generation incompatible or substituting an internal state id.
+A frame shall participate only when its runtime exposes the parked-session `exportSnapshot`/`restore` pair, the adoption capability, and valid `retainedGenerationMetadata` classification from [[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)], [[playbook-runtime-45](playbook-runtime.md#playbook-runtime-45)], and [[playbook-runtime-61](playbook-runtime.md#playbook-runtime-61)]; a root lacking any member shall emit `clear`; and, for an outcome that would otherwise `retain`, when the root stack selected by that outcome contains such a capability-less descendant, the shell shall retain the last complete turn-start candidate or, when the turn began with such a descendant already live or the root began during the turn, emit no update for that root, and shall never retain a partial stack.
+Before controller work can dismiss or complete an existing root, the shell shall capture the latest eligible generation from a live root that has previously settled active and quiescent, without moving a runtime or emitting a host record.
+When the root remains parked, the generation selected for `retain` shall be its current complete generation; when dismissal removes the root, the selected generation shall be the captured turn-start candidate, except that a dismissal decided by a give-up selection [[playbook-captain-62](#playbook-captain-62)] shall emit `clear` for that root instead, so a run the Boss gave up on is not offered back; and when a terminal result removes the root with a stable id that belongs to the root runtime's immutable `unfinishedFinalStateIds` ([[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)]), the selected generation shall be the captured turn-start candidate; a terminal result with a stable id outside that set shall emit `clear` regardless of capability gaps.
+An initialized root that has not yet reached a post-input quiescent settlement shall not count as carrying unfinished work; if it reaches a declared unfinished terminal first, the shell shall settle without a retention update for that root rather than retain its initial state or emit `clear`.
+Whenever the preceding rules require a capability-bearing frame to supply a complete candidate, failure to capture it shall fail the settlement boundary; a runtime claiming the marker but unable to supply a stable terminal state id shall likewise fail rather than classify the terminal as clean.
+Child return or dismissal shall produce no independent retained root: the resulting live root stack, or the eventual root terminal decision, shall remain authoritative.
+
+### Retained generation resumption
+
+#### playbook-captain-46
+
+Where an initialized or restored `PlaybookCaptainShell` receives the current session record's retention map through `installRetainedGenerations`, the shell shall accept that map exactly once after setup and before its first nonempty Boss turn, detach and validate every generation against the enabled registry, current root options, every frame's current role set, schema-4 runtime snapshots, complete capture-time effect checkpoint, optional retained-reconciliation marker, unique source identities, root-to-leaf topology, suspended-call bridges, and parked leaf of [[playbook-captain-44](#playbook-captain-44)], and reject malformed or disabled input before advertising it.
+An empty map and a generation omitting `rootStateDescription` shall remain valid.
+The shell shall require each generation checkpoint to be exact or a monotonic baseline of the current lease-owning host mirror and, for a generation without its reconciliation marker, shall require every frame mirror to equal that checkpoint with both retained-effect members absent; a generation carrying that marker shall instead require every frame to carry matching source-lineage and checkpoint evidence plus one common capture-time mirror that strictly extends the checkpoint and is exact or a monotonic baseline of the current host mirror under [[playbook-captain-54](#playbook-captain-54)].
+For each retained frame the shell shall construct one fresh uninitialized runtime under current options and that frame's current lease-owning host capability under [[playbook-captain-5](#playbook-captain-5)], and shall advertise the root only when every runtime carries the complete participation capability of [[playbook-captain-44](#playbook-captain-44)]; capability absence shall dispose those probes and omit that generation without initializing, restoring, or moving it.
+Only the retained root's options shall participate in installation compatibility; each descendant probe and adopted frame shall instead use its current enabled options, while every retained frame shall still cover its current role set.
+A capability-less root shall schedule `clear` at the next settlement, while a capability-less descendant shall leave the complete unadvertised generation untouched.
+At install-time or before a later idle Boss turn, a construction rejection shall dispose every already-constructed probe, omit only that generation for the current shell, continue preparing other offers when cleanup succeeds, and close the shell rather than claim reusable state when cleanup rejects.
+An active restored engagement may carry an installed map, but the shell shall prepare and advertise retained offers only while idle; offer replacement or clear, failed adoption, and terminal teardown shall dispose every unclaimed probe without disposing a runtime that became a live adopted frame.
+A cleanup-safe construction rejection shall not clear its retained source or retry within that shell, so a fresh shell may try the unchanged generation again.
+Where replacement or clear probe cleanup rejects, the shell shall fail that turn, close unsafe reuse, and preserve only the probes whose own disposal rejected for terminal cleanup.
+The idle ControlView digest of [[playbook-captain-9](#playbook-captain-9)] shall list offers deterministically by root playbook id beside the empty runtime-action list, label each with its effective command and a bounded escaped rendering of retained `rootStateDescription`, or state honestly that no published description was retained, and shall expose no source session, generation, child, call, trace, state, option, module, player, or token identity.
+Every foreign label in that list shall pass through [[playbook-captain-9](#playbook-captain-9)]'s bounded escaping seam.
+
+#### playbook-captain-47
+
+Where the shell is idle and [[playbook-captain-46](#playbook-captain-46)] advertises an enabled root, a validated `{ action: 'resume', playbookId }` selection shall consume that offer as the turn's sole action and adopt its complete retained generation from root to leaf through [[playbook-runtime-61](playbook-runtime.md#playbook-runtime-61)].
+The shell shall allocate one fresh target runtime UUID per frame that differs from every source and target identity, bind each target frame exclusively from the current enabled options and Captain-session player ledger of [[playbook-captain-26](#playbook-captain-26)], and call each reserved runtime's `adopt` once with that target session, the retained runtime snapshot, the frame's source session id, the retained root's source generation id, and the fresh next-child session id exactly where a suspended child exists.
+The adopted root shall have its fresh session id as root id, each descendant shall name its fresh parent at the next depth through target call id `playbook-1`, and no source call id, child id, turn id, role binding, or player token shall become target ownership ([[playbook-runtime-63](playbook-runtime.md#playbook-runtime-63)] and [[playbook-runtime-65](playbook-runtime.md#playbook-runtime-65)]).
+Adoption shall call neither `init`, `restore`, `handleBossInput`, nor the nested-playbook host port, shall apply no initial-state classification, and shall not deliver the selecting Boss text to a working runtime.
+Only after every frame adopts shall the shell atomically install the target stack as `engaged.parked`, make the leaf's current bound players visible, and emit `◇ /<command> resumed`; an ordinarily resumable stack shall restore the retained leaf's pending-question projection and settle with a bounded fact naming the published retained description or its honest absence plus a shell-authored Boss-visible warning that external effects attempted after the retained boundary may be duplicated, assembled with the reply as [[playbook-captain-69](#playbook-captain-69)] states, while a stack under the retained-effect fence of [[playbook-captain-54](#playbook-captain-54)] shall publish no retained question, give those visible players no call, and settle with that description fact plus the statement that the retained work remains parked until its repository-effect evidence is reconciled.
+The next settlement shall retain the adopted root under its fresh generation rather than leave the consumed source identities selectable.
+If target identity allocation fails before adoption, the shell shall leave the unconsumed offer fresh and selectable for a later retry.
+If any adoption, visibility, status, or cleanup step fails after the attempt begins, the shell shall expose no partial live stack, dispose every provisional target runtime leaf to root, keep the retained source generation eligible for an exact later retry under newly allocated target identities when cleanup succeeds, and aggregate a cleanup or telemetry-rollback failure while closing unsafe shell reuse.
+While an engagement is live, `resume` shall reject and that engagement's delivery and current runtime actions shall precede adoption; while idle, an explicitly selected fresh `start` shall start rather than adopt, otherwise the compiled Captain shall prefer an advertised resume over a fresh start unless the Boss explicitly requests fresh work ([[captain-playbook-23](captain-playbook.md#captain-playbook-23)]).
+
+#### playbook-captain-54
+
+Where an advertised retained generation is selected, the shell shall evaluate its required capture-time effect-ledger checkpoint against the current host mirror before adopting any frame and shall use the complete root-wide extension, including boundaries owned by a later-created or already-removed descendant absent from the retained frame stack, rather than infer safety from one retained runtime ([DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §4).
+The extension shall be ordinarily resumable only when the checkpoint contains no incomplete physical boundary and either equals the current mirror or has a physical-boundary prefix and logical-operation list that remain deep-equal while every appended boundary carries a complete `unchanged` receipt; for that safe case the shell shall preserve the stored generation byte-for-byte, give each runtime its capture checkpoint, current host authority, and original source-session lineage for the detached rebase of [[playbook-runtime-75](playbook-runtime.md#playbook-runtime-75)], and install the resulting current mirrors only after every frame adopts.
+For any incomplete, non-`unchanged`, ambiguous, logically advanced, or already marked extension, the shell shall install one root-wide `retainedEffectReconciliation` fence carrying the original source-generation identity and checkpoint, require every adopted runtime to carry its source-lineage marker under [[playbook-runtime-75](playbook-runtime.md#playbook-runtime-75)], and preserve the current authoritative host mirror separately from that immutable checkpoint.
+While the root-wide fence remains, no frame shall receive Boss input or a nested result, no retained pending question or ordinary action shall become host-visible, the leaf's bound players shall stay visible while no retained-runtime player, adjudicator, direct-Captain, or child call starts, and no frame shall bypass the fenced evidence; exactly `reconcile:unresolved-effect` and `abandon:unresolved-effect` from [[playbook-runtime-79](playbook-runtime.md#playbook-runtime-79)] are the only runtime actions the shell may route.
+A safe shell snapshot and settlement shall preserve the root-wide marker, current shell and frame mirrors, the empty internal-Captain mirror, and original retained checkpoint; a retained recapture shall keep that checkpoint and source generation rather than bless the current ledger as a new pre-effect boundary, shall freeze its common frame mirror as capture-time authority even when a later host mirror extends it, and ordinary restore or later adoption shall reenter the same fence until reconciliation proves the whole extension safe.
+The duplicate-effect warning of [[playbook-captain-47](#playbook-captain-47)] shall never authorize work through this fence.
+
+#### playbook-captain-56
+
+Where an active root or nested leaf returns the state-only `unresolved-effect` result of [[playbook-runtime-79](playbook-runtime.md#playbook-runtime-79)], the shell shall treat it as a nonterminal host-disposal request rather than translate it into a `PlaybookCallResult`, an authored workflow outcome, or a completion fact ([DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §4).
+The runtime-result consumption step shall emit no finished lifecycle line, create no terminal retention update, dispose no frame as final, pop no nested leaf, and call no parent's `resumePlaybookCall`; the host-owned abandonment settlement and disposal of [[playbook-captain-58](#playbook-captain-58)] shall remain a distinct operation rather than terminal-result handling.
+The shell shall derive no state description, output, repository identity, or completion claim from that runtime result.
+
+#### playbook-captain-58
+
+`PlaybookCaptainUnresolvedEffect` shall be an exact detached JSON-safe object with required `classification`, required `baselineHead`, optional `afterHead`, and optional `commitOid`, where each present HEAD or commit value is a canonical 40- or 64-lowercase-hex Git OID and `classification` is exactly `one-descendant-commit`, `multiple-commits`, `rewritten-or-non-descendant`, `worktree-only-change`, `concurrent-or-foreign-change`, `observation-ambiguous`, or `incomplete` ([DR-040](../decisions/040-outcome-authority-effect-reconciliation.md) §4).
+Every entry shall carry its envelope's baseline HEAD, shall carry `afterHead` if and only if a complete after HEAD was observed, and shall carry `commitOid` if and only if `classification` is `one-descendant-commit`, in which case `commitOid` shall equal `afterHead`.
+`assertPlaybookCaptainUnresolvedEffects` shall be a pure boundary that rejects a non-array, sparse or non-JSON value, unknown or missing entry member, unsupported classification, malformed OID, unlawful after-HEAD presence, or unlawful commit-OID presence or equality and returns one detached recursively frozen list without reading a repository, runtime, or host capability.
+At a safe ordinary settlement the shell shall collect only the host-only boundary or logical-operation identities exposed by each schema-3 runtime's optional unresolved-envelope seam under [[playbook-runtime-34](playbook-runtime.md#playbook-runtime-34)], add every unresolved envelope imposed by the root-wide retained-effect fence of [[playbook-captain-54](#playbook-captain-54)], and project them solely against the complete current acknowledged ledger mirror of [[playbook-captain-50](#playbook-captain-50)]; a runtime that advertises unresolved-effect control without the required identities, a malformed or absent referenced ledger member, or a contradictory projection shall make settlement unsafe.
+The projection shall contain every currently outstanding effect-possible, outcome-unresolved envelope in ascending first physical-boundary sequence, shall deduplicate repeated identities, shall exclude every reconciled or finalized boundary outside host settlement of lost progress [[recovery-27](recovery.md#recovery-27)], and shall represent an open deferred chain from [[playbook-runtime-73](playbook-runtime.md#playbook-runtime-73)] exactly once at its first boundary position from the logical operation's original baseline, latest available after observation, and cumulative receipt when present rather than repeat its physical receipts.
+A standalone boundary without a complete physical receipt shall use `incomplete`; an open logical operation shall use its cumulative logical receipt when present and otherwise reconcile its original baseline with the latest complete after or checkpoint evidence without a new observation, using `incomplete` when its latest physical boundary lacks a complete receipt and preserving a fail-closed latest physical classification where its preceding checkpoint chain does not prove only same-HEAD `unchanged` or `worktree-only-change` steps.
+For that receipt-less chain, an exact original-to-latest observation shall be omitted, a same-HEAD delta shall use `worktree-only-change` only when the latest physical receipt is `unchanged` or `worktree-only-change` and either the latest projection preserves the original projection byte-for-byte or that receipt's own baseline projection is the original projection, and `one-descendant-commit` shall be retained with its commit OID only when the latest physical receipt proves it from the original HEAD and either the latest projection equals the original projection or that receipt's own baseline projection is the original projection ([DR-062](../decisions/062-pre-existing-changes-are-context.md)); any residual, overwritten baseline projection, incompatible checkpoint ancestry, or physically ambiguous classification shall remain `observation-ambiguous` rather than be promoted by the later receipt.
+The bounded list shall omit repository paths, projection contents or digests, the raw ledger, boundary, operation, call, runtime, session, player, or generation identities, player prose, semantic candidates, and correction budgets, and shall never enter the runtime-owned `PlaybookRunResult` of [[playbook-runtime-79](playbook-runtime.md#playbook-runtime-79)].
+Before returning every controller settlement to the artifact-schema-3 session Captain, the shell shall freeze one canonical list and give the `SettlementEvidence` of [[captain-playbook-9](captain-playbook.md#captain-playbook-9)] one exact detached validated copy alongside its structured settlement and bounded terminal-result facts rather than an aggregate transcript; for a non-`respond` selection this shall happen before its result phase, while a direct `respond` shall freeze before its single presentation.
+The shell shall reuse an exact validated copy at that turn's later `exportSettlement()` boundary without another repository observation; a safe settlement reached without controller work shall instead project the current canonical list without fabricating controller evidence or result-phase facts.
+For every controller settlement whose list is nonempty, including one leaving an episode parked, a direct `respond` over that episode, and unresolved-effect abandonment, the shell shall append one deterministic Boss-visible report before any later recovery action: `one-descendant-commit`, `multiple-commits`, `rewritten-or-non-descendant`, `worktree-only-change`, and `concurrent-or-foreign-change` shall be identified as observed repository changes, while `observation-ambiguous` and `incomplete` shall be identified only as possible effects whose change could not be excluded; each entry shall carry its exact baseline HEAD, exact after HEAD or explicit unavailability, and proven commit OID when present, followed by an explicit statement that the evidence proves neither workflow completion nor ownership of a change or commit.
+That deterministic report shall pass through the one Captain-speech presentation seam, supplement rather than replace any already mandatory presentation suffix, and expose no path, projection, ledger, envelope identity, prose, semantic candidate, or correction budget.
+Each entry shall be one statement of the report assembly of [[playbook-captain-69](#playbook-captain-69)] reading `<n>. Observed repository change: <clause>; <heads>.` or, for a possible effect, `<n>. Possible repository effect, which could not be excluded: <clause>; <heads>.`, naming its classification by its clause below and never by its code, where `<heads>` is `HEAD moved from <baselineHead> to <afterHead>`, with `the proven commit <afterHead>` in place of `<afterHead>` for a proven commit OID, `HEAD stayed at <baselineHead>` where both are equal, or `the repository stood at <baselineHead> before it; no HEAD was available after it` without an after HEAD:
+
+| Classification | Clause |
+| --- | --- |
+| `one-descendant-commit` | `the step made one new commit` |
+| `multiple-commits` | `the step made more than one commit` |
+| `rewritten-or-non-descendant` | `the repository history was rewritten` |
+| `worktree-only-change` | `the step left changes uncommitted` |
+| `concurrent-or-foreign-change` | `the repository changed outside this step` |
+| `observation-ambiguous` | `the repository could not be observed after the step` |
+| `incomplete` | `the step's effect on the repository was not fully recorded` |
+
+The list shall be nonempty exactly when the settlement leaves or abandons an effect-possible outcome-unresolved episode and shall be empty otherwise; host settlement of lost progress shall preserve its possibly empty list under [[recovery-27](recovery.md#recovery-27)] without invoking this active-runtime abandonment transaction.
+The shell's optional unresolved-effect settlement capability shall expose exactly asynchronous `begin({ rootPlaybookId, unresolvedEffects })` and `complete({ rootPlaybookId, unresolvedEffects })` operations over a nonblank active-root playbook id and the same nonempty validated frozen list, and absence of that capability shall make abandonment with nonempty evidence fail without disposal.
+For nonempty evidence after the state-only abandonment result of [[playbook-captain-56](#playbook-captain-56)], the shell shall freeze the final projection while the complete active stack still exists, await the capability's durable `begin` acknowledgement, dispose the complete root stack leaf to root without restoring source state, replaying a player, translating a nested result, or resuming a parent FSM, stage one `clear` update for that root even when the unresolved boundary belonged to a nested leaf, and await `complete` acknowledging that the host atomically persisted that same list with the root clear before controller presentation.
+Only that successful persistence and disposal shall return controller `status: 'ok'` with control-receipt `disposition: 'executed'`; a begin, disposal, clear, or completion failure shall return `failed`, make that turn's shell settlement unexportable so a front end cannot erase the uncertain boundary, never expose an executed receipt, and introduce no fourth controller status.
+
+#### playbook-captain-65
+
+When the shell presents a Boss turn's reply through the presentation seam of [[playbook-captain-58](#playbook-captain-58)] — every reply it presents, closing, command, failure, give-up and interrupted-report alike — it shall append one deterministic Boss-visible report of every completed receipt after `presentedEffectPrefix` [[playbook-captain-41](#playbook-captain-41)] that proved `one-descendant-commit` with `preExisting` absorbed or altered paths [[playbook-runtime-69](playbook-runtime.md#playbook-runtime-69)], assembled with the reply as [[playbook-captain-69](#playbook-captain-69)] states and naming, per commit OID, the absorbed paths and the altered paths, at most 24 paths per list with the count of any remainder, and stating that those changes were uncommitted before the step, and shall advance `presentedEffectPrefix` to the boundary count that report read only when that reply was emitted without cancellation ([DR-062](../decisions/062-pre-existing-changes-are-context.md), [DR-073](../decisions/073-durable-step-progress.md)):
+
+- the report supplements the unresolved-effect report and names no other path, content, or identity;
+- when the turn has a result phase, the same commits and paths join its settlement facts as one fact per commit before that phase, so its result-phase prompt reads them;
+- a reply whose receipts after the prefix carry no such path appends nothing and still advances the prefix;
+- an aborted reply, a turn that presents no reply, and every progress write leave the prefix unchanged, so the next presented reply carries the unpresented report.
+
+#### playbook-captain-67
+
+When a Boss turn settles with the active leaf parked in its failure state or behind the retained-effect fence of [[playbook-captain-54](#playbook-captain-54)], the shell shall append one deterministic Boss-visible report through the presentation seam of [[playbook-captain-58](#playbook-captain-58)] — a `Failure:` line stating the failure's cause [[playbook-runtime-96](playbook-runtime.md#playbook-runtime-96)] and then a `Controls:` list naming each advertised control by its Boss-facing label with its standing and, where the standing is not `ready`, the Boss-facing phrase for its reason [[playbook-runtime-97](playbook-runtime.md#playbook-runtime-97)] — assembled with the reply as [[playbook-captain-69](#playbook-captain-69)] states ([DR-063](../decisions/063-failures-explain-themselves.md)):
+
+- the cause is the leaf's published one, or, behind the fence where the leaf publishes none, `receipt-missing` read from the first incomplete entry of that turn's frozen unresolved-effect evidence [[playbook-captain-58](#playbook-captain-58)]; a parked failure whose error publishes no cause is reported as a runtime defect naming that error, so no failure is reported without one;
+- the `Failure:` line states the reason of the cause's failure statement [[playbook-captain-71](#playbook-captain-71)] where that reason is a phrase, and otherwise the failure statement of `the step`;
+- the controls are the leaf's advertised actions under the fence rule of [[playbook-captain-60](#playbook-captain-60)], each read at the standing of [[playbook-runtime-97](playbook-runtime.md#playbook-runtime-97)], followed by the shell's own [[playbook-captain-62](#playbook-captain-62)], and a nested playbook is named by its registered command;
+- the cause joins that turn's settlement facts once, so its result-phase prompt reads one statement for one failure: where a fact that turn already stated the leaf's parked failure — the leaf's failed run result, or a runtime action's failed receipt or a thrown first turn, delivery, or runtime action whose error message equals the leaf's recorded error message once each has its control characters spaced, its ends trimmed, and its length bounded as [[playbook-captain-74](#playbook-captain-74)] states — that fact is restated in its place with the cause as its reason, and otherwise the cause joins as the leaf's own failure statement `/<command> failed: <reason>.` [[playbook-captain-71](#playbook-captain-71)];
+- the report supplements the unresolved-effect and carried-changes reports, exposes no file content, player output, or internal identity, and enters no run result or unresolved-effect list.
+
+#### playbook-captain-69
+
+When the shell presents Boss-facing text it composed itself — the settlement facts a fallback or give-up reply lists [[playbook-captain-34](#playbook-captain-34)] [[playbook-captain-63](#playbook-captain-63)] and the resumption-warning, unresolved-effect, carried-changes, and failure reports it appends to any reply [[playbook-captain-47](#playbook-captain-47)] [[playbook-captain-58](#playbook-captain-58)] [[playbook-captain-65](#playbook-captain-65)] [[playbook-captain-67](#playbook-captain-67)] — it shall assemble them as one report of three kinds of statement — the listed facts, the numbered unresolved-effect entries, and the `Failure:` line — whose kinds, never the lengths of their words, decide what is dropped, leaving the words a model composed unchanged:
+
+- each statement ends in exactly one terminal mark: a run of marks at its very end collapses to its first and a statement ending in none gains a period, while punctuation inside it, such as `main..HEAD` or `../config.yaml`, stays;
+- a statement carries a reason where it holds that reason as a whole phrase — case and terminal mark aside, and not inside a longer word or command — in its Boss-facing words, a runtime action's id renamed to its label outside code spans only;
+- the `Failure:` line's reason is the one it states [[playbook-captain-67](#playbook-captain-67)], and a listed fact's reasons are those the renderer gave that turn's failure statements [[playbook-captain-71](#playbook-captain-71)] — each a phrase, or a recorded reason in its code span — that the fact holds, or, where it holds none, the whole fact;
+- an unresolved-effect entry records a boundary of its own and is never dropped or merged, however alike two entries read;
+- a listed fact is dropped where an entry, or a listed fact before it that stays, carries every reason it has, so of two such facts the earlier stays;
+- the `Failure:` line is dropped where an entry or a listed fact that stays carries its reason, so after a model-composed reply, which lists no fact, it stays, once, as the shell's exact record beside the model's prose unless an entry carries its reason;
+- the resumption warning and the carried-changes report are dropped where the reply lists every fact they state, while the `Controls:` list always stays;
+- each statement that stays is weighed by the reply validation of [[playbook-captain-9](#playbook-captain-9)] in its words outside code spans: a code span whose content repeats a live session, live state, or supplied identifier [[playbook-captain-9](#playbook-captain-9)] reads, with the noun before it, `an internal error`; a reason the renderer phrased that turn whose own words fail is withheld, `: <reason>` reading ` with an internal error.` and a `Failure:` line of that reason reading `Failure: the step failed with an internal error.`; a failure subject beginning the statement whose own words fail reads `The step`; a quoted action label whose own words fail reads `the selected action`; and no statement is ever left out, whatever words are left.
+
+#### playbook-captain-71
+
+When the shell puts a failure into words, for the Boss or for a turn's settlement facts, it shall state it as one failure statement `<Subject> failed: <reason>.`, `<Subject>` naming what failed in the Boss's words — such as `the first turn of /code`, `the deliver action`, `applying "<action>"`, `dismissing /code`, `cleanup after /code`, or `the step` — and `<reason>` the first of these that applies to the error or cause the shell recorded:
+
+1. the phrase of its cause's code in the table below, for a cause the closed validator accepts, whether the leaf published it or the recorded error carries it;
+2. the phrase of a reason or message the runtime mints from a closed set [[playbook-captain-76](#playbook-captain-76)];
+3. any other recorded reason or message quoted where it reads as prose [[playbook-captain-74](#playbook-captain-74)];
+4. otherwise that reason shown once as recorded, the statement reading ``<Subject> failed with the error `<reason>`.`` [[playbook-captain-74](#playbook-captain-74)].
+
+| Code | Phrase |
+| --- | --- |
+| `commit-missing` | `the step had to commit its work and committed nothing.`, or with uncommitted paths `the step had to commit its work and committed nothing; these changes are uncommitted: <uncommitted>.` |
+| `commit-residual` | `<subject> left changes uncommitted: <uncommitted>.`, else with altered paths `<subject> left altered changes uncommitted: <altered>.`, else `<subject> left changes uncommitted beside it.`, where `<subject>` is `the commit <commitOid>` or, without one, `the step's commit` |
+| `pre-existing-lost` | `uncommitted changes you had were lost: <lost>.` |
+| `commits-more-than-one` | `the step made more than one commit; HEAD moved from <baselineHead> to <afterHead>.` |
+| `history-rewritten` | `the repository history was rewritten; HEAD moved from <baselineHead> to <afterHead>.` |
+| `foreign-change` | `the repository changed outside this step: <changed>.` |
+| `observation-unstable` | `the repository could not be observed after the step; the repository stood at <baselineHead> before it.` |
+| `attribution-ambiguous` | `the repository change could not be attributed to this step: it should have left <required> but left <observed>.` |
+| `receipt-missing` | `the step's effect on the repository was not fully recorded; the repository stood at <baselineHead> before it.` |
+| `judge-failed` | `the step's outcome could not be decided.`, its closed `reason` and transport `error` staying in the cause's data |
+| `player-failed` | the failure statement of `the <roleId> call` whose reason is its error message by rules 2 to 4, or `the <roleId> call failed.` without one |
+| `aborted` | `the turn was aborted before the work settled.` |
+| `child-failed` | the failure statement of `the nested <playbook> run` for its nested cause, or `the nested <playbook> run failed.` without one, where `<playbook>` is the registered command or, for one not enabled, its id |
+| `runtime-defect` | its `reason` by rules 2 to 4 |
+
+- a statement standing alone begins with a capital letter while one used as a phrase does not, a statement whose failure recorded nothing reads `<Subject> failed.`, and a site may follow it with what the failure leaves unconfirmed, such as whether the action changed the session [[playbook-captain-35](#playbook-captain-35)];
+- each path list names at most 24 paths and then `… and <n> more` for the rest, the evidence's `truncated` count included;
+- `<required>` reads `no change`, `one new commit`, or `a change deferred to a later step` for `unchanged`, `one-descendant-commit`, or `deferred`, and `<observed>` reads `no change`, `one new commit`, `more than one new commit`, `rewritten history`, `uncommitted changes only`, `a change made outside the step`, or `a state that could not be read` for `unchanged`, `one-descendant-commit`, `multiple-commits`, `rewritten-or-non-descendant`, `worktree-only-change`, `concurrent-or-foreign-change`, or `observation-ambiguous`.
+
+#### playbook-captain-74
+
+When a failure statement [[playbook-captain-71](#playbook-captain-71)] or the runtime's refusal of an action, `The runtime refused "<action>": <reason>`, quotes a recorded reason or error message the runtime does not mint from a closed set [[playbook-captain-76](#playbook-captain-76)], the shell shall space its control characters, trim its ends, and bound its length as it bounds other quoted foreign evidence, and then show it exactly once:
+
+| What it is | Shown as |
+| --- | --- |
+| prose: it begins with no error-class name, holds a space, begins with a capital letter, ends in `.`, `!`, or `?`, holds no word that is a machine-shaped identifier of [[playbook-captain-9](#playbook-captain-9)] — one carrying an internal capital, a digit, an underscore, a dot, a hyphen, or a colon — and holds nothing the reply validation of [[playbook-captain-9](#playbook-captain-9)] refuses | quoted, ending in exactly one terminal mark: a run of marks at its end collapses to its first |
+| anything else, such as `callPlayer status "error".`, `Rate limit exceeded`, `The config.yaml file is missing.`, `TypeError: Cannot read properties of undefined (reading 'x').`, or `ENOENT: no such file or directory` | whole and unchanged in a Markdown code span whose backtick fence is longer than any backtick run it holds, as ``<Subject> failed with the error `<reason>`.`` or ``The runtime refused "<action>" with the reason `<reason>`.``, never replaced by a sentence that hides it except where [[playbook-captain-69](#playbook-captain-69)] withholds an identifier it repeats |
+| nothing | nothing: `<Subject> failed.` or `The runtime refused "<action>".` |
+
+- an error-class name is `Error`, `Exception`, `Failure`, or `Defect`, alone or ending a CamelCase identifier, followed by `: `, and a reason beginning with one is machine text by origin, so it goes whole into the code span, that name included, however what follows the name reads;
+- a word is a run of ASCII letters, digits, underscores, and `$` signs, or several such runs each joined to the next by one `.`, `:`, or `-` — the tokens in which the reply validation of [[playbook-captain-9](#playbook-captain-9)] finds an identifier — so quotes, parentheses, backticks, and slashes end a word without making one machine-shaped.
+
+#### playbook-captain-76
+
+When a failure statement [[playbook-captain-71](#playbook-captain-71)] or the runtime's refusal of an action [[playbook-captain-74](#playbook-captain-74)] quotes a reason or error message that, its control characters spaced and its ends trimmed, is exactly one of the closed set below, which holds every reason the runtime records from its own literal text — each `judge-failed` and `runtime-defect` reason it writes itself [[playbook-runtime-96](playbook-runtime.md#playbook-runtime-96)], its stand-ins for a missing player or error message, and its refusal of an action it does not advertise [[playbook-runtime-52](playbook-runtime.md#playbook-runtime-52)] — the shell shall say it by that reason's phrase and never in a code span, the recorded reason staying in the data that carries it:
+
+| Reason the runtime records | Phrase |
+| --- | --- |
+| `action "<id>" is not currently advertised` | `that action is no longer offered.` |
+| `judge transport failed`, `corrective judge failed`, `corrective semantic candidate is invalid`, or `semantic correction budget is unavailable` | `the step's outcome could not be decided.` |
+| `missing-repository-receipt`, `invalid-repository-receipt`, `repository-disposition-mismatch`, or `missing-effect-evidence` | `the repository evidence for the step is missing or inconsistent, so the step's outcome was not accepted.` |
+| `missing-presentation-evidence`, `missing-runtime-evidence`, `inconsistent-runtime-evidence`, or `deferred player result has no semantic evidence` | `the step's reported result is incomplete or inconsistent, so its outcome was not accepted.` |
+| `no-matching-outcome` | `the playbook has no next step for this result.` |
+| `host omitted governed semantic settlement` | `the host did not settle the step's outcome.` |
+| `deferred question did not receive an eligible durable binding` | `the step's question could not be kept for a later reply.` |
+| `callPlayer status "error"` or `captainBridge: callPlayer status "error"` | `the player reported an error without a message.` |
+| `callPlayer status "aborted"` or `captainBridge: callPlayer status "aborted"` | `the player call was aborted.` |
+| `captainBridge: callPlayer returned status=ok with no finalText` | `the player call returned nothing.` |
+| `captainActor: callCaptain status "error"` or `captainActor: callCaptain status "aborted"` | `the Captain call did not complete.` |
+| `captainActor: callCaptain returned status=ok with no finalText` | `the Captain call returned nothing.` |
+| `<label> retained governed semantic envelope is no longer exact` | `the step's retained result no longer matches.` |
+| `<label> parallel state <state> cohort failed` | `a parallel step failed.` |
+| `<label> governed semantic reconciliation remains unresolved` | `the step's outcome could not be reconciled.` |
+| `<label> reconstructed governed output changed before FSM acceptance` | `the step's result changed before it was accepted.` |
+| `<label> deferred continuation remains unresolved` | `the deferred step is still unresolved.` |
+| `<label> deferred player returned no result` | `the deferred player returned nothing.` |
+| `<label> governed outcome remains unresolved: <reason>` | `the step's outcome could not be settled.` |
+| `<label> actor entered error status` | `the step's actor failed.` |
+| `apply settled with outcome failed` | `the action did not complete.` |
+| `apply settled with outcome aborted` | `the action was stopped.` |
+| `unknown runtime defect` | `the runtime failed without saying why.` |
+| `Unknown error` | `an unknown error.` |
+
+- `<id>` is the action id as a JSON string, whatever it holds, while `<label>` is the runtime's diagnostic label — `playbook` unless the playbook names its own — `<state>` a state id, and `<reason>` a governed settlement's reason, each any nonempty text.
 
 ## Verification
 
@@ -1090,12 +1386,11 @@ status, visibility request, or telemetry event (verifying [[playbook-captain-1](
 
 #### playbook-captain-13
 
-
 Where the test suite drives ordinary Boss text through the Playbook
 Captain shell with scripted decision replies, the test suite shall
 fail unless every non-command turn produces exactly one hidden
 durable decision call; the executable selections are exactly
-`respond`, `start`, `switch`, `dismiss`, `deliver`, and `runtime`;
+`respond`, `resume`, `start`, `switch`, `dismiss`, `deliver`, `runtime`, and `recover`;
 `deliver` hands the shell-supplied original Boss text unchanged to
 the active leaf — a scripted `deliver` selection carrying a
 divergent text payload still delivers the exact Boss text, the
@@ -1120,6 +1415,28 @@ carries one nonempty scalar input: a parse-resolved selection carries
 its command remainder unchanged, a model-decided selection after
 several planning turns may carry the complete agreed request, and a
 missing, empty, or non-string input is rejected before any effect (verifying [[playbook-captain-1](#playbook-captain-1)], [[playbook-captain-2](#playbook-captain-2)], [[playbook-captain-7](#playbook-captain-7)], [[playbook-captain-9](#playbook-captain-9)]).
+
+#### playbook-captain-61
+
+Where the test suite drives the Playbook Captain shell with an engaged leaf whose control view it scripts, and drives one real session host over a real store whose real CODE artifact parks in its recoverable failure state, the test suite shall fail unless the host's reading and its selection both hold:
+
+- an idle shell, a leaf whose runtime exposes no control surface, and a leaf whose control view throws each publish no action, while an engaged leaf publishes its advertised `{ id, label }` pairs frozen and in order [[playbook-captain-60](#playbook-captain-60)];
+- a selection naming an action the leaf does not advertise, and one naming no action at all, are refused with a reason and start no turn [[playbook-captain-7](#playbook-captain-7)];
+- the selected action's turn allocates no decision call, applies exactly that action id once through the leaf's `apply` under that turn's idempotency key [[playbook-captain-8](#playbook-captain-8)], and closes with the ordinary outcome-report reply naming the action by its Boss-facing label [[playbook-captain-20](#playbook-captain-20)];
+- a turn whose text is not the selection's is decided by the ordinary decision call, with the selection dropped and nothing applied [[playbook-captain-7](#playbook-captain-7)];
+- over the session host, the selection settles one durable turn whose Boss text is that advertised label and leaves the real artifact out of its failure state, with no decision call made for it or for the command turn that parked it [[playbook-captain-7](#playbook-captain-7)] [[playbook-captain-60](#playbook-captain-60)].
+
+#### playbook-captain-64
+
+Where the test suite drives the Playbook Captain shell with an engaged leaf whose control view it scripts, and drives one real session host over a real store whose real CODE artifact parks in its recoverable failure state, the test suite shall fail unless the shell's own control and its selection both hold:
+
+- an idle shell publishes no shell control, while an engaged root publishes exactly one whose label names its registered command [[playbook-captain-62](#playbook-captain-62)];
+- a selection naming a control the shell does not advertise, and one naming none, are refused with a reason and start no turn [[playbook-captain-7](#playbook-captain-7)];
+- the give-up turn allocates no session-Captain call of either kind and still presents exactly one closing reply composed from its own settlement [[playbook-captain-63](#playbook-captain-63)];
+- a turn whose text is not the selection's is decided by the ordinary decision call, with the selection dropped and the root still engaged [[playbook-captain-7](#playbook-captain-7)];
+- over the session host, the selection settles one durable turn leaving the shell idle with that root's retained generation cleared, so the settled session offers no resumption of it [[playbook-captain-44](#playbook-captain-44)];
+- a leaf publishing no control surface, one whose control view throws, and one standing behind the retained-effect fence each publish the shell's control all the same, the surfaces staying disjoint in both directions [[playbook-captain-62](#playbook-captain-62)].
+- selecting give-up over a real unresolved CODE run and a retained nested stack shall dispose the entire root without a leaf action or parent resumption, preserve the exact evidence through durable abandonment and presentation, and clear retention; absent settlement capability or failure at begin, disposal, or completion shall leave settlement unexportable and present no successful-stop claim [[playbook-captain-63](#playbook-captain-63)].
 
 ### Lifecycle and telemetry
 
@@ -1157,7 +1474,7 @@ Captain and its durable conversation live (verifying [[playbook-captain-3](#play
 #### playbook-captain-15
 
 
-Where the test suite initializes the shell with the real CODE, REVIEW, and DECIDE registries, it shall fail unless every registry declares artifact schema `2`, a missing, other, or shared-factory-disagreeing schema rejects before runtime construction, CODE declares role `coder`, REVIEW and DECIDE declare `coder` and `reviewer`, CODE and REVIEW declare no concurrent role set, DECIDE declares exactly `[['coder', 'reviewer']]`, malformed concurrent sets reject, each normalized role map covers the exact required set, each current empty option schema is validated without constructing a runtime, each runtime init receives exact role bindings whose prompt identities use the concrete model value or the established adapter for `provider-default`, and each later player call reaches only its explicitly bound player id (verifying [[playbook-captain-5](#playbook-captain-5)], [[playbook-captain-10](#playbook-captain-10)], and [[playbook-captain-16](#playbook-captain-16)]).
+Where the test suite initializes the shell with the real CODE, REVIEW, and DECIDE registries, it shall fail unless all three declare artifact schema `3` and expose shared-factory profiles each carrying its own factory's identical immutable compatibility record; schema-2, missing-schema, malformed-profile, unsupported-schema, shared-factory-disagreeing, and bespoke-disagreeing manifest fixtures shall reject before option validation or runtime construction; every imported manifest member is read once before later use; raw and validator-produced `hostCapabilities` reject before factory work; absent, extra, malformed, or artifact-authority-mismatched current-host capabilities reject before `createRuntime`; each real registry receives its exact capability as the distinct second factory argument while the first remains only configured options; CODE declares role `coder`; REVIEW and DECIDE declare `coder` and `reviewer`; CODE and REVIEW declare no concurrent role set; DECIDE declares exactly `[['coder', 'reviewer']]`; malformed concurrent sets reject; each normalized role map covers the exact required set; each current empty option schema is validated without constructing a runtime; each runtime init receives exact role bindings whose prompt identities use the concrete model value or the established adapter for `provider-default`; and each later player call reaches only its explicitly bound player id (verifying [[playbook-captain-5](#playbook-captain-5)], [[playbook-captain-10](#playbook-captain-10)], and [[playbook-captain-16](#playbook-captain-16)]).
 The suite shall reject an absent `sessionAgents` projection, a referenced player missing from it, or an extra unreferenced player before runtime construction (verifying [[playbook-captain-16](#playbook-captain-16)]).
 The suite shall also fail unless runtime Captain and judge calls preserve their visibility, resume, and optional tool-isolation selections through the shared single-flight Captain queue (verifying [[playbook-captain-9](#playbook-captain-9)] and [[playbook-captain-10](#playbook-captain-10)]).
 
@@ -1250,7 +1567,7 @@ action's ordered status and telemetry emissions settle, whose prompt
 carries the settlement's outcome-report facts verbatim, the exact
 saved counts, and the instruction to compose the closing reply only
 from that outcome report; the validated closing reply is the turn's
-only summary; and, when the active registry entry declares a
+only summary; and, when the counting owner as defined by [[playbook-captain-20](#playbook-captain-20)] declares a
 `summaryPolicy` and the turn's counted activity is nonzero, the
 prompt carries the exact supplied saved-counts line
 `Saved you X interruptions and Y copy-pastes across Z rounds of reviews/rebuttals.`
@@ -1261,14 +1578,11 @@ result-phase call with no action effect; the literal substring
 `Saved you` shall appear nowhere on either zero-activity turn.
 A zero-activity accepted action and an entry without a `summaryPolicy`
 shall likewise produce no saved-counts line.
-The suite shall fail unless completed
-sub-runtime player replies increment the interruption count by one
-per reply; adjudicated guards named by their emitting frame's
-`summaryPolicy` copy-paste guard list increment the copy-paste count
-by one per handoff; guards absent from that list,
+The suite shall also verify that a child-only turn uses the child's saved-counts line while a resumed parent becomes owner of the combined counts [[playbook-captain-20](#playbook-captain-20)].
+The suite shall fail unless only distinct schema-4 `outcome.accepted` traces successfully published inside the active action window with matching frame identity and a positive runtime-local turn increment interruption counts, a `needsBossReply` accepted outcome increments neither count so a turn that only parked on a Boss question carries no saved-counts line while the handoffs around it still count, only their accepted-outcome names listed by the emitting frame's `summaryPolicy` increment copy-paste counts, and a direct player result, raw judge result, earlier trace schema, duplicate sequence, foreign frame or causality, invalid runtime turn, or host-rejected accepted trace increments neither even where prior shell turns make the runtime-local turn differ from the Boss-turn id.
+Accepted outcomes absent from that list,
 classifier/event JSON, session-Captain decision and result-phase
-calls, and
-malformed adjudication replies do not increment the copy-paste
+calls, and malformed adjudication replies shall not increment the copy-paste
 count; sub-runtime state telemetry during the turn contributes only
 an aggregate summary-visible progress phrase and round total,
 counting each root or descendant frame under its own registry `summaryPolicy` labels exactly as
@@ -1281,7 +1595,7 @@ transition / guard names, internal state counts, or how-it-was-done
 narration, and without shell ledger JSON, followed by the
 saved-counts line exactly when the supplied counted activity is
 nonzero (verifying [[playbook-captain-7](#playbook-captain-7)], [[playbook-captain-19](#playbook-captain-19)], [[playbook-captain-20](#playbook-captain-20)]).
-The suite shall fail unless a root that reaches final completion on its first input contributes exactly one completion fact carrying its quoted runtime-published result meaning before disposal, the hidden prompt and surfaced reply contain no opaque run output, and a root that instead parks and then finishes on delivery retains the established delivery fact plus the same single central completion fact without a second disposal-only completion message (verifying [[playbook-captain-20](#playbook-captain-20)]).
+The suite shall fail unless a root that reaches final completion on its first input contributes exactly one completion fact carrying its quoted terminal-result meaning before disposal, an older runtime that omits the field falls back to its live control-view description and then the no-description statement, the hidden prompt and surfaced reply contain no opaque run output, and a root that instead parks and then finishes on delivery retains the established delivery fact plus the same single central completion fact without a second disposal-only completion message (verifying [[playbook-captain-20](#playbook-captain-20)]).
 
 ### Playbook Session Bridge Coverage
 
@@ -1302,16 +1616,17 @@ and passed-through `playbook.trace` shall carry the active id as both
 session and root-session id with depth zero.
 The shell bridge shall forward `resume: false` and explicit tokens to the bound host player and preserve the host's returned `resumeToken` (verifying [[playbook-captain-10](#playbook-captain-10)]).
 A real tmux-play integration shall prove that a later root engagement resumes an earlier token exactly when its role names the same player id, while a distinct id starts fresh even under identical settings (verifying [[playbook-captain-10](#playbook-captain-10)] and [[playbook-captain-26](#playbook-captain-26)]).
-The suite shall fail unless explicit equal ids make CODE and REVIEW share Coder continuity and DECIDE and REVIEW share Coder and Reviewer continuity; a child-only player remains continuous after return and in a later root; root or child disposal does not clear the Captain-session ledger; a current player model or effort value or provider-default selection reaches the next call with the stored token; an adapter, active player-id, instruction, or permissions change rejects before a host call; every player call reapplies the complete settings; and an unsupported selection preserves the prior token without a fresh fallback (verifying [[playbook-captain-10](#playbook-captain-10)] and [[playbook-captain-26](#playbook-captain-26)]).
+The suite shall fail unless explicit equal ids make CODE and REVIEW share Coder continuity and DECIDE and REVIEW share Coder and Reviewer continuity; a child-only player remains continuous after return and in a later root; root or child disposal does not clear the Captain-session ledger; current player model or effort values or provider-default selections and absent, literal-false, or literal-true fast mode reach the next call with the stored token; an adapter, active player-id, instruction, or permissions change rejects before a host call; every player call reapplies the complete settings; and an unsupported selection preserves the prior token without a fresh fallback (verifying [[playbook-captain-10](#playbook-captain-10)] and [[playbook-captain-26](#playbook-captain-26)]).
 The suite shall also start two simultaneous calls through different local roles bound to one player id and fail unless the second rejects before the host, while simultaneous calls to distinct player ids may overlap (verifying [[playbook-captain-10](#playbook-captain-10)]).
-It shall fail unless the same-player lane remains locked between host resolution and the owning runtime's exact update; an absent, repeated, stale, mismatched-role, mismatched-frame, or aborted update cannot publish or cancel another owner; `ok` without a token clears while non-`ok` without a token preserves; and a transition-worthy uncommitted, late, or malformed resolved result quarantines the lane so no later call uses its old token and no snapshot claims safety (verifying [[playbook-captain-10](#playbook-captain-10)]).
+It shall fail unless the same-player lane remains locked between host resolution and the owning runtime's exact update; an absent, repeated, stale, mismatched-role, mismatched-frame, or aborted update cannot publish or cancel another owner; `ok` without a token clears while non-`ok` without a token preserves; and a transition-worthy uncommitted, late, or malformed resolved result quarantines the lane so no later call uses its old token and no snapshot claims safety before the cancelled-turn exception (verifying [[playbook-captain-10](#playbook-captain-10)]).
+After cancelling a later call of an already parked child and draining admitted calls, the suite shall verify that its uncertain provider hint is gone, the paused stack exports safely, and a new call can continue that child without repeating its parent (verifying [[playbook-captain-10](#playbook-captain-10)] and [[recovery-17](recovery.md#recovery-17)]).
 It shall also fail unless a runtime's attempt to invoke `PlayerSessionStore.restore` outside its exact shell-restoration callback rejects without changing the common token or an active transaction (verifying [[playbook-captain-10](#playbook-captain-10)] and [[playbook-captain-42](#playbook-captain-42)]).
 The real host shall also prove
 that final completion and active host teardown each deliver exactly one
 `session.disposed` trace before session emissions close, without a
 second disposal from the post-close Captain hook.
 The suite shall fail unless durable session-Captain calls resume the
-pinned conversation token with the current model and effort selection, preserve the pin without fresh fallback when either selection rejects, each returned token replaces the pin, and
+pinned conversation token with the current model, effort, and optional fast-mode settings, preserve the pin without fresh fallback when any selection rejects, each returned token replaces the pin, and
 an interleaved sub-runtime judge call runs fresh and never replaces
 the pin, the next durable call resuming the latest pinned token (verifying [[playbook-captain-31](#playbook-captain-31)]).
 Visible status and closing replies shall remain unchanged and shall
@@ -1342,6 +1657,7 @@ Every frame shall fail unless it receives a distinct UUID and the
 correct root, parent, call, and depth fields; trace pass-through shall
 preserve those fields and order child disposal before the parent's call
 finish.
+A terminal child shall fail unless the `ok` result its parent receives carries that child's published terminal record unchanged, and omits the member when the child published none (verifying [[playbook-captain-29](#playbook-captain-29)]).
 The suite shall fail unless the child retains its own exact role map, its visible panes equal the distinct bound player ids, equal ids share the Captain-session ledger regardless of role spelling, and same-named roles with distinct ids remain independent (verifying [[playbook-captain-22](#playbook-captain-22)], [[playbook-captain-26](#playbook-captain-26)], and [[playbook-captain-29](#playbook-captain-29)]).
 The test suite shall fail unless disabled targets, active-path cycles,
 a second child from one frame, initialization failure, and stale return
@@ -1367,15 +1683,7 @@ with an enforcing or unrecognized adapter requests `allowedTools: []` on those s
 
 #### playbook-captain-36
 
-Where the integration suite forces durable session-Captain calls to
-fail, the suite shall fail unless each of the three unsynchronized
-shapes — a throw, a non-`ok` result, and an `ok` result without a
-resume token — clears the pin and re-issues only the failed call,
-exactly once, on a fresh conversation whose captured prompt carries
-the reseed digest plus the current ControlView digest; the
-engagement stack, player sessions, journal, and completed turn work
-survive; and the turn otherwise settles normally with the new token
-pinned.
+Where the integration suite forces durable session-Captain continuity failures, it shall fail unless only a classified pre-execution session rejection re-issues the failed call once with the recovery and current ControlView digests, while a throw, ambiguous non-`ok` result or `ok` without a token makes no same-call retry; each case preserves the engagement stack, player sessions, journal and completed turn work [[playbook-captain-35](#playbook-captain-35)].
 The suite shall fail unless the reseed digest is confined to that one
 re-issued call: no captured prompt before the reseed carries it, no
 later call on the replacement conversation carries it again, no
@@ -1427,8 +1735,7 @@ each of those replies reflecting the state's published meaning and
 carrying no raw state id.
 The suite shall fail unless: with an acting-agent question pending, the
 Boss's answer settles as `deliver` and `BOSS_REPLY` resumes the same
-state with the answer in context, the full question having surfaced
-as captain speech; a mid-run status question while busy or parked is
+state with the answer in context, the complete question having reached Captain and its explanation having surfaced as captain speech; a mid-run status question while busy or parked is
 answered from `describe()` alone — zero `apply` calls, zero FSM
 events, the snapshot identical before and after, the surfaced reply
 reflecting the state's published meaning and the pending question and
@@ -1436,6 +1743,8 @@ carrying no raw state id; and "what went
 wrong?" asked twice after a failure carries the engine's
 `ControlView.lastError` in both captured decision prompts with no
 `apply` and the machine untouched.
+The lifecycle cases shall verify that a returned child remains suspended when its former Boss-turn signal is later aborted [[playbook-captain-4](#playbook-captain-4)].
+The question-relay cases shall verify that marked runtime question statuses are suppressed and a failed Captain reply appends the complete original question to the truthful action-outcome reply, without digest state ids [[playbook-captain-3](#playbook-captain-3)] [[playbook-captain-34](#playbook-captain-34)].
 The suite shall fail unless a scripted `failed` receipt with a
 normalized error yields a captured result-phase call carrying the
 disposition, the error `{ name, message }`, and the settlement facts
@@ -1444,21 +1753,9 @@ validated prose surfaced through `emitReply`.
 The suite shall fail unless a pure chat turn settles in exactly one
 durable call (`respond`) with no separate summary call, while an
 acting turn costs two durable calls plus bounded correctives.
-The suite shall fail unless the real compiled DECIDE artifact
-engaged as leaf — its bespoke runtime shipping without the
-`describe`/`apply` pair — is reported by the DR-022 gate as lacking
-the pair, advertises no actions, and bounds only the machine verbs
-against that leaf: plain text delivery is the only one, and a
-`runtime` selection is invalid with zero `apply` calls.
-The suite shall fail unless a status question on that capability-less
-leaf still settles as `respond` — no `deliver`,
-no FSM event, the leaf snapshot identical before and after — grounded
-in the degraded ControlView digest the shell composes from the
-engagement frame and its mirrored leaf facts
-([[playbook-captain-9](playbook-captain.md#playbook-captain-9)]), the captured
-decision prompt carrying that digest with its empty action list and
-with the leaf state stated as publishing no description rather than
-falling back to the state id the shell holds from telemetry.
+The suite shall fail unless the real compiled DECIDE artifact engaged as leaf exposes its `describe`/`apply` pair, advertises exactly its fenced entry-event retry in an ordinary failure state whose governed boundaries carry complete `unchanged` receipts, and makes zero `apply` calls while that view is presented.
+The suite shall fail unless a status question on that ordinary failed leaf still settles as `respond` — no `deliver`, no FSM event, the leaf snapshot identical before and after — grounded in the exact published ControlView state description and action list ([[playbook-captain-9](playbook-captain.md#playbook-captain-9)]).
+The suite shall further fail unless the real DECIDE runtime reaches both its approval-backed and REVIEW-failure final states with the exact authored `stateDescription` on each terminal result, and the real shell's one completion fact carries that meaning before disposal without reading opaque output (verifying [[playbook-captain-20](#playbook-captain-20)]).
 The suite shall fail unless a full Boss turn through the real shell
 and real CODE artifact with a scripted empty-then-text player
 recovers with normal lifecycle markers and exactly one turn summary,
@@ -1591,6 +1888,7 @@ The suite shall fail unless that corrective re-ask is a real call for
 a model-decided `respond` too: the captured re-ask shall resume the
 decision call's own pinned token and carry the rejection reason, and a
 clean second answer shall be the surfaced captain speech.
+The suite shall fail unless a closing reply returned as exactly the `respond` routing envelope surfaces its `text` as the turn's captain speech on the first call, with no corrective re-ask, no failure reply, and no envelope syntax on the Boss surface, while one carrying any other member gets one corrective re-ask naming leaked control syntax and only the corrected prose surfaces (verifying [[playbook-captain-9](#playbook-captain-9)]).
 The suite shall fail unless a reply carrying an engagement's live
 generated session id is refused with one corrective re-ask naming the
 leaked identifier, that id never reaching the Boss surface.
@@ -1664,11 +1962,100 @@ Where the integration suite drives the public Playbook Captain shell through saf
 
 - A fresh `chat` shell and a `chat` shell after a healthy Captain reply export the exact mode union with no engagement members; the latter preserves the Captain runtime, pinned conversation token, complete journal, sequences, last action and settlement, and issued identities; restore allocates no identity and attempts no host emission, model or player call, controller submission, or visibility change; and the next turn continues the saved conversation, journal, and counters rather than starting a replacement session (verifying [[playbook-captain-41](#playbook-captain-41)] and [[playbook-captain-42](#playbook-captain-42)]).
 - A `chat` shell whose presentation failure made the durable conversation require reseeding restores that exact state, and its next Captain call starts fresh with the saved recovery history once rather than resuming a suspect token or losing the failed turn (verifying [[playbook-captain-41](#playbook-captain-41)] and [[playbook-captain-42](#playbook-captain-42)]).
-- A typed settings rejection before Captain provider work, including an exact player rejection that reaches shell fallback, exports and restores `needsCatchUp` with the exact retained resume selection and watermark, and its next supported call replays the missed suffix once without changing snapshot structure for current model or effort tuning (verifying [[playbook-captain-35](#playbook-captain-35)], [[playbook-captain-41](#playbook-captain-41)], and [[playbook-captain-42](#playbook-captain-42)]).
-- A parked root carrying explicit role bindings, a session-ledger token, saved options, pending Boss question, mirrored last error, and prior issued frame id restores the same frame and runtime state under the same identities; the next Boss reply reaches that saved player id and resumes its token; and a later generated identity cannot reuse any historical id (verifying [[playbook-captain-41](#playbook-captain-41)] and [[playbook-captain-42](#playbook-captain-42)]).
+- A typed settings rejection before Captain provider work, including an exact player rejection that reaches shell fallback, exports and restores `needsCatchUp` with the exact retained resume selection and watermark, and its next supported call replays the missed suffix once without changing snapshot structure for current model, effort, or fast-mode tuning (verifying [[playbook-captain-35](#playbook-captain-35)], [[playbook-captain-41](#playbook-captain-41)], and [[playbook-captain-42](#playbook-captain-42)]).
+- A parked schema-3 root carrying explicit role bindings, a session-ledger token, saved options, pending Boss question, mirrored last error, and prior issued frame id restores the same frame and runtime state under the same identities but with the restoring host's distinct current capability; the next Boss reply reaches that saved player id and resumes its token; no source or target capability authority enters either snapshot; and a later generated identity cannot reuse any historical id (verifying [[playbook-captain-5](#playbook-captain-5)], [[playbook-captain-41](#playbook-captain-41)], and [[playbook-captain-42](#playbook-captain-42)]).
 - A parent parked behind a nested child exports ordered frames whose exact edge is the parent's suspended-call descriptor, whose leaf has no dangling descriptor, and whose explicit equal-id bindings project one shared session token; restore calls no child again and emits no second start; the child's eventual result emits the one original finish, resumes the parent exactly once, preserves original call and turn ownership, and leaves both frames on that same player continuation (verifying [[playbook-captain-41](#playbook-captain-41)] and [[playbook-captain-42](#playbook-captain-42)]).
 - Export during an active Boss turn, an opening child, a turn-summary or controller-call transient, queued or in-flight host work, frame removal, `engaged.driving`, or disposal returns `undefined` without an emission or state change, as does an export whose runtime or nested edge cannot provide a consistent safe snapshot (verifying [[playbook-captain-41](#playbook-captain-41)]).
-- The public package surface exposes both snapshot types, the pure complete-snapshot validator, and types the default factory as returning `PlaybookCaptainShell` (verifying [[playbook-captain-41](#playbook-captain-41)]).
-- Direct pure-validator mutations covering the schema and mode discriminants, unknown keys and non-JSON structures, fixed Captain and player envelopes without model or effort, every conversation shape and catch-up invariant, complete contiguous turn ownership and exact journal count, Captain-runtime/shell turn equality and Captain contribution, UUID uniqueness, Captain/frame distinction, issued-id inclusion, runtime/playbook identity, frame topology and parked leaf, suspended-call edges and leaf absence, role-question ownership, shell/leaf pending-question equality, and local/session token projection each reject before a configuration read, module import, runtime construction, or host operation; restore-only mutations cover enabled catalog, saved options and role maps, and current adapter, instruction, and permissions compatibility; an already initialized, restored, disposing, or disposed shell also rejects restore (verifying [[playbook-captain-41](#playbook-captain-41)] and [[playbook-captain-42](#playbook-captain-42)]).
+- The public package surface exposes every snapshot, retained-generation, retention-update, settlement, validator, and shell declaration required by [[playbook-captain-41](#playbook-captain-41)], and types the default factory as returning `PlaybookCaptainShell` (verifying [[playbook-captain-41](#playbook-captain-41)]).
+- Direct pure-validator mutations covering the schema and mode discriminants, unknown keys and non-JSON structures, fixed Captain and player envelopes without model, effort, or fast mode, every conversation shape and catch-up invariant, complete contiguous turn ownership and exact journal count, Captain-runtime turn not exceeding the shell turn and Captain contribution, UUID uniqueness, Captain/frame distinction, issued-id inclusion, runtime/playbook identity, frame topology and parked leaf, suspended-call edges and leaf absence, role-question ownership, shell/leaf pending-question equality, local/session token projection, and a negative, fractional, null, or oversize `presentedEffectPrefix` each reject before a configuration read, module import, runtime construction, or host operation; restore-only mutations cover enabled catalog, saved options and role maps, and current adapter, instruction, and permissions compatibility, while an omitted `presentedEffectPrefix` validates as the ledger boundary count; an already initialized, restored, disposing, or disposed shell also rejects restore (verifying [[playbook-captain-41](#playbook-captain-41)] and [[playbook-captain-42](#playbook-captain-42)]).
 - When the Captain restore, a root restore, or a later child restore throws, mutates a token projection, restores a different state, or attempts any gated emission or call, the shell rejects with no host record or external call, attempts all partial-runtime disposal in leaf-to-root then Captain order under the closed gate, retains no partial identity, frame, token, journal, or conversation reference, and accepts a subsequent valid `init` or `restore` only when cleanup succeeded; a rejecting cleanup is aggregated and leaves the shell closed (verifying [[playbook-captain-42](#playbook-captain-42)]).
 - A restored child carries no replacement invocation signal or abort listener, resumes its parent only by the saved call id when it actually returns, and is disposed without parent resume when teardown wins (verifying [[playbook-captain-42](#playbook-captain-42)]).
+
+#### playbook-captain-51
+
+When the complete-shell integration suite constructs fresh and restored schema-3 catalogs under one durable host ledger, it shall fail unless every shell export uses schema version `4`, the internal Captain carries the canonical empty ledger, every root and nested frame carries the shell's exact complete current-host mirror, and neither configured options nor any snapshot contains a callback, lease token, claim, or store handle (verifying [[playbook-captain-41](#playbook-captain-41)] and [[playbook-captain-50](#playbook-captain-50)]).
+Direct mutations of revision, boundary order or identity, logical-operation references, correction budget, shell-versus-frame equality, and the internal Captain's empty mirror shall reject before runtime construction or host work, while export during a stale frame acknowledgement shall return `undefined` (verifying [[playbook-captain-41](#playbook-captain-41)], [[playbook-captain-42](#playbook-captain-42)], and [[playbook-captain-50](#playbook-captain-50)]).
+The restore suite shall fail unless authoritative incomplete-boundary reconstruction finishes before shell validation and source-state restoration, no player or runtime begins during reconstruction, the recovered authoritative extension leaves the immutable pre-turn snapshot unchanged, and that mismatch leaves every host-facing gate closed with partial runtimes disposed in the existing order (verifying [[playbook-captain-42](#playbook-captain-42)] and [[playbook-captain-50](#playbook-captain-50)]).
+
+#### playbook-captain-53
+
+When the complete-shell integration suite drives a schema-3 frame across successive Boss turns and an export-and-restore boundary, it shall fail unless a pending question and its bound logical operation become Boss-visible together only after durable acknowledgement, every safe shell and frame snapshot carries the same complete ledger, and restoration reinstalls the exact pending question and session-player continuation before accepting another turn (verifying [[playbook-captain-52](#playbook-captain-52)]).
+The suite shall fail unless an invalid later answer leaves that bound ledger and question unchanged with no player call, while a valid later answer reaches the same restored frame with its exact bound session-player continuation and the next safe shell and frame snapshots carry the same acknowledged ledger (verifying [[playbook-captain-52](#playbook-captain-52)]).
+
+#### playbook-captain-45
+
+Where the integration suite drives the public shell through retained-generation-capable and capability-less runtimes, it shall fail unless a parked root exports its current active generation and matching published description with the shell snapshot, description failure or mismatch omits that optional member, an artifact-declared unfinished terminal exports the last active pre-terminal generation rather than its final state, a same-turn unfinished terminal with no prior work-bearing generation settles in chat with no retain or clear update, a clean terminal emits `clear`, and a root lacking any participation capability — including marker-only and adoption-only runtimes — emits `clear` without a partial generation (verifying [[playbook-captain-44](#playbook-captain-44)]).
+The suite shall also fail unless dismissal preserves the exact previously parked generation, a nested parked stack exports both frame snapshots and both halves of every call bridge as one root generation, a capable root that begins and opens a capability-less child in the same turn emits no retention update, a capable existing root that opens such a child retains its exact complete turn-start generation without a partial stack while a later settlement that begins with that child emits no update for the root, and an unsafe claimed-capable generation or missing stable terminal id prevents settlement rather than preserving stale state (verifying [[playbook-captain-44](#playbook-captain-44)]).
+
+#### playbook-captain-48
+
+Where the integration suite installs valid or empty retained maps into fresh and restored shells and drives model-decided selections through the compiled Captain, it shall fail unless described and description-less roots advertise deterministically without an internal identity leak, offer playbook ids remain repeatable Boss prose, no offer is advertised while an engagement is live, a frame lacking any complete participation member advertises nothing and is disposed with a capability-less root cleared but a capability-less descendant preserved, hostile descriptions remain one escaped bounded digest line, and install rejects disabled, structurally malformed, duplicate, concurrent, late, or repeated input without a partial offer (verifying [[playbook-captain-9](#playbook-captain-9)], [[playbook-captain-41](#playbook-captain-41)], [[playbook-captain-44](#playbook-captain-44)], and [[playbook-captain-46](#playbook-captain-46)]).
+The suite shall fail unless root source-option drift rejects before runtime construction while descendant source-option drift remains installable under current enabled options (verifying [[playbook-captain-46](#playbook-captain-46)]).
+The suite shall fail unless an install-time or deferred construction rejection with successful cleanup disposes partial probes, omits only that generation for the current shell without clearing its retained source, continues other offer preparation and current and later Captain turns without retrying it, and a fresh shell may prepare the unchanged generation while any cleanup rejection leaves no partial offer and closes unsafe shell reuse (verifying [[playbook-captain-46](#playbook-captain-46)]).
+The suite shall fail unless an ordinarily resumable schema-3 root and nested stack are constructed with their distinct current-host capabilities and then resume root to leaf under distinct fresh target identities and current player-ledger bindings, rebase every suspended edge to target call id `playbook-1`, invoke only `adopt` once per frame without initialization, restoration, Boss input, or child-host work, publish the resumed status and visibility, preserve the retained pending question, settle with the retained description or its honest absence, export a safe fresh generation containing no capability authority with `lastAction: 'resume'`, and append the duplicate-effect warning to the actual Boss reply (verifying [[playbook-captain-3](#playbook-captain-3)], [[playbook-captain-5](#playbook-captain-5)], [[playbook-captain-41](#playbook-captain-41)], and [[playbook-captain-47](#playbook-captain-47)]), stating it once on a reporting-failure fallback whose listed facts already carry it (verifying [[playbook-captain-69](#playbook-captain-69)]).
+The suite shall also fail unless an active or enabled-but-unadvertised resume rejects while live work and the advertised offer set remain authoritative, an explicitly selected start constructs fresh work without adopting, transactional target-identity allocation rejects without consuming or contaminating an offer, a failing nested or post-install adoption disposes provisional runtimes leaf to root with no partial stack and permits an exact source-generation retry under new target identities after successful cleanup, cleanup or telemetry-rollback rejection closes unsafe shell reuse, and shell teardown disposes unclaimed offers before the compiled Captain (verifying [[playbook-captain-2](#playbook-captain-2)], [[playbook-captain-7](#playbook-captain-7)], and [[playbook-captain-47](#playbook-captain-47)]).
+The suite shall further fail unless replacement or clear disposes every retired probe leaf to root, a rejecting probe cleanup fails the turn and closes shell reuse, and terminal cleanup retries only the probes whose own disposal rejected (verifying [[playbook-captain-46](#playbook-captain-46)]).
+
+#### playbook-captain-49
+
+Where the retained-resumption end-to-end suite drives the maintained real CODE and REVIEW linked artifacts and the maintained non-adoptable DECIDE runtime, the suite shall fail unless this interruption matrix holds (verifying [[playbook-captain-4](#playbook-captain-4)], [[playbook-captain-7](#playbook-captain-7)], [[playbook-captain-8](#playbook-captain-8)], [[playbook-captain-26](#playbook-captain-26)], [[playbook-captain-29](#playbook-captain-29)], [[playbook-captain-44](#playbook-captain-44)], [[playbook-captain-46](#playbook-captain-46)], and [[playbook-captain-47](#playbook-captain-47)]):
+
+| Interruption class | Required proof |
+| --- | --- |
+| Every capability-bearing class | The shell resumes the exact retained mid-state under fresh engagement identities, makes no initial-state classification call, puts the duplicate-effect warning in the resume turn's actual Boss reply, and eventually emits `clear` on clean completion through the state's existing affordance. |
+| Boss-question suspension | The pending question survives and the next delivered answer re-enters its originating acting state. |
+| Current parked generation | A quiescent CODE park resumes in place from the generation exported at that settlement. |
+| Recoverable failure | The resumed failure advertises its existing retry, and the shell applies that action once without a fresh start before the engagement completes. |
+| Real nested suspension | The CODE-to-REVIEW stack adopts root to leaf without starting a replacement child, and child completion resumes CODE exactly once. |
+| Artifact-declared unfinished terminal | CODE's `reviewFailed` retains and adopts the preceding active generation rather than a final snapshot. |
+| Dismissed root | The exact turn-start generation survives dismissal and later resumes. |
+| Adapter-swap fresh session | Current-ledger binding selects the replacement adapter with a fresh player conversation without returning the machine to its initial state. |
+| Stale external world | Resumed REVIEW surfaces the post-capture change through its ordinary findings round before eventual completion. |
+| Non-adoptable degradation | DECIDE retains and advertises no generation, and ordinary fresh use remains available. |
+
+#### playbook-captain-55
+
+When the retained-generation integration suite captures and installs ordinary and marked nested generations, it shall fail unless every generation carries its detached complete capture-time checkpoint; every ordinary frame mirror equals that checkpoint; every marked frame carries one byte-identical capture-time mirror that strictly extends the checkpoint and remains an exact or monotonic baseline of later host authority; and an incomplete checkpoint or divergent marked capture mirror rejects before runtime construction (verifying [[playbook-captain-54](#playbook-captain-54)]).
+The matrix shall exercise an incomplete boundary owned by a later-created child absent from a retained nested stack and a root-wide fence; it shall fail unless no other frame or leaf bypasses the fence, the input generation remains byte-exact, and later receipt completion alone does not clear the fence (verifying [[playbook-captain-54](#playbook-captain-54)]).
+Where a safely adopted generation retaining an older original source identity is later fenced under a fresh source-generation identity, the suite shall fail unless the shell, runtime, and recaptured generation all preserve the older identity and original checkpoint through settlement (verifying [[playbook-captain-54](#playbook-captain-54)]).
+After explicit reconciliation proves the root safe, the suite shall fail unless the shell routes the applicable action once, keeps ordinary Boss input out until the marker clears, exports the current ledger and original source lineage without a fence, and only then permits ordinary runtime input; during unsafe adoption it shall show the active leaf's bound players without any call, publish no retained question, and expose only the reconciliation and abandonment actions (verifying [[playbook-captain-47](#playbook-captain-47)] and [[playbook-captain-54](#playbook-captain-54)]).
+
+#### playbook-captain-57
+
+When the runtime-result consumer matrix returns `unresolved-effect` from a root and from a nested leaf, it shall fail unless that consumption emits no finished lifecycle line or root-completion fact, disposes neither frame as terminal, translates no `PlaybookCallResult`, and neither pops the nested leaf nor calls the parent's `resumePlaybookCall` (verifying [[playbook-captain-56](#playbook-captain-56)]).
+The matrix shall further fail unless the consumer reads no state description or output from that state-only result and makes no authored-outcome or workflow-completion claim, while leaving later host-owned settlement and disposal as a distinct operation (verifying [[playbook-captain-56](#playbook-captain-56)]).
+
+#### playbook-captain-59
+
+When the unresolved-settlement integration matrix drives same-process, restored, and retained-adopted schema-3 root and nested episodes, it shall fail unless `exportSettlement()` carries a detached frozen ordered projection of every and only outstanding envelope, an open deferred chain occurs once at its first physical boundary, resolved and complete `unchanged` evidence is absent, incomplete and all six nonzero-or-ambiguous classifications preserve the exact baseline, available after HEAD, and proven commit OID invariants for both 40- and 64-character OIDs, a receipt-less chain with a residual projection or ambiguous latest receipt remains `observation-ambiguous` against its original baseline, and mutation of any classification, member set, OID length or case, order, identity reference, or ledger relationship makes settlement unsafe (verifying [[playbook-captain-41](#playbook-captain-41)], [[playbook-captain-44](#playbook-captain-44)], and [[playbook-captain-58](#playbook-captain-58)]).
+The matrix shall fail unless a controller turn freezes its list before result-phase work and the later safe settlement reuses the exact copy despite a later host-ledger advance, a safe settlement without controller work projects the current list without a repository observation or fabricated controller evidence, every parked unresolved settlement is nonempty, every other settlement is empty, the public validator detaches and recursively freezes valid input, and no bounded list enters a runtime-owned run result (verifying [[playbook-captain-58](#playbook-captain-58)]).
+For each nonempty controller list, the matrix shall fail unless both the canonical result-phase prompt where one exists and the same-turn Boss presentation distinguish the observed and merely possible classification branches, name each classification by its clause and never by its code, preserve the exact available HEAD and proven commit OID, precede a later reconciliation or abandonment action, claim neither completion nor ownership, preserve another mandatory suffix, and contain no excluded path, projection, or internal envelope member; a direct `respond` over a restored parked episode shall make no result-phase call but shall carry the same deterministic report (verifying [[playbook-captain-58](#playbook-captain-58)]).
+A controller list holding every classification, with a proven commit, a moved, a stayed, and an absent after HEAD among them, shall fail the matrix unless the Boss presentation and the result-phase prompt read each entry in exactly the form and clause of [[playbook-captain-58](#playbook-captain-58)], so a changed clause or HEAD form fails it (verifying [[playbook-captain-58](#playbook-captain-58)]).
+The matrix shall reject unsupported, blank, unknown-field, or evidence-bearing unresolved-envelope references and references to absent boundaries or logical operations before exporting settlement (verifying [[playbook-captain-58](#playbook-captain-58)]).
+The root and nested-leaf abandonment rows shall fail unless the same final nonempty list is acknowledged at durable begin, the complete root stack disposes leaf to root without source restoration, player replay, nested-result translation, or parent resumption, the root's prior generation receives `clear`, durable completion precedes controller presentation, and only complete disposal and persistence return `ok` with `executed`, while absent capability plus each begin, disposal, clear, and completion failure returns `failed` without an executed receipt, an `Applied` success fact, or an older generation becoming selectable (verifying [[playbook-captain-56](#playbook-captain-56)] and [[playbook-captain-58](#playbook-captain-58)]).
+#### playbook-captain-66
+
+When the controller integration suite settles a Boss turn over a real worktree whose governed call commits a pre-existing modified file beside a fresh one, it shall fail unless the closing reply carries exactly one pre-existing-changes report naming that commit's OID and the absorbed path and not the fresh one, a turn whose receipts carry no such path appends none, and the report never enters the run result (verifying [[playbook-captain-65](#playbook-captain-65)]).
+When the SDK and headless system suite cancels the closing reply of a turn whose commit absorbed a pre-existing file, it shall fail unless the settled record's `presentedEffectPrefix` is unchanged, the next presented reply — a bare command reply, a failed decision call's failure reply, or a twice-malformed decision's reply — carries that report exactly once, the following reply carries none, the record's `presentedEffectPrefix` then equals the ledger boundary count, and a turn cancelled after its reply was shown does not repeat the report (verifying [[playbook-captain-65](#playbook-captain-65)] and [[playbook-captain-41](#playbook-captain-41)]).
+
+
+#### playbook-captain-68
+
+When the controller integration suite settles a Boss turn over a leaf parked in its failure state, and over a real worktree whose governed call commits its work and leaves a stray file, it shall fail unless each closing reply carries exactly one failure report whose first line states that cause as one sentence with its bounded evidence — the residual commit naming the stray path — and whose control lines name each advertised label with its standing, the reconciliation marked a no-op and the shell's own give-up `ready` (verifying [[playbook-captain-67](#playbook-captain-67)], [[playbook-captain-60](#playbook-captain-60)], and [[playbook-captain-62](#playbook-captain-62)]).
+The suite shall fail unless that turn's result-phase prompt reads the same failure as one settlement fact, unless the ControlView digest names every advertised action's standing with the sentence that a no-op action changes nothing, unless an action declaring no standing reads as `ready` on every one of those surfaces, and unless the host's published runtime and shell controls carry the same standings (verifying [[playbook-captain-67](#playbook-captain-67)], [[playbook-captain-9](#playbook-captain-9)], [[playbook-captain-60](#playbook-captain-60)], and [[playbook-captain-62](#playbook-captain-62)]).
+
+#### playbook-captain-70
+
+When the shell suite settles each failure path — a returned failed run, a thrown first turn, a thrown delivery, a thrown runtime action, a runtime action's failed receipt with the parked leaf's error and with another error, a give-up whose disposal fails, a nested child's cleanup that fails, and a failed run beside unresolved repository effects — with each kind of recorded reason — a mapped cause, a sentence behind an error-class name, a sentence whose end is doubled, prose behind an error-class name holding quotes and parentheses, a sentence naming a file, a dotted file name, or a camelCase word, capitalized words, a code, a code with a terminal mark, a path behind an error-class name, a lowercase phrase, an error code before no prose, an all-caps code, a reason the runtime mints, and the runtime's refusal reason — while the closing reply stays unusable after its corrective re-ask, it shall fail unless exactly one line of the Boss reply and one of the result-phase facts carry each failure (verifying [[playbook-captain-67](#playbook-captain-67)] and [[playbook-captain-69](#playbook-captain-69)]), unless that line is the path's failure statement with the mapped or minted phrase, the prose quoted with one terminal mark and its inner punctuation kept, or the whole recorded text in a code span, every reason behind an error-class name among them (verifying [[playbook-captain-71](#playbook-captain-71)], [[playbook-captain-74](#playbook-captain-74)], and [[playbook-captain-76](#playbook-captain-76)]), unless neither carries an error-class name, an error code, or a recorded text shown in a code span outside one, a classification code, or the text a mapped or minted phrase replaces (verifying [[playbook-captain-58](#playbook-captain-58)], [[playbook-captain-74](#playbook-captain-74)], and [[playbook-captain-76](#playbook-captain-76)]), unless a parked leaf's fallback carries no `Failure:` line while its `Controls:` list stays (verifying [[playbook-captain-69](#playbook-captain-69)]), and unless a thrown delivery whose error differs from the parked leaf's recorded one keeps its own statement beside the leaf's (verifying [[playbook-captain-67](#playbook-captain-67)]).
+
+#### playbook-captain-72
+
+When the shell suite parks a leaf whose control view publishes each failure code — `judge-failed` with two runtime-owned reasons; `player-failed` with a sentence message, one behind an error-class name, a capitalized unpunctuated one, a lowercase one, and each of the runtime's stand-ins for a missing message; and `runtime-defect` with prose reasons naming a flag file or holding quotes, parentheses, or a backticked word, with prose behind an error-class name, with every reason the runtime mints, one more with its ends padded and one with a control character inside, with the runtime's refusal reason and a labelled minted reason each inside a longer text, with reasons holding a machine-shaped word — `localhost:8080`, `macOS`, `up-to-date`, a version, a camelCase word, a dotted file name, an underscore, a URL, `HEAD`, and an error code before prose — and with a code with a terminal mark, an all-caps code, a reason with no space, a capitalized unpunctuated reason, a lowercase one with a terminal mark, a bare error-class name, a class name before no prose, an error code before no prose, and a backticked lowercase reason — and lets the closing reply stand, it shall fail unless those rows cover every code of the exported `PLAYBOOK_FAILURE_CODES` list and every entry of the shell's table of minted reasons (verifying [[playbook-captain-71](#playbook-captain-71)] and [[playbook-captain-76](#playbook-captain-76)]), unless each reply carries exactly one `Failure:` line holding that row's sentence — the judge's phrase, a minted reason's phrase however its control characters and ends were recorded, the prose quoted with one terminal mark, and every other reason shown whole in a code span, prose behind an error-class name and a minted reason inside a longer text among them (verifying [[playbook-captain-67](#playbook-captain-67)], [[playbook-captain-69](#playbook-captain-69)], [[playbook-captain-71](#playbook-captain-71)], [[playbook-captain-74](#playbook-captain-74)], and [[playbook-captain-76](#playbook-captain-76)]), unless the result-phase prompt reads the same failure as the leaf's failure statement (verifying [[playbook-captain-67](#playbook-captain-67)] and [[playbook-captain-71](#playbook-captain-71)]), and unless a recorded text the sentence does not show, the judge's reasons and transport error and every minted reason among them, reaches neither (verifying [[playbook-captain-71](#playbook-captain-71)] and [[playbook-captain-76](#playbook-captain-76)]).
+
+#### playbook-captain-73
+
+When the shell suite settles a started turn whose closing reply stays unusable after its corrective re-ask, once over a commit that carried pre-existing changes and once over unresolved repository effects, and resumes a retained nested generation behind the retained-effect fence over one incomplete receipt and over two at one baseline, each once while the model's reply stands and once while the closing reply stays unusable, it shall fail unless the carried-changes fallback lists the commit's absorbed and altered paths as one fact (verifying [[playbook-captain-65](#playbook-captain-65)]) and omits the carried-changes report that fact states (verifying [[playbook-captain-69](#playbook-captain-69)]), unless the unresolved-effect fallback carries its report exactly once (verifying [[playbook-captain-69](#playbook-captain-69)]), unless each fenced resume's reply lists every incomplete entry, numbered as its result-phase prompt numbers them, however alike they read (verifying [[playbook-captain-58](#playbook-captain-58)] and [[playbook-captain-69](#playbook-captain-69)]), and unless each fenced resume's reply carries no `Failure:` line beside the incomplete entry that already carries its reason — the fallback listing no fact of that failure either, while its result-phase prompt reads it as one fact — naming the reason and the baseline HEAD once per entry while its `Controls:` list stays (verifying [[playbook-captain-67](#playbook-captain-67)] and [[playbook-captain-69](#playbook-captain-69)]).
+
+#### playbook-captain-75
+
+When the shell suite settles, while the closing reply stays unusable after its corrective re-ask, a thrown runtime action on a ready leaf whose error names the action id the host supplied, a failed receipt whose recorded text quotes the action's id, once plain and once machine-shaped, a failed receipt and a refusal whose recorded text is the runtime's refusal reason, a refusal whose reason reads as prose, a failed receipt on a ready leaf and a refusal each of an action whose label names control vocabulary, a give-up whose disposal error names control vocabulary as a code and as prose, a returned failed run naming control vocabulary, a returned failed run of a command naming control vocabulary, a returned failed run whose repository cause names a path in control vocabulary, a nested cleanup whose error names the parent's live state, a nested cleanup of a child whose command names control vocabulary, a nested cleanup whose caller then fails with the identical recorded error, a returned failed run whose repository cause its unresolved-effect entry carries, and a thrown delivery whose cause an entry carries on a parked and on a ready leaf, it shall fail unless the reply lists what happened with exactly one line carrying each failure and no `Failure:` line repeating it (verifying [[playbook-captain-69](#playbook-captain-69)]), unless a code span repeating a supplied or live identifier, and a phrased reason whose own words fail, read `an internal error` while the result-phase prompt keeps the recorded text and the Boss reads neither that identifier nor that text (verifying [[playbook-captain-69](#playbook-captain-69)] and [[playbook-captain-74](#playbook-captain-74)]), unless the runtime's refusal reason reads `that action is no longer offered.` on the receipt and the refusal alike and never as an internal error (verifying [[playbook-captain-76](#playbook-captain-76)]), unless a failed receipt quoting the action's id is one statement naming the action by its label outside its code span while the span keeps the recorded id, or reads `an internal error` where that id is machine-shaped, and no `Failure:` line repeats it (verifying [[playbook-captain-69](#playbook-captain-69)]), unless an action label, or a failure subject beginning its statement, naming control vocabulary reads `the selected action` or `The step` in a statement that stays, while another statement naming the same command keeps it and a statement whose other words still fail is listed as it is (verifying [[playbook-captain-69](#playbook-captain-69)]), unless of two failures with identical recorded text the Boss reads only the earlier statement while the result-phase prompt reads both (verifying [[playbook-captain-69](#playbook-captain-69)]), unless a give-up's control vocabulary stands only inside a code span, prose included (verifying [[playbook-captain-69](#playbook-captain-69)] and [[playbook-captain-74](#playbook-captain-74)]), unless the refusal's prose reason is quoted (verifying [[playbook-captain-74](#playbook-captain-74)]), unless every entry stays beside the returned run and the delivery alike while the fact whose reason an entry carries goes, the report naming the reason once and keeping its closing statement (verifying [[playbook-captain-58](#playbook-captain-58)] and [[playbook-captain-69](#playbook-captain-69)]), and unless, after a model's reply, a parked leaf whose recorded reason repeats that supplied id, or whose phrased reason names a path in control vocabulary, reads `Failure: the step failed with an internal error.` (verifying [[playbook-captain-67](#playbook-captain-67)] and [[playbook-captain-69](#playbook-captain-69)]).

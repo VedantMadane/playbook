@@ -1,3 +1,4 @@
+export declare const concurrentRoleSets: readonly (readonly string[])[];
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
 };
@@ -7,14 +8,17 @@ export type EnabledPlaybook = {
     readonly command: string;
     readonly intent: string;
 };
-/** The closed controller action set (DR-029; stable machine contract). */
-export type DecisionAction = 'respond' | 'start' | 'switch' | 'dismiss' | 'deliver' | 'runtime';
+/** The closed controller action set (DR-029, DR-038; stable machine contract). */
+export type DecisionAction = 'respond' | 'resume' | 'start' | 'switch' | 'dismiss' | 'deliver' | 'runtime' | 'recover';
 /**
  * A deterministic parse-resolved acting decision injected by the host
  * (CAPTAIN-7 parse table): the turn's decision object, entering the decision
  * state with no decision model call.
  */
 export type ParsedActingDecision = {
+    readonly action: 'resume';
+    readonly playbookId: string;
+} | {
     readonly action: 'start' | 'switch';
     readonly playbookId: string;
     readonly input: string;
@@ -32,15 +36,24 @@ export type SettlementReceiptEvidence = {
     readonly reason?: string;
     readonly error?: CompactError;
 };
+/** Bounded host-owned evidence for one unresolved repository effect. */
+export type SettlementUnresolvedEffectEvidence = {
+    readonly classification: 'one-descendant-commit' | 'multiple-commits' | 'rewritten-or-non-descendant' | 'worktree-only-change' | 'concurrent-or-foreign-change' | 'observation-ambiguous' | 'incomplete';
+    readonly baselineHead: string;
+    readonly afterHead?: string;
+    readonly commitOid?: string;
+};
 /**
  * The controller-port settlement evidence the machine may retain: status,
- * outcome-report facts, optional rejection reason, receipt disposition, and
- * leaf-state summary — never a session id, call id, child state, stack
- * ledger, resume token, or opaque runtime result (CAPPLAY-10).
+ * outcome-report facts, bounded unresolved effects, optional rejection
+ * reason, receipt disposition, and leaf-state summary — never a session id,
+ * call id, child state, stack ledger, resume token, or opaque runtime result
+ * (CAPPLAY-10).
  */
 export type SettlementEvidence = {
     readonly status: 'ok' | 'rejected' | 'failed';
     readonly facts: readonly string[];
+    readonly unresolvedEffects: readonly SettlementUnresolvedEffectEvidence[];
     readonly reason?: string;
     readonly receipt?: SettlementReceiptEvidence;
     readonly leafStateSummary?: string;
@@ -65,15 +78,19 @@ export type CaptainInput = {
 };
 /**
  * Decision-state output: the validated selection under the stable controller
- * guard contract — `respond` | `start` | `switch` | `dismiss` | `deliver` |
- * `runtime`, with the payload fields DR-029 requires — plus the
- * controller-port settlement evidence of the executed submission. The prose
- * states (`answeringCommand`, `reporting`) carry the default single-outcome
- * `done` contract.
+ * guard contract — `respond` | `resume` | `start` | `switch` | `dismiss` |
+ * `deliver` | `runtime`, with the payload fields DR-029 and DR-038 require —
+ * plus the controller-port settlement evidence of the executed submission.
+ * The prose states (`answeringCommand`, `reporting`) carry the default
+ * single-outcome `done` contract.
  */
 export type CaptainOutput = {
     readonly guard: 'respond';
     readonly text: string;
+    readonly settlement: SettlementEvidence;
+} | {
+    readonly guard: 'resume';
+    readonly playbookId: string;
     readonly settlement: SettlementEvidence;
 } | {
     readonly guard: 'start';
@@ -86,7 +103,7 @@ export type CaptainOutput = {
     readonly input: string;
     readonly settlement: SettlementEvidence;
 } | {
-    readonly guard: 'dismiss';
+    readonly guard: 'dismiss' | 'recover';
     readonly settlement: SettlementEvidence;
 } | {
     readonly guard: 'deliver';
@@ -110,6 +127,7 @@ type Context = {
     readonly receiptReason?: string;
     readonly receiptError?: CompactError;
     readonly leafStateSummary?: string;
+    readonly settlementUnresolvedEffects?: readonly SettlementUnresolvedEffectEvidence[];
     readonly lastError?: JsonValue;
 };
 type BossTurnEvent = {
@@ -157,7 +175,13 @@ export declare const captainMachine: import("xstate").StateMachine<Context, Boss
     type: "rememberActorError";
     params: import("xstate").NonReducibleUnknown;
 }, {
+    type: "runtime";
+    params: unknown;
+} | {
     type: "start";
+    params: unknown;
+} | {
+    type: "resume";
     params: unknown;
 } | {
     type: "respond";
@@ -172,7 +196,7 @@ export declare const captainMachine: import("xstate").StateMachine<Context, Boss
     type: "deliver";
     params: unknown;
 } | {
-    type: "runtime";
+    type: "recover";
     params: unknown;
 } | {
     type: "hasBossTurnText";

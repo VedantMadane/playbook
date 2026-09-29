@@ -4,22 +4,41 @@
 # Configuring agents
 
 Fresh launches and ordinary reopens read one config at
-`${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml`. The
+`${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml`. The
 first launch seeds it from the bundled starter and prints the path;
 later launches reuse it untouched.
 
+On the first launching command after upgrading Playbook, it moves a config from
+either former location when the canonical path is absent — the root's
+`playbook/playbook.config.yaml` first, then
+`${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml`. Exactly one
+file moves; the one-time move preserves bytes and permissions, takes the former
+file's directory with it when that leaves it empty, and leaves no compatibility
+alias, so running an older Spex host afterward could seed a second file at the
+path it still resolves.
+
+The current guard rejects relocation when a former relative `sessions` value
+or relative filesystem `playbooks.<id>.from` would resolve differently below
+the new directory. It leaves the former file unchanged and names every
+target-preserving absolute replacement. Apply those replacements and retry;
+Playbook does not rewrite the user-authored file. `config/` sits at the depth
+the root's `playbook/` did, so a relative locator reaching outside the directory
+keeps its target across that move; only one pointing into the directory is
+refused as above.
+
 ```sh
-$EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml"
+$EDITOR "${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml"
 ```
 
 ## Anatomy
 
 The config is top-level (no `config:` wrapper): a `captain` agent, one flat
 `players` map of stable Captain-session agents, a `playbooks` map of enabled
-workflows and their explicit role bindings, and optional `layout` /
-`notifications` / `theme`. The Captain runs hidden control and judge calls and
-writes the replies you see in the Captain pane or on headless stdout. The three
-presentation fields apply only to interactive tmux; headless runs ignore them.
+workflows and their explicit role bindings, an optional `sessions` storage
+locator, and optional `layout` / `notifications` / `theme`. The Captain runs
+hidden control and judge calls and writes the replies you see in the Captain
+pane or on headless stdout. The three presentation fields apply only to
+interactive tmux; headless runs ignore them.
 
 A **role** is local to a playbook artifact: CODE's `coder` and REVIEW's `coder`
 have the same semantic name but remain separate declarations. A **player** is
@@ -29,11 +48,12 @@ names, nesting, and ancestry never infer a binding.
 
 Each `captain` or `players.<player-id>` value is either an adapter shorthand
 (`claude`, `codex`) or a block carrying that agent's own `adapter`, `model`,
-`effort`, `instruction`, and `permissions`. Settings are inline per stable
-agent ([DR-021](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/021-inline-agent-settings.md)). Dots in a
-player ID are literal characters, not YAML hierarchy. Other adapter IDs pass
-through to `tmux-play` with a warning because `playbook` cannot preflight their
-auth.
+`effort`, `fastMode`, `instruction`, and `permissions`. Settings are inline per
+stable agent
+([DR-021](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/021-inline-agent-settings.md)).
+Dots in a player ID are literal characters, not YAML hierarchy. Other adapter
+IDs pass through to `tmux-play` with a warning because `playbook` cannot
+preflight their auth.
 
 Within a `playbooks.<id>` block, `from` (the registry module), `command` (an
 optional slash-command override), and `roles` are launcher-owned; every other
@@ -41,13 +61,21 @@ key is that playbook's option slice. Every manifest role must be present
 exactly once. The launcher injects the rest — you do not write host wiring by
 hand.
 
-The seeded config runs the stable Coder player on Claude Opus 4.8 1m and the
-stable Reviewer player on GPT-5.5:
+The launcher seeds one adapter for the Captain and all stable players from
+locally visible credentials: Claude first, then Codex. It uses Claude Opus 5.5
+for Claude or GPT-6 Sol for Codex, with Captain and Coder at `high` effort
+and Reviewer and Analyst at `xhigh`. If neither adapter is configured, it
+seeds Claude and prints a notice. Credentials do not prove SDK availability
+or remaining quota; launch still checks the configured adapter. Existing
+configs are left unchanged.
+
+The Claude default is shown below. A Codex seed also adds
+`permissions.writablePaths: ['.git']` to each agent:
 
 ```yaml
 captain:
   adapter: claude
-  model: claude-opus-4-8
+  model: claude-opus-5-5
   effort: high
   permissions:
     mode: auto # protected auto mode for the Claude Captain
@@ -55,19 +83,24 @@ captain:
 players:
   dev.coder:
     adapter: claude
-    model: claude-opus-4-8[1m]
-    effort: xhigh
+    model: claude-opus-5-5
+    effort: high
     permissions:
       mode: auto # protected auto mode for the Claude Coder
 
   dev.reviewer:
-    adapter: codex
-    model: gpt-5.5
+    adapter: claude
+    model: claude-opus-5-5
     effort: xhigh
     permissions:
-      mode: auto
-      writablePaths:
-        - .git # allow git metadata writes under Codex auto mode
+      mode: auto # protected auto mode for the Claude Reviewer
+
+  dev.analyst:
+    adapter: claude
+    model: claude-opus-5-5
+    effort: xhigh
+    permissions:
+      mode: auto # protected auto mode for the Claude Analyst
 
 playbooks:
   code:
@@ -86,6 +119,25 @@ playbooks:
     roles:
       coder: dev.coder
       reviewer: dev.reviewer
+
+  dev:
+    from: '@sublang/playbook/dev/registry'
+    roles:
+      analyst: dev.analyst
+
+  # Pull-request delivery for DEV. BRANCH and PR bind Coder to the same
+  # dev.coder player as CODE and REVIEW on purpose: the Coder that read the
+  # issue and named the branch makes the commits and then describes them in
+  # the pull request. Change an id to isolate its conversation.
+  branch:
+    from: '@sublang/playbook/branch/registry'
+    roles:
+      coder: dev.coder
+
+  pr:
+    from: '@sublang/playbook/pr/registry'
+    roles:
+      coder: dev.coder
 ```
 
 The current bundled workflows accept no workflow-specific options.
@@ -104,29 +156,39 @@ roles:
   coder: dev.coder
 ```
 
-Use a block to override only that role invocation's model or effort:
+Use a block to override only that role invocation's model, effort, or fast
+mode:
 
 ```yaml
 roles:
   coder:
     player: dev.coder
-    model: claude-opus-4-8[1m]
+    model: claude-sonnet-5-5
     effort: false # explicitly reset to this provider's default
+    fastMode: false # literal disabled request, not a default sentinel
 ```
 
-Omitting `model` or `effort` inherits that player's top-level default. The
-boolean `false` is different: it selects the provider default explicitly, so a
-resumed conversation cannot accidentally retain an earlier selection. A role
-binding cannot override adapter, instruction, permissions, workspace, or tool
-posture; those define the stable player envelope.
+Omitting any override inherits that player's top-level default. For `model`
+and `effort`, boolean `false` selects the provider default explicitly, so a
+resumed conversation cannot accidentally retain an earlier selection. For
+`fastMode`, `false` is a literal request to disable fast mode; omitting the
+top-level setting selects the provider default. A present fast-mode boolean is
+accepted only for adapters Cligent reports as supporting it. A role binding
+cannot override adapter, instruction, permissions, workspace, or tool posture;
+those define the stable player envelope, so an overriding model must be one
+that player's adapter serves.
 
 ## Sharing, isolation, and concurrency
 
 Two bindings that name the same player ID deliberately share one sequential
 provider conversation throughout the logical Captain session — across nested
-calls, returns, and later root engagements. CODE's and REVIEW's `coder` roles
-therefore share `dev.coder` in the starter, and DECIDE and its nested REVIEW
-share both starter players. Disposal of one playbook frame does not clear that
+calls, returns, and later root engagements. CODE's, REVIEW's, BRANCH's, and
+PR's `coder` roles therefore share `dev.coder` in the starter — so on a `/dev`
+pull-request path the Coder that read the issue and named the branch makes the
+commits and then describes them in the pull request — and DECIDE and its
+nested REVIEW share both starter players. DEV's `analyst` instead binds the
+distinct `dev.analyst` player, so planning context does not bleed into the
+shared review conversation. Disposal of one playbook frame does not clear that
 session ledger.
 
 Two distinct player IDs stay isolated even when their agent blocks are
@@ -136,9 +198,12 @@ second top-level player and change only its binding:
 ```yaml
 players:
   review.coder:
-    adapter: claude
-    model: claude-opus-4-8[1m]
-    effort: xhigh
+    adapter: codex
+    model: gpt-6-sol
+    effort: ultra
+    permissions:
+      mode: auto
+      writablePaths: ['.git'] # lets the Codex Coder commit its review fixes
 
 playbooks:
   review:
@@ -154,14 +219,17 @@ before registry import, host creation, or agent work.
 
 ## Choosing the Captain agent
 
-Every session-Captain call and adjudication call is hidden and runs
-tool-free, which is what keeps the Captain deciding and reporting
-instead of doing the work itself. Claude and Gemini enforce that at the
+Ordinary Captain decisions, replies, question checks and adjudication are hidden and tool-free.
+Claude and Gemini enforce the tool restriction at the
 provider level. The Codex, Kimi, and OpenCode adapters cannot — they
 reject any tool list — so a `captain:` using one of them falls back to a
 prompt-level restriction
 ([DR-013](https://github.com/sublang-ai/playbook/blob/main/specs/decisions/013-routing-only-captain-control.md) A1).
 Those adapters remain good choices for *players*, where full tools are wanted.
+
+Recovery preparation is separate: Captain may use its configured tools and permissions to repair prerequisites for the paused step, within the existing task.
+It may not finish the specialist’s task or invent a decision; discarding work or rewriting history requires your explicit instruction.
+Preparation has a 150-second limit.
 
 Adapter readiness is intentionally light: `claude` is ready with local
 Claude Code auth or `ANTHROPIC_API_KEY`; `codex` with local Codex CLI
@@ -183,8 +251,9 @@ playbook run --with fast-lineup.yaml "/code implement the approved change"
 # fast-lineup.yaml — retune the shared Coder; nothing is written back.
 players:
   dev.coder:
-    model: claude-opus-4-8
+    model: claude-sonnet-5-5
     effort: medium
+    fastMode: false
 ```
 
 Fragments merge into the agent block rather than replacing it, so
@@ -207,9 +276,36 @@ The global file is never modified, and `--with` is not forwarded to
 Overlays apply when creating a fresh session and as current-config input for a
 compatible ordinary reopen. A selected session keeps its stored catalog,
 player roster, role bindings, adapter, instruction, permissions, and working
-directory; only model and effort may change. The next call reapplies both
-complete selections. An uncertain retry accepts no tuning overlay and uses the
-exact attempted selections already stored with that turn.
+directory; only model, effort, and fast mode may change. The next call reapplies
+both complete model and effort selections and the optional effective fast-mode
+boolean. An uncertain retry accepts no tuning overlay and only restores and reports the recorded attempt. Later turns use the current compatible settings.
+
+## Session storage
+
+Both front ends select canonical session manifests and write replay streams in
+one directory, shared with embedding hosts. Set the
+optional top-level `sessions` key to move that shared store:
+
+```yaml
+sessions: ./state/playbook-sessions
+```
+
+The value must be a nonempty filesystem path. When the key is absent, the
+directory is
+`${SPEX_HOME:-$HOME/.spex}/sessions`. An absolute path is
+used as given; `~` and `~/...` expand from the home directory, while `~user`
+is rejected. Every other value, including a bare relative path such as the one
+above, resolves against the primary config file's directory rather than the
+invocation directory. A `sessions` value in a `--with` overlay replaces the
+primary value, with later overlays winning.
+
+Launch validates that the resolved path can serve as the mode-`0700`, real,
+non-symlink session store before selecting a record or starting agent work and
+fails closed when it cannot. The non-launching `playbook --list` command still
+validates the locator's syntax but does not inspect that directory's filesystem
+usability. The resolved locator is launch configuration only: it never enters
+a persisted structural or execution projection
+([[playbook-cli-78](https://github.com/sublang-ai/playbook/blob/main/specs/packages/playbook-cli.md#playbook-cli-78)]).
 
 ## Durable shared configuration
 
@@ -223,9 +319,9 @@ public UUID. Presentation-only fields are inert headlessly.
 An ordinary reopen reads current config and opening overlays, but first
 projects them to the stored playbooks and referenced players. An unrelated new
 entry cannot enter or invalidate the session. Structural drift fails closed;
-compatible model or effort changes apply on the next provider call. Legacy
-record, shell, runtime-snapshot, and trace schemas are rejected rather than
-having role or player identity guessed.
+compatible model, effort, or fast-mode changes apply on the next provider
+call. Legacy record, shell, runtime-snapshot, and trace schemas are rejected
+rather than having role or player identity guessed.
 
 ## External playbooks
 
@@ -273,12 +369,12 @@ playbooks:
   code:
     from: '@sublang/playbook/code/registry'
     players:
-      coder: { adapter: claude, model: claude-opus-4-8[1m] }
+      coder: { adapter: claude, model: claude-opus-5-5 }
   review:
     from: '@sublang/playbook/review/registry'
     players:
-      coder: { adapter: claude, model: claude-opus-4-8[1m] }
-      reviewer: { adapter: codex, model: gpt-5.5 }
+      coder: { adapter: claude, model: claude-opus-5-5 }
+      reviewer: { adapter: codex, model: gpt-6-sol }
 ```
 
 Move each provider agent into the flat top-level map, choose stable IDs, and
@@ -286,8 +382,8 @@ bind the local roles explicitly:
 
 ```yaml
 players:
-  dev.coder: { adapter: claude, model: claude-opus-4-8[1m] }
-  dev.reviewer: { adapter: codex, model: gpt-5.5 }
+  dev.coder: { adapter: claude, model: claude-opus-5-5 }
+  dev.reviewer: { adapter: codex, model: gpt-6-sol }
 
 playbooks:
   code:

@@ -29,13 +29,15 @@ Run `playbook` for an interactive tmux UI powered by [cligent](https://github.co
 
 ## Quick start
 
-Out of the box, Playbook includes **CODE** for implementation, **REVIEW** for commit-based review and fixes, and **DECIDE** for independently proposed and reviewed specification decisions.
-CODE and DECIDE call REVIEW as a nested playbook.
+Out of the box, Playbook includes **CODE** for implementation, **REVIEW** for commit-based review and fixes, **DECIDE** for independently proposed and reviewed specification decisions, **DEV** for repository-aware planning of a development request, **BRANCH** for checking out a new branch for a GitHub issue, and **PR** for publishing, checking, and merging that branch through a pull request.
+CODE and DECIDE call REVIEW as a nested playbook; DEV calls CODE, or DECIDE and then CODE, and wraps them in BRANCH and PR when the request names a GitHub issue or asks for a pull request.
 
-The shared starter config uses Claude as both Captain and the `dev.coder`
-player, and Codex as `dev.reviewer`. CODE, REVIEW, and DECIDE bind their local
-roles explicitly to those two stable players, so nested and later engagements
-share a conversation only where their bindings name the same player ID.
+The shared starter config selects one adapter for the Captain and all players
+from locally visible credentials: Claude first, then Codex. If neither is
+configured, it seeds Claude and prints a notice. CODE, REVIEW, DECIDE, BRANCH, and PR bind
+their local roles explicitly to `dev.coder` and `dev.reviewer`, so nested and later
+engagements share a conversation only where their bindings name the same
+player ID; DEV's Analyst binds a distinct `dev.analyst` player.
 
 ```sh
 npm install -g @sublang/playbook
@@ -48,8 +50,8 @@ If an SDK is missing or older than cligent supports, Playbook prints the pinned 
 Prerequisites:
 
 - Node.js >= 20.6.0
-- Authenticated [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) or `ANTHROPIC_API_KEY`
-- Authenticated [Codex CLI](https://github.com/openai/codex) or `OPENAI_API_KEY`
+- Credentials for the configured adapter: authenticated [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) or `ANTHROPIC_API_KEY` for Claude; authenticated [Codex CLI](https://github.com/openai/codex) or `OPENAI_API_KEY` for Codex
+- [GitHub CLI](https://cli.github.com/) (`gh`) authenticated for the repository's GitHub remote, for `/branch`, `/pr`, and `/dev` requests that name an issue or ask for a pull request
 
 Interactive `playbook` additionally needs tmux 3.3 or newer and [`glow`](https://github.com/charmbracelet/glow#installation) on `PATH`; headless `playbook run` does not.
 
@@ -63,7 +65,7 @@ playbook
 Type a task, enter `/code <task>` for implementation, or enter
 `/decide <question>` for an independently proposed and reviewed decision.
 
-On first launch, Playbook writes its config to `${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml`.
+On first launch, Playbook writes its config to `${SPEX_HOME:-$HOME/.spex}/config/playbook.config.yaml`. A config left at either former location — the root's `playbook/playbook.config.yaml` or `${XDG_CONFIG_HOME:-$HOME/.config}/playbook/playbook.config.yaml` — is moved there once on the next launch, unless a relative primary locator would change targets; that case is rejected unchanged with absolute replacements.
 
 The same config, compiled Captain, enabled playbooks, stable players, and
 nested calls power headless turns. Both front ends create the same durable
@@ -80,6 +82,8 @@ playbook run --session 4f2c0000-0000-4000-8000-000000009ab1 "continue"
 ```
 
 `playbook run` prints the one Boss-visible Captain reply to stdout and operational status to stderr; CODE and DECIDE can complete their nested REVIEW calls there too.
+
+If a step fails or needs preparation before your answer, ask Captain to fix the prerequisite and resume; see [Preparing a stopped step](docs/cli.md#preparing-a-stopped-step).
 
 See [Using the CLI](docs/cli.md) for flags and durable continuation, [Configuring agents](docs/configuration.md) for the shared lineup, [Embedding](docs/embedding.md) for custom hosts, and the [changelog](https://github.com/sublang-ai/playbook/blob/main/CHANGELOG.md) for releases.
 
@@ -105,7 +109,7 @@ SLC's `playbook` pipeline has three phases:
 2. **GEARS → FSM** ([slc/gears2fsm.md](slc/gears2fsm.md)) — maps each item to an XState state that invokes the Captain, a player, another playbook, or a local script.
 3. **FSM → runtime** ([slc/link.md](slc/link.md)) — links the machine to a host-independent interface for user input, agent calls, status, and telemetry.
 
-The default [optimization pass](slc/optimize.md) replaces eligible mechanical steps with local shell scripts; `--no-optimize` skips it.
+The default passes run between the first two phases: the [optimization pass](slc/optimize.md) replaces eligible mechanical steps with local shell scripts, and the [prompt-prefix pass](slc/prefix.md) moves each prompt's relayed runtime values after its instructions so repeated runs share a cacheable prompt prefix; `--no-optimize` skips both.
 Inspect the complete [Captain](reference/sdlc/captain.md), [CODE](reference/sdlc/code.md), [REVIEW](reference/sdlc/review.md), and [DECIDE](reference/sdlc/decide.md) examples.
 
 ## Contributing

@@ -1,32 +1,58 @@
+import type { PlaybookCallResult } from '@sublang/playbook/runtime';
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
 };
-export type CodeStateId = 'runFirstPhase' | 'reviewFirstCommit' | 'runIrTask' | 'reviewIrTask';
+/** Canonical lowercase local id of the source role Coder. */
+export type CodeRole = 'coder';
+/** One role-id array per parallel group; CODE declares no parallel group. */
+export declare const concurrentRoleSets: readonly (readonly CodeRole[])[];
+/** Delegated-player working leaves (CODE-1, CODE-3). */
+export type WorkingStateId = 'firstPhase' | 'irTaskPhase';
+/** Working leaves that may suspend for, and resume from, a Boss reply. */
+export type ResumableStateId = WorkingStateId;
+/** Root `BOSS_INTERRUPT` targets. */
+export type JumpableStateId = WorkingStateId;
+/** Nested `review` call states (CODE-2, CODE-4). */
+export type ReviewStateId = 'reviewNewIntentPhase' | 'reviewIrTaskPhase';
 export type CodeSourceItem = 'CODE-1' | 'CODE-2' | 'CODE-3' | 'CODE-4';
-export type CodePhase = 'direct' | 'ir-created' | 'ir-task-more' | 'ir-task-final';
-export type PendingBossQuestion = {
-    readonly questionId: 'runFirstPhase' | 'runIrTask';
-    readonly resumeStateId: 'runFirstPhase' | 'runIrTask';
+/** The accepted phase outcome whose `review` call decides the next step. */
+export type PhaseOutcome = 'directCommit' | 'irCommit' | 'moreTasks' | 'finalTask';
+/** The literal nested-call target shared by both call states and guards. */
+declare const REVIEW_PLAYBOOK_ID = "review";
+export interface PendingBossQuestion {
+    readonly questionId: ResumableStateId;
+    readonly resumeStateId: ResumableStateId;
     readonly sourceItem: 'CODE-1' | 'CODE-3';
     readonly asker: {
         readonly kind: 'role';
-        readonly roleId: 'coder';
+        readonly roleId: CodeRole;
     };
     readonly question: string;
-};
-export type PlayerInput = {
-    readonly stateId: 'runFirstPhase' | 'runIrTask';
-    readonly role: 'coder';
-    readonly sourceItem: 'CODE-1' | 'CODE-3';
+}
+interface PlayerInputBase {
+    readonly role: CodeRole;
+    /** The source item's full final prompt, verbatim. */
     readonly prompt: string;
+    /** This state's local result contract: guard name → description. */
     readonly result: Readonly<Record<string, string>>;
-    readonly callerInput: string;
+    /** `<caller-input>`: the caller's complete coding request. */
+    readonly callerInput?: string;
+    /** `<run-results>`: relevant run results; empty when none were supplied. */
     readonly runResults: string;
-    readonly irNumber?: string;
-    readonly irTask?: string;
     readonly pendingBossQuestion?: PendingBossQuestion;
     readonly bossReply?: string;
-};
+}
+export interface FirstPhasePlayerInput extends PlayerInputBase {
+    readonly stateId: 'firstPhase';
+    readonly sourceItem: 'CODE-1';
+}
+export interface IrTaskPhasePlayerInput extends PlayerInputBase {
+    readonly stateId: 'irTaskPhase';
+    readonly sourceItem: 'CODE-3';
+    /** `<ir-number>`: the IR whose next unfinished task this phase implements. */
+    readonly irNumber?: string;
+}
+export type PlayerInput = FirstPhasePlayerInput | IrTaskPhasePlayerInput;
 export type PlayerOutput = {
     readonly guard: 'directCommit';
     readonly coderOutput: string;
@@ -36,184 +62,221 @@ export type PlayerOutput = {
     readonly coderOutput: string;
     readonly latestCommit: string;
     readonly irNumber: string;
-    readonly irTask: string;
 } | {
     readonly guard: 'moreTasks';
     readonly coderOutput: string;
     readonly latestCommit: string;
+    readonly irNumber: string;
     readonly irTask: string;
 } | {
     readonly guard: 'finalTask';
     readonly coderOutput: string;
     readonly latestCommit: string;
+    readonly irNumber: string;
+    readonly irTask: string;
 } | {
     readonly guard: 'needsBossReply';
     readonly question: string;
 };
-export type PlaybookInput = {
-    readonly stateId: 'reviewFirstCommit' | 'reviewIrTask';
+export interface PlaybookInput {
+    readonly stateId: ReviewStateId;
     readonly sourceItem: 'CODE-2' | 'CODE-4';
-    readonly playbookId: 'review';
+    readonly playbookId: typeof REVIEW_PLAYBOOK_ID;
     readonly text: string;
-};
-export type ReviewOutput = {
-    readonly approvedCommit: 'latest';
+}
+/** A successful call yields the child's own JSON-safe machine output. */
+export type PlaybookOutput = JsonValue | undefined;
+/** Public output interface of the packaged builtin `review`. */
+export interface ReviewPassOutput {
     readonly noUnsettledFindings: true;
-};
-export type CompactError = {
+    readonly evaluatedRevision: string;
+}
+export interface CompactError {
     readonly name: string;
     readonly message: string;
-};
-export type CodePlaybookOutput = {
-    readonly status: 'complete';
-    /** Exact identity of the latest CODE-owned commit. */
-    readonly lastCodeCommit: string;
-    /** Exact Coder final text produced after that commit. */
-    readonly lastCodeOutput: string;
+}
+export interface ErrorRecord {
+    readonly name: string;
+    readonly message: string;
+    readonly stack?: string;
+}
+/** Sanitized completed-result evidence of the `review` call that ended CODE. */
+export type CompletedReviewResult = {
+    readonly playbookId: typeof REVIEW_PLAYBOOK_ID;
+    readonly status: 'ok';
+    readonly output?: JsonValue;
 } | {
-    readonly status: 'review-failed';
-    /** Exact identity of the latest CODE-owned commit. */
-    readonly lastCodeCommit: string;
-    /** Exact Coder final text produced after that commit. */
-    readonly lastCodeOutput: string;
+    readonly playbookId: typeof REVIEW_PLAYBOOK_ID;
+    readonly status: 'aborted' | 'error';
     readonly error: CompactError;
 };
-export type CodingInput = {
-    readonly runResults?: string;
+/** Public output interface of the packaged builtin `code`. */
+export type CodeOutput = {
+    readonly status: 'complete';
+    readonly lastCodeCommit: string;
+    readonly finalEvaluatedRevision: string;
+    readonly allReviewsPassed: true;
+} | {
+    readonly status: 'review-failed';
+    readonly lastCodeCommit: string;
+    readonly error: CompactError;
 };
-export type CodingContext = {
+export interface CodeInput {
+    /** Optional seed for `<run-results>`; `START_CODE` may supply its own. */
+    readonly runResults?: string;
+}
+export interface CodeContext {
+    /** `<run-results>`: relevant run results relayed to every phase. */
     readonly runResults: string;
+    /** `<caller-input>`: the caller's coding request and relevant context. */
     readonly callerInput?: string;
+    /** `<code-commit>`: the accepted `latestCommit` of the latest phase. */
+    readonly codeCommit?: string;
+    /** `<coder-output>`: Coder's verbatim final text for the latest phase. */
     readonly coderOutput?: string;
-    readonly latestCommit?: string;
+    /** `<ir-number>`: the created or continued IR. */
     readonly irNumber?: string;
+    /** `<ir-task>`: the IR task the latest IR-task phase implemented. */
     readonly irTask?: string;
-    readonly nextIrTask?: string;
-    readonly phase?: CodePhase;
-    readonly completion?: 'complete' | 'review-failed';
+    /** The accepted outcome of the phase under review. */
+    readonly phaseOutcome?: PhaseOutcome;
+    /** Revision evaluated by the latest passing review. */
+    readonly evaluatedRevision?: string;
+    /** Compact failure CODE reports when review did not pass a phase. */
     readonly reviewError?: CompactError;
-    readonly lastError?: unknown;
+    /** Sanitized evidence of the review result that ended CODE. */
+    readonly reviewEvidence?: CompletedReviewResult;
+    readonly lastError?: ErrorRecord;
     readonly pendingBossQuestion?: PendingBossQuestion;
     readonly bossReply?: string;
-};
-export type CodingEvent = {
+}
+export type CodeEvent = {
     readonly type: 'START_CODE';
     readonly callerInput: string;
+    readonly runResults?: string;
+} | {
+    readonly type: 'BOSS_INTERRUPT';
+    readonly targetId: JumpableStateId;
 } | {
     readonly type: 'BOSS_REPLY';
     readonly answer: string;
-    readonly questionId?: 'runFirstPhase' | 'runIrTask';
+    readonly questionId?: ResumableStateId;
 };
-export declare const codingMachine: import("xstate").StateMachine<CodingContext, {
+/**
+ * Recognizes an authored rejected child result: an aborted or error call, or
+ * a child that completed at its own authored failure terminal.
+ */
+export declare function authoredChildResult(error: unknown, expectedPlaybookId: string): PlaybookCallResult | undefined;
+export declare const codeMachine: import("xstate").StateMachine<CodeContext, {
     readonly type: "START_CODE";
     readonly callerInput: string;
+    readonly runResults?: string;
+} | {
+    readonly type: "BOSS_INTERRUPT";
+    readonly targetId: JumpableStateId;
 } | {
     readonly type: "BOSS_REPLY";
     readonly answer: string;
-    readonly questionId?: "runFirstPhase" | "runIrTask";
+    readonly questionId?: ResumableStateId;
 }, {
-    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<JsonValue | undefined, PlaybookInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | undefined;
+    [x: string]: import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>> | import("xstate").ActorRefFromLogic<import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>> | undefined;
 }, {
-    src: "playbook";
-    logic: import("xstate").PromiseActorLogic<JsonValue | undefined, PlaybookInput, import("xstate").EventObject>;
-    id: string | undefined;
-} | {
     src: "player";
     logic: import("xstate").PromiseActorLogic<PlayerOutput, PlayerInput, import("xstate").EventObject>;
     id: string | undefined;
+} | {
+    src: "playbook";
+    logic: import("xstate").PromiseActorLogic<PlaybookOutput, PlaybookInput, import("xstate").EventObject>;
+    id: string | undefined;
 }, {
+    type: "playbook.acceptedOutcome";
+    params: {
+        readonly source: string;
+        readonly target: string;
+        readonly acceptedOutcome: string;
+    };
+} | {
     type: "rememberActorError";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "startCoding";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberDirectCommit";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberIrCommit";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberMoreTasks";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberFinalTask";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "advanceToNextIrTask";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "rememberPendingQuestion";
+    type: "resetForInterrupt";
     params: import("xstate").NonReducibleUnknown;
 } | {
     type: "rememberBossReply";
     params: import("xstate").NonReducibleUnknown;
 } | {
-    type: "rememberEmptyBossReplyError";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "completeSuccessfully";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "completeWithReviewFailure";
-    params: import("xstate").NonReducibleUnknown;
-} | {
-    type: "completeWithInvalidReviewOutput";
-    params: import("xstate").NonReducibleUnknown;
-} | {
     type: "rememberMalformedPlayerOutput";
     params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "clearBossReplyContext";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "rememberAuthoredReviewFailure";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "startCode";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "rememberPhaseCommit";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "setPendingBossQuestion";
+    params: {
+        readonly resumeStateId: ResumableStateId;
+    };
+} | {
+    type: "rememberReviewPass";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "rememberReviewNotPassed";
+    params: import("xstate").NonReducibleUnknown;
+} | {
+    type: "rememberMalformedBossReply";
+    params: import("xstate").NonReducibleUnknown;
 }, {
-    type: "needsBossReply";
+    type: "acceptDirectCommit";
     params: unknown;
 } | {
-    type: "isDirectCommit";
+    type: "acceptIrCommit";
     params: unknown;
 } | {
-    type: "isIrCommit";
+    type: "acceptMoreTasks";
     params: unknown;
 } | {
-    type: "isMoreTasks";
-    params: unknown;
-} | {
-    type: "isFinalTask";
+    type: "acceptFinalTask";
     params: unknown;
 } | {
     type: "authoredReviewFailure";
     params: unknown;
 } | {
-    type: "reviewApprovedDirect";
+    type: "needsBossReplyWithQuestion";
     params: unknown;
 } | {
-    type: "reviewApprovedIrCreated";
-    params: unknown;
-} | {
-    type: "reviewApprovedMoreTasks";
-    params: unknown;
-} | {
-    type: "reviewApprovedFinalTask";
+    type: "validStartCode";
     params: unknown;
 } | {
     type: "emptyBossReply";
     params: unknown;
 } | {
-    type: "resumesFirstPhase";
+    type: "reviewPassedDirect";
     params: unknown;
 } | {
-    type: "resumesIrTask";
+    type: "reviewPassedNewIr";
     params: unknown;
-}, never, "done" | "failed" | "awaitBossReply" | "ready" | "runFirstPhase" | "reviewFirstCommit" | "runIrTask" | "reviewIrTask" | "reportedReviewFailure", string, CodingInput, {
+} | {
+    type: "reviewPassedNonfinalTask";
+    params: unknown;
+} | {
+    type: "reviewPassedFinalTask";
+    params: unknown;
+}, never, "done" | "failed" | "ready" | "awaitBossReply" | "firstPhase" | "irTaskPhase" | "reviewNewIntentPhase" | "reviewIrTaskPhase" | "reviewFailed", string, CodeInput, {
     readonly status: "complete";
-    /** Exact identity of the latest CODE-owned commit. */
     readonly lastCodeCommit: string;
-    /** Exact Coder final text produced after that commit. */
-    readonly lastCodeOutput: string;
+    readonly finalEvaluatedRevision: string;
+    readonly allReviewsPassed: true;
 } | {
     readonly status: "review-failed";
-    /** Exact identity of the latest CODE-owned commit. */
     readonly lastCodeCommit: string;
-    /** Exact Coder final text produced after that commit. */
-    readonly lastCodeOutput: string;
     readonly error: CompactError;
 }, import("xstate").EventObject, import("xstate").MetaObject, {
     id: "code";
@@ -221,17 +284,17 @@ export declare const codingMachine: import("xstate").StateMachine<CodingContext,
         readonly ready: {
             id: "ready";
         };
-        readonly runFirstPhase: {
-            id: "runFirstPhase";
+        readonly firstPhase: {
+            id: "firstPhase";
         };
-        readonly reviewFirstCommit: {
-            id: "reviewFirstCommit";
+        readonly reviewNewIntentPhase: {
+            id: "reviewNewIntentPhase";
         };
-        readonly runIrTask: {
-            id: "runIrTask";
+        readonly irTaskPhase: {
+            id: "irTaskPhase";
         };
-        readonly reviewIrTask: {
-            id: "reviewIrTask";
+        readonly reviewIrTaskPhase: {
+            id: "reviewIrTaskPhase";
         };
         readonly awaitBossReply: {
             id: "awaitBossReply";
@@ -239,12 +302,12 @@ export declare const codingMachine: import("xstate").StateMachine<CodingContext,
         readonly failed: {
             id: "failed";
         };
-        readonly reportedReviewFailure: {
-            id: "reportedReviewFailure";
+        readonly reviewFailed: {
+            id: "reviewFailed";
         };
         readonly done: {
             id: "done";
         };
     };
 }>;
-export default codingMachine;
+export default codeMachine;

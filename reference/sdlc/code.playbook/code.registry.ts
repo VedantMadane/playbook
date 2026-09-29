@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import createPlaybookRuntime, {
+  type PlaybookHostCapabilities,
   type PlaybookRuntime,
 } from './code.playbook.js';
+import type { PlaybookHostConstructionCapabilities } from './playbook-captain.js';
 
 export interface PlaybookSummaryPolicy {
   stateCountLabels: Readonly<Record<string, string>>;
@@ -20,12 +22,25 @@ export interface CodePlaybookRegistryEntry {
   id: 'code';
   command: 'code';
   intent: string;
-  artifactSchema: 2;
+  artifactSchema: 3;
+  runtimeProfile: {
+    readonly kind: 'shared-factory';
+    readonly compat: {
+      readonly artifactSchema: 3;
+      readonly runtimeAbi: number;
+    };
+  };
   requiredRoleIds: readonly ['coder'];
   concurrentRoleSets: readonly [];
   summaryPolicy: PlaybookSummaryPolicy;
   validateOptions(optionSlice: unknown): CodeOptions;
-  createRuntime(options: CodeOptions): PlaybookRuntime;
+  // The linked module types live authority as opaque (link-materialization);
+  // the Captain entry binds its own construction capabilities here.
+  createRuntime(
+    options: CodeOptions,
+    hostCapabilities: PlaybookHostConstructionCapabilities &
+      PlaybookHostCapabilities,
+  ): PlaybookRuntime;
 }
 
 // REVIEW owns and labels its real review rounds. CODE's two suspended wrapper
@@ -91,13 +106,20 @@ export const codePlaybookRegistryEntry: CodePlaybookRegistryEntry = {
   command: 'code',
   intent:
     'implement a coding intent in reviewed, one-commit phases, using an intent record when needed',
-  artifactSchema: 2,
+  artifactSchema: 3,
+  runtimeProfile: Object.freeze({
+    kind: 'shared-factory',
+    compat: createPlaybookRuntime.compat,
+  }),
   requiredRoleIds: ['coder'],
   concurrentRoleSets: [],
   summaryPolicy: codeSummaryPolicy,
   validateOptions: validateCodeOptions,
-  createRuntime(options) {
-    return createPlaybookRuntime(options);
+  createRuntime(options, hostCapabilities) {
+    return createPlaybookRuntime({
+      configuredOptions: options,
+      hostCapabilities,
+    });
   },
 };
 

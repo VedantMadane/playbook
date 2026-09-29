@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import createPlaybookRuntime, {
+  type PlaybookHostCapabilities,
   type PlaybookRuntime,
 } from './decide.playbook.js';
+import type { PlaybookHostConstructionCapabilities } from '../code.playbook/playbook-captain.js';
 
 export interface PlaybookSummaryPolicy {
   stateCountLabels: Readonly<Record<string, string>>;
@@ -20,12 +22,25 @@ export interface DecidePlaybookRegistryEntry {
   id: 'decide';
   command: 'decide';
   intent: string;
-  artifactSchema: 2;
+  artifactSchema: 3;
+  runtimeProfile: {
+    readonly kind: 'shared-factory';
+    readonly compat: {
+      readonly artifactSchema: 3;
+      readonly runtimeAbi: number;
+    };
+  };
   requiredRoleIds: readonly ['coder', 'reviewer'];
   concurrentRoleSets: readonly [readonly ['coder', 'reviewer']];
   summaryPolicy: PlaybookSummaryPolicy;
   validateOptions(optionSlice: unknown): DecideOptions;
-  createRuntime(options: DecideOptions): PlaybookRuntime;
+  // The linked module types live authority as opaque (link-materialization);
+  // the Captain entry binds its own construction capabilities here.
+  createRuntime(
+    options: DecideOptions,
+    hostCapabilities: PlaybookHostConstructionCapabilities &
+      PlaybookHostCapabilities,
+  ): PlaybookRuntime;
 }
 
 export const decideStateCountLabels = {
@@ -87,14 +102,21 @@ export const decidePlaybookRegistryEntry: DecidePlaybookRegistryEntry = {
   id: 'decide',
   command: 'decide',
   intent:
-    'turn independent Coder and Reviewer proposals into an approved spec-design commit',
-  artifactSchema: 2,
+    'synthesize independent Coder and Reviewer proposals into an approved spec-design commit',
+  artifactSchema: 3,
+  runtimeProfile: Object.freeze({
+    kind: 'shared-factory',
+    compat: createPlaybookRuntime.compat,
+  }),
   requiredRoleIds: ['coder', 'reviewer'],
   concurrentRoleSets: [['coder', 'reviewer']],
   summaryPolicy: decideSummaryPolicy,
   validateOptions: validateDecideOptions,
-  createRuntime(options) {
-    return createPlaybookRuntime(options);
+  createRuntime(options, hostCapabilities) {
+    return createPlaybookRuntime({
+      configuredOptions: options,
+      hostCapabilities,
+    });
   },
 };
 

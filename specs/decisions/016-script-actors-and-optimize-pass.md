@@ -7,6 +7,7 @@
 
 Accepted.
 Amended by [DR-019](019-shared-linked-runtime-factory.md): the `script` actor implementation moved from each emitted module into the shared linked-runtime factory — the linker emits no script executor inside a factory-backed module, and `node:child_process` is imported by the shared engine rather than per artifact.
+Amended by [DR-050](050-pull-request-delivery.md): a script blockquote may carry a `<placeholder>` relaying a runtime value the machine retains, because a command whose target is ambient state the run does not own cannot otherwise stay bound to it; the placeholder occupies a single-quoted shell word and binds as a single-quoted literal, so reported text stays data, and the script still reads no conversation and produces no prose.
 
 ## Context
 
@@ -15,7 +16,7 @@ Some compiled behaviors need none of that.
 A workflow that commits to Git implicitly requires its working directory to be a repository; the setup step that checks and establishes that state is a fixed shell command with a success/failure outcome — no judgment, no language, no context.
 Running it through an LLM burns tokens and latency on a deterministic action, and makes the playbook's cheapest step its least reliable one.
 
-slc is growing an LLVM-style optimization surface: format-preserving *pass phases* that a compile opts into (slc DR-013), sitting between ordinary phases.
+slc is growing an LLVM-style optimization surface: format-preserving *pass phases* that a compile opts into (slc DR-013 [[1]]), sitting between ordinary phases.
 The natural pass for the `playbook` pipeline rewrites mechanical GEARS items so the linked runtime executes them directly.
 That needs an execution primitive the definitions do not have: a state kind that runs without any agent.
 
@@ -39,6 +40,7 @@ That needs an execution primitive the definitions do not have: a state kind that
 
 - A new definition `slc/optimize.md` (gears → gears, format-preserving) rewrites eligible items into script items: mechanical, static-command, environment-only effects, two-way exit-status outcome.
   Uncertain items stay unchanged — the pass is conservative by construction, and an unoptimized playbook has identical observable behavior.
+  A rewrite preserves the source's exact environmental predicate and effect, including resource location: being inside an ancestor's Git working tree does not satisfy an explicit requirement for the current directory to be its own repository root.
 - Provenance is explicit: rewritten items are listed in one appended `## Optimizations` section.
 - The definition ships in the package beside the other three (`./slc/*` export) and is compilable by `slc slc` like any phase definition; whether and when a compile runs it is the driver's concern (slc `-O`), not the definitions'.
 
@@ -54,3 +56,7 @@ That needs an execution primitive the definitions do not have: a state kind that
 - Hosts and trace consumers need no changes; a checker can observe scripted execution through the `playbook.script` telemetry topic and the status line.
 - The GEARS item-syntax contract now has four behavior kinds; conformance tooling that parses acting clauses adds one literal form (`Captain shall run:`).
 - Optimization is opt-in per compile: pipelines and hosts that never request the pass see byte-identical behavior to today.
+
+## References
+
+[1]: https://github.com/sublang-ai/slc/blob/main/specs/decisions/013-normalize-and-pass-phases.md "slc DR-013 — generic input normalization and optimization pass phases"

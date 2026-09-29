@@ -24,6 +24,9 @@ Hosts are out of scope for this phase.
 Each host has an adapter that loads a `PlaybookRuntime` module and supplies the host's primitives as `PlaybookPorts`.
 The adapter shall speak only `PlaybookPorts` to the runtime and shall not leak host types back into it.
 
+At construction, the shared factory validates linked metadata and the shared construction shape; the Captain host owns registry-manifest and live authority-envelope validation at its construction boundary.
+Do not audit the bare shared factory as if it owned that Captain-host boundary or synthesize host capabilities in the emitted artifact.
+
 The link compiler shall not modify the FSM artifact and shall not re-derive Captain prompts, result keys, or guard semantics — those are fixed by the FSM.
 
 ## Formats
@@ -33,23 +36,189 @@ The link compiler shall not modify the FSM artifact and shall not re-derive Capt
 | source | fsm      | .ts       |
 | target | playbook | .ts       |
 
+## Optional deterministic materialization
+
+For an ordinary workflow using only `player` and `script` actors — flat, or
+with root parallel groups of the [Parallel groups](gears2fsm.md#parallel-groups)
+shape — the supported prompt profile below, shared remaining strategies, and primitive configured options, the linker may
+use the adjacent `materialize-link.mjs` tool to emit the thin module.
+The complete definition below remains binding; the tool replaces repetitive
+module generation, not semantic analysis or emitted conformance verification.
+Read the actual FSM and supply every erased or authored contract exactly.
+Do not use `flat-defaults` or `flat-quoted-relays` when another custom composer, classifier, required-field
+extractor, session-derived input mapping, controller strategy, nested call,
+or compound state other than such a parallel group is needed.
+Despite their names, every profile accepts those parallel groups: the tool
+takes each region working leaf's role and label under its stable state id
+like any other player state, declares nothing further, and leaves the
+compiled shape to the factory preflight, which rejects any other form.
+
+Invoke the tool with the actual definition directory, source FSM, and declared
+target; supply a JSON descriptor on standard input:
+
+```sh
+node "<definition-directory>/materialize-link.mjs" --fsm "<source.fsm.ts>" --out "<target.playbook.ts>" <<'JSON'
+{
+  "schema": "sublang.playbook.link.v1",
+  "profile": "flat-defaults",
+  "machineExport": "exampleMachine",
+  "label": "EXAMPLE",
+  "options": {},
+  "inputMapping": {},
+  "entryEvent": { "type": "BOSS_TASK", "textField": "bossIntent" },
+  "bossEvents": [],
+  "outcomeAuthority": {
+    "governedPlayerStates": {
+      "work": {
+        "done": { "fields": {}, "repositoryDisposition": "one-descendant-commit" },
+        "needsBossReply": { "fields": { "question": "presentation" }, "repositoryDisposition": "deferred" }
+      }
+    }
+  },
+  "placeholderFields": {},
+  "transitionEventFields": ["bossIntent", "answer", "questionId"],
+  "verbatimPayloadFields": [],
+  "resumableStateIds": ["work"],
+  "unfinishedFinalStateIds": [],
+  "controlContextFields": []
+}
+JSON
+```
+
+This descriptor is an example shape, not default workflow semantics.
+Select `flat-defaults` for the unchanged shared player composer, or
+`flat-quoted-relays` when the source requires standalone `> <token>` relay lines.
+The latter uses the same descriptor keys and `placeholderFields` mappings;
+ordinary string tokens substitute literally, while standalone relay values
+quote each nonempty line with `> ` and preserve LF/CRLF and blank lines.
+An empty relay value omits its complete template line; missing or non-string
+values retain the token. Inserted values are never substituted again.
+The emitted composer preserves the installed shared fresh/resumed Q&A prefix
+and does not modify the original input. Labelled relays, identity-specific
+composition, structured renderers, and other custom strategies require
+ordinary linking; do not select either profile for those requirements.
+Every top-level member is required; unknown members are errors.
+`options` maps each configured option to `{ "type": "string" | "number" |
+"boolean", "required": true | false }`; `inputMapping` maps each FSM input
+field to its supplying option name.
+Option unions, closed values, range constraints, nested structures, and
+session-derived input values are outside this profile; do not widen their
+contracts to an unconstrained primitive.
+The tool adds optional string `cwd` for script-bearing machines; it does not
+put `cwd` in FSM input unless the descriptor explicitly maps it.
+When the linked module is part of a package that compiles and ships
+JavaScript siblings, supply the optional `fsmSpecifier` — the `.js` sibling
+the build emits for the source FSM, such as `./code.fsm.js`, in the same
+directory and with the same basename — so the emitted import satisfies the
+NodeNext rule under Output; omit it for a source-only host, where the tool
+derives the specifier from the `--fsm` path.
+An explicit `entryEvent: null` selects the shared classifier only where this
+definition permits no deterministic entry; it does not relax entry rules.
+`bossEvents` retains the exact additional erased event fields, source ownership,
+requiredness, and closed values specified under Output.
+The state/outcome/field authority map, placeholder exceptions, transition and
+verbatim fields, resumable states, unfinished finals, and safe ordered context
+projection retain their exact obligations under Output.
+The tool copies role labels and identities from the machine and never guesses
+result semantics by executing an invocation against invented context.
+
+The helper resolves the installed shared engine from the source and target
+locations and refuses differing engine resolutions.
+Its factory preflight checks linked metadata.
+It accepts `.fsm.js` on supported Node versions; `.fsm.ts` requires native
+type stripping (Node 23.6+, or Node 22.18+).
+On success it atomically writes only the declared target after factory
+preflight; run all existing conformance checks afterward.
+Exit 2 reports `unsupported` without changing the target: continue ordinary
+linking under this complete definition.
+Exit 1 reports invalid metadata, loading, preflight, or output failure:
+correct the identified problem before treating linking as successful.
+
+### Experimental labelled-string and nested-call profile
+
+`flat-labelled-relays` is an unmeasured candidate for machines with flat
+root states or root parallel groups of that shape, whose delegated players,
+scripts, and nested `playbook` calls it supports. It
+requires the installed shared `composePlayerContinuation` API. It leaves
+nested input composition, child targets, result guards, recovery, and terminal
+semantics in the unchanged FSM; the shared factory provides the nested bridge.
+It does not authorize generating or importing maintained workflow artifacts.
+
+Select it only for literal string substitution in unchanged player templates,
+including labelled `> Label: <token>` lines and source-declared role-identity
+tokens. In addition to every descriptor member above, supply:
+
+- `playerInputExport`: the exact exported FSM player-input type name.
+- `omitEmptyRelayLines`: exact complete source lines to omit only when their
+  mapped string value is empty, for example
+  `["> Run results: <run-results>"]`. Each line starts with `> ` and ends in
+  one placeholder; any preceding label is literal. Use an explicit empty
+  array when no line is optional; never infer optionality from a missing value.
+- `identityPlaceholders`: an explicit token-to-canonical-local-role map, such
+  as `{ "coder-llm": "coder" }` only where Source requires that identity.
+  These values come solely from the invocation-scoped identity lookup, never
+  from options, FSM context, or model prose. Use `{}` when none is authored.
+
+The composer replaces original tokens once, prefixes each continuation line
+of a value inserted into a quoted source line with `> `, preserves line
+separators and literal inserted text, and leaves missing/non-string values as
+source tokens. Undeclared empty relay lines retain their authored text.
+The emitted verification composer has the same identity and optional third
+resume arguments as the runtime; the shared helper owns fresh/resumed Q&A.
+Structured rendering, custom classifiers/extractors/controllers, direct
+Captain actors, compound topology other than such a parallel group, and
+constrained/nonprimitive options remain unsupported. Source-derived metadata and all existing
+conformance checks remain mandatory. This profile changes no runtime bridge,
+workflow semantics, or measured performance claim.
+
+For an FSM that satisfies one of the materializer profiles above, derive its
+complete source-owned descriptor and run `materialize-link.mjs` before writing
+an ordinary linked module by hand. Use the supported profile whose composer
+matches the actual source. An unsupported-profile exit continues ordinary
+linking under this definition; invalid metadata must be corrected. Never
+widen an option, omit a required custom strategy, change the FSM, or relax a
+verification check to make a profile fit.
+
+
 ## PlaybookRuntime contract
 
 The emitted module shall default-export a factory of the following shape:
 
 ```typescript
 interface PlaybookRuntime {
+  readonly retainedGenerationMetadata?: PlaybookRetainedGenerationMetadata;
   init(session: PlaybookSession): Promise<void>;
+  adopt?(
+    session: PlaybookSession,
+    snapshot: PlaybookRuntimeSnapshot,
+    context: PlaybookAdoptionContext,
+  ): Promise<void>;
   handleBossInput(turn: {
     text: string;
     signal: AbortSignal;
+    /** Called synchronously just before accepting the event, at most once. */
+    onAccepted?: () => void;
   }): Promise<PlaybookRunResult>;
   resumePlaybookCall(input: {
     callId: string;
     result: PlaybookCallResult;
     signal: AbortSignal;
   }): Promise<PlaybookRunResult>;
+  unresolvedEffectEnvelopes?(): readonly (
+    | { readonly kind: 'boundary'; readonly boundaryId: string }
+    | { readonly kind: 'logical-operation'; readonly operationId: string }
+  )[];
   dispose(): Promise<void>;
+}
+
+interface PlaybookRetainedGenerationMetadata {
+  readonly unfinishedFinalStateIds: readonly string[];
+}
+
+interface PlaybookAdoptionContext {
+  readonly sourceSessionId: string;
+  readonly sourceGenerationId: string;
+  readonly targetChildSessionId?: string;
 }
 
 interface PlaybookSession {
@@ -92,10 +261,36 @@ type JsonValue =
   | readonly JsonValue[]
   | { readonly [key: string]: JsonValue };
 
+// DR-063: the closed failure-cause contract. `code` is one of
+// PLAYBOOK_FAILURE_CODES and `evidence` holds exactly the members that code
+// names — repository paths, dispositions, classifications, and revisions, never
+// content or internal identity.
+type PlaybookFailureCode =
+  | 'commit-missing'
+  | 'commit-residual'
+  | 'pre-existing-lost'
+  | 'commits-more-than-one'
+  | 'history-rewritten'
+  | 'foreign-change'
+  | 'observation-unstable'
+  | 'attribution-ambiguous'
+  | 'receipt-missing'
+  | 'judge-failed'
+  | 'player-failed'
+  | 'aborted'
+  | 'child-failed'
+  | 'runtime-defect';
+
+interface PlaybookFailureCause {
+  readonly code: PlaybookFailureCode;
+  readonly evidence: PlaybookFailureEvidence;
+}
+
 interface NormalizedError {
   name: string;
   message: string;
   stack?: string;
+  cause?: PlaybookFailureCause;   // present when the error carried a valid one
 }
 
 type PlaybookStateValue =
@@ -121,10 +316,179 @@ interface PlaybookSuspendedCall extends PlaybookPendingCall {
   stateId: string;
   text: string;
   turnId?: number;
+  effectBoundaryPrefixSequence?: number | null;
+}
+
+type PlaybookRepositoryReceiptClassification =
+  | 'unchanged'
+  | 'one-descendant-commit'
+  | 'multiple-commits'
+  | 'rewritten-or-non-descendant'
+  | 'worktree-only-change'
+  | 'concurrent-or-foreign-change'
+  | 'observation-ambiguous';
+
+interface PlaybookRepositoryObservation {
+  readonly worktree: string;
+  readonly gitDir: string;
+  readonly head: string;
+  readonly projection: Readonly<Record<string, JsonValue>>;
+  readonly projectionDigest: string;
+}
+
+interface PlaybookRepositoryReceipt {
+  readonly classification: PlaybookRepositoryReceiptClassification;
+  readonly baseline: PlaybookRepositoryObservation;
+  readonly after?: PlaybookRepositoryObservation;
+  readonly commitOid?: string;
+}
+
+type PlaybookRepositoryDisposition =
+  | 'unchanged'
+  | 'one-descendant-commit'
+  | 'deferred';
+
+interface PlaybookEffectBoundary {
+  readonly sequence: number;
+  readonly boundaryId: string;
+  readonly attemptId: string;
+  readonly attemptNumber: number;
+  readonly playbookId: string;
+  readonly runtimeSessionId: string;
+  readonly turnId: number;
+  readonly callId: string;
+  readonly roleId: string;
+  readonly sourceStateId: string;
+  readonly sourceOutcomeSchema: JsonValue;
+  readonly dispositions: readonly PlaybookRepositoryDisposition[];
+  readonly canonicalWorktree: {
+    readonly worktree: string;
+    readonly gitDir: string;
+  };
+  readonly baseline: PlaybookRepositoryObservation;
+  readonly after?: PlaybookRepositoryObservation;
+  readonly physicalReceipt?: PlaybookRepositoryReceipt;
+  readonly restored?: PlaybookRepositoryObservation;
+  readonly finalText?: string;
+  readonly semanticCandidate?: JsonValue;
+  readonly initialSemanticCandidate?: JsonValue;
+  readonly correctionBudget: { readonly limit: 1; readonly spent: boolean };
+  readonly cohortId?: string;
+  readonly logicalOperationId?: string;
+}
+
+interface PlaybookEffectLogicalOperation {
+  readonly sequence: number;
+  readonly operationId: string;
+  readonly playbookId: string;
+  readonly runtimeSessionId: string;
+  readonly boundaryIds: readonly string[];
+  readonly originalBaseline: PlaybookRepositoryObservation;
+  readonly checkpoint?: PlaybookRepositoryObservation;
+  readonly pendingQuestion?: PlaybookPendingBossQuestion;
+  readonly playerContinuation?: JsonValue;
+  readonly checkpointRestorationEligible: boolean;
+  readonly logicalReceipt?: PlaybookRepositoryReceipt;
+}
+
+interface PlaybookEffectLedger {
+  readonly schemaVersion: 1;
+  readonly revision: number;
+  readonly boundaries: readonly PlaybookEffectBoundary[];
+  readonly logicalOperations: readonly PlaybookEffectLogicalOperation[];
+}
+
+type PlaybookEffectBoundaryStart = Omit<
+  PlaybookEffectBoundary,
+  | 'sequence'
+  | 'attemptId'
+  | 'attemptNumber'
+  | 'after'
+  | 'physicalReceipt'
+  | 'finalText'
+  | 'semanticCandidate'
+  | 'initialSemanticCandidate'
+  | 'restored'
+>;
+
+type PlaybookEffectLogicalOperationStart = Omit<
+  PlaybookEffectLogicalOperation,
+  'sequence'
+>;
+
+type PlaybookEffectLedgerCommand =
+  | {
+      readonly kind: 'start-boundaries';
+      readonly boundaries: readonly [
+        PlaybookEffectBoundaryStart,
+        ...PlaybookEffectBoundaryStart[],
+      ];
+    }
+  | {
+      readonly kind: 'replace-boundaries';
+      readonly replacements: readonly [
+        {
+          readonly expected: PlaybookEffectBoundary;
+          readonly next: PlaybookEffectBoundary;
+        },
+        ...{
+          readonly expected: PlaybookEffectBoundary;
+          readonly next: PlaybookEffectBoundary;
+        }[],
+      ];
+    }
+  | {
+      readonly kind: 'append-logical-operations';
+      readonly operations: readonly [
+        PlaybookEffectLogicalOperationStart,
+        ...PlaybookEffectLogicalOperationStart[],
+      ];
+    }
+  | {
+      readonly kind: 'replace-logical-operations';
+      readonly replacements: readonly [
+        {
+          readonly expected: PlaybookEffectLogicalOperation;
+          readonly next: PlaybookEffectLogicalOperation;
+        },
+        ...{
+          readonly expected: PlaybookEffectLogicalOperation;
+          readonly next: PlaybookEffectLogicalOperation;
+        }[],
+      ];
+    };
+
+type PlaybookEffectLedgerCommandBatch = readonly [
+  PlaybookEffectLedgerCommand,
+  ...PlaybookEffectLedgerCommand[],
+];
+
+interface PlaybookEffectLedgerCapability {
+  snapshot(): PlaybookEffectLedger;
+  writeAhead(
+    commands: PlaybookEffectLedgerCommandBatch,
+  ): Promise<PlaybookEffectLedger>;
+}
+
+interface PlaybookRecoveryCheckpoint {
+  readonly id?: string;
+  readonly stateId: string;
+  readonly prompt: string;
+  readonly machine: JsonValue;
+  readonly boundaryPrefix: number;
+  readonly result?: JsonValue;
+  readonly delivered?: true;
+}
+
+interface PlaybookStepRecord {
+  readonly id: string;
+  readonly kind: 'player' | 'captain' | 'script';
+  readonly stateId: string;
+  readonly result?: JsonValue;
 }
 
 interface PlaybookRuntimeSnapshot {
-  schemaVersion: 3;
+  schemaVersion: 4;
   playbookId: string;
   machine: JsonValue;
   roleResumeTokens: { readonly [roleId: string]: string };
@@ -138,11 +502,29 @@ interface PlaybookRuntimeSnapshot {
   };
   state: PlaybookState;
   pendingBossQuestions: readonly PlaybookPendingBossQuestion[];
+  effectLedger: PlaybookEffectLedger;
+  /** Original runtime identity retained across schema-3 adoption lineage. */
+  retainedEffectSourceSessionId?: string;
+  /**
+   * Unsafe retained-adoption checkpoint. The marker remains durable until
+   * authoritative reconciliation proves its complete suffix replay-safe.
+   */
+  retainedEffectReconciliation?: {
+    readonly sourceSessionId: string;
+    readonly checkpoint: PlaybookEffectLedger;
+  };
+  failedEffectAttempt?: {
+    readonly boundaryPrefix: number;
+    readonly attemptId: string | null;
+  };
+  /** Interrupted invocation, captured before its external call (DR-069). */
+  recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
   suspendedCall?: PlaybookSuspendedCall;
 }
 
 type PlaybookRunResult =
   | { outcome: 'quiescent' | 'no-action'; state: PlaybookState }
+  | { outcome: 'unresolved-effect'; state: PlaybookState }
   | {
       outcome: 'failed' | 'aborted';
       state: PlaybookState;
@@ -151,6 +533,8 @@ type PlaybookRunResult =
   | {
       outcome: 'terminal';
       state: PlaybookState;
+      stateDescription?: string;
+      terminal?: PlaybookTerminalOutcome;
       output?: JsonValue;
     }
   | {
@@ -164,11 +548,83 @@ type PlaybookRuntimeFactory<Options = unknown> = (
 ) => PlaybookRuntime;
 
 export default function createPlaybookRuntime(
-  options: PlaybookRuntimeOptions,
+  construction: XStatePlaybookRuntimeConstruction<
+    PlaybookRuntimeOptions,
+    HostCapabilities
+  >,
 ): PlaybookRuntime;
 ```
 
-The default export conforms to `PlaybookRuntimeFactory<PlaybookRuntimeOptions>`, the generic factory type the shared contract module exposes (§Output).
+For a Captain-hosted linked workflow, the default export conforms to `PlaybookRuntimeFactory<XStatePlaybookRuntimeConstruction<PlaybookRuntimeOptions, HostCapabilities>>`, where `HostCapabilities` is the artifact's exact live schema-3 capability type and `PlaybookRuntimeFactory` is the generic factory type the shared contract module exposes (§Output).
+The roleless session-Captain is the sole signature exception: its public options-only `PlaybookRuntimeFactory<PlaybookRuntimeOptions>` wrapper supplies its fixed empty-ledger, fail-closed schema-3 capabilities internally because no Captain host exists above it.
+
+Artifact schema `3` shall require `outcomeAuthority` as an own plain-JSON data property and shall instantiate the shared factory with exactly `{ configuredOptions, hostCapabilities }`, where `configuredOptions` is the registry-validated plain-JSON workflow slice and `hostCapabilities` is a non-null live current-host object.
+For schema `3`, the `Options` argument of the one-argument shared `PlaybookRuntimeFactory<Options>` shall be `XStatePlaybookRuntimeConstruction<ConfiguredOptions, HostCapabilities>`; the registry's public entry receives the two members separately and composes that one internal argument only at the artifact boundary.
+For a Captain-hosted schema-3 artifact, `hostCapabilities` shall contain exactly `authority`, `repository`, and `effectLedger`: authority binds that artifact's id, schema, detached role and cohort declarations, current configured working directory, logical session and lease-owner identities, and canonical worktree; repository exposes that same canonical identity plus host-bound observation, acquisition, exclusive-call, and cohort operations, whose optional live completion mapper may return only detached `finalText`, `semanticCandidate`, `logicalOperationId`, additional typed ledger commands for the same atomic completion, one `deferred` binding carrying optional UUID `operationId` plus exact `pendingQuestion` and `playerContinuation`, or literal `unresolved: true`, where `deferred` shall be mutually exclusive with `unresolved`, `logicalOperationId`, and commands; and the ledger exposes its synchronous detached `snapshot(): PlaybookEffectLedger` mirror plus `writeAhead(commands: PlaybookEffectLedgerCommandBatch): Promise<PlaybookEffectLedger>` against the current host's atomic writer.
+Only `configuredOptions` may reach option snapshotting and FSM input.
+The capability object, its callbacks, lease token, and live claim or store handles shall enter neither `PlaybookPorts`, machine input or context, runtime snapshots, launch or durable projections, retained generations, nor continuation identity; the detached ledger data and canonical identities returned by its ledger channel shall instead persist only through the versioned effect-ledger members defined below.
+
+```typescript
+type XStateOutcomeFieldAuthority =
+  | 'presentation'
+  | 'semantic'
+  | 'effect'
+  | 'runtime';
+
+type XStateRepositoryDisposition =
+  | 'unchanged'
+  | 'one-descendant-commit'
+  | 'deferred';
+
+interface XStateGovernedOutcomeSpec {
+  readonly fields: Readonly<Record<string, XStateOutcomeFieldAuthority>>;
+  readonly repositoryDisposition: XStateRepositoryDisposition;
+}
+
+interface XStateOutcomeAuthoritySpec {
+  readonly governedPlayerStates: Readonly<
+    Record<
+      string,
+      Readonly<Record<string, XStateGovernedOutcomeSpec>>
+    >
+  >;
+}
+
+interface XStatePlaybookRuntimeConstruction<
+  ConfiguredOptions,
+  HostCapabilities extends object,
+> {
+  readonly configuredOptions: ConfiguredOptions;
+  readonly hostCapabilities: HostCapabilities & {
+    readonly effectLedger: PlaybookEffectLedgerCapability;
+  };
+}
+```
+
+The shared type-only contract module shall export `PlaybookRepositoryDisposition`, `PlaybookRepositoryObservation`, `PlaybookRepositoryReceipt`, `PlaybookEffectBoundary`, `PlaybookEffectBoundaryStart`, `PlaybookEffectLogicalOperation`, `PlaybookEffectLedger`, `PlaybookEffectLedgerCommand`, `PlaybookEffectLedgerCommandBatch`, and `PlaybookEffectLedgerCapability`; the executable `@sublang/playbook/xstate-runtime` module shall export `assertPlaybookEffectLedger`, `emptyPlaybookEffectLedger`, and `isPlaybookEffectLedgerMonotonicExtension` over those types.
+That executable module shall also export the centralized schema-3 semantic surface: `PlaybookSemanticFieldAuthority`, `PlaybookSemanticOutcomeSpec`, `PlaybookSemanticEvidenceInput`, `PlaybookReconciledSemanticOutput`, `PlaybookRetainedSemanticEvidence`, `PlaybookSemanticReconciliationReason`, `PlaybookSemanticReconciliation`, `PlaybookSemanticCandidateStructureError`, and `reconcilePlaybookSemanticEvidence`.
+The pure reconciler shall accept the declared state-local outcomes, an unknown semantic candidate, and optional unknown `finalText`, repository receipt, and runtime-field evidence; shall return a detached frozen `resolved` or `deferred` decision with exact output and retained evidence, or an `unresolved` decision with retained evidence and one closed reason from `no-matching-outcome`, `missing-presentation-evidence`, `missing-repository-receipt`, `invalid-repository-receipt`, `repository-disposition-mismatch`, `missing-effect-evidence`, `missing-runtime-evidence`, and `inconsistent-runtime-evidence`; and shall reserve `PlaybookSemanticCandidateStructureError` for candidate defects eligible for the bounded correction path rather than effect-evidence disagreement.
+The empty ledger shall be exactly `{ schemaVersion: 1, revision: 0, boundaries: [], logicalOperations: [] }`, and revision shall be zero if and only if both ordered ledgers are empty.
+The validator shall capture the complete supplied ledger once as detached frozen JSON and enforce every closed member, identity, ordering, receipt, cross-reference, correction-budget, and logical-operation invariant represented above.
+One optional host-owned UUID `cohortId` shall identify every member of exactly one contiguous, distinct-role, all-`unchanged` physical cohort in declared role order; every member shall share attempt, playbook, runtime-session, turn, canonical-worktree, and baseline identity and shall be uniformly started or uniformly complete, complete members shall carry the identical after observation and receipt, and the id shall never be reused by another group.
+Within a logical operation, `checkpoint`, `pendingQuestion`, and `playerContinuation` shall be all present or all absent; the pending question shall preserve its exact nonempty authored identity and nonblank content, and `checkpointRestorationEligible: true` shall require that complete bound group.
+Each logical operation shall reciprocally name every and only boundary carrying its operation id, share those boundaries' playbook and runtime-session identity, and use its first boundary's exact baseline as `originalBaseline`; every linked boundary shall use that baseline's canonical worktree and, after the first, start from the preceding boundary's complete after checkpoint, while a logical receipt shall require every linked physical receipt.
+`isPlaybookEffectLedgerMonotonicExtension(checkpoint, current)` shall accept exact equality and only a ledger reachable through the typed append-or-replace transitions without boundary or operation deletion, identity or original-baseline reassignment, correction-budget replenishment, completed-receipt or evidence loss, or removal or reordering of an earlier boundary-id prefix. A spent correction may replace `semanticCandidate` exactly once only while adding `initialSemanticCandidate` equal to the prior candidate; that initial candidate then remains immutable. A replacement may append boundary ids and replace or clear the complete current checkpoint, pending-question, and player-continuation group together with its eligibility, while an existing logical receipt remains immutable ([DR-040](../specs/decisions/040-outcome-authority-effect-reconciliation.md)).
+Every accepted non-idempotent command batch shall increment revision once; an exact start or append replay under the same boundary or operation identities and payload shall return the same acknowledged ledger, while conflicting identity reuse shall reject without mutation.
+The host shall assign each started boundary's sequence, current uncertain-attempt UUID, and positive attempt number, and shall assign each appended logical operation's sequence.
+Every command batch and every command's entry list shall be nonempty; the host shall apply its commands in order as one ledger transition, perform final cross-reference validation after the complete batch, and acknowledge only one atomic persistence and revision increment.
+Every replace command's exact `{ expected, next }` pair shall compare-and-swap one present boundary or operation, preserve its identity and immutable fields, reject a stale expected value, and move optional evidence, the one-way correction budget, or the current logical binding and eligibility only as permitted by DR-040.
+After a governed operation settles, the host shall retain any exact proposed completion batch only in live memory until it is acknowledged and the cooperative claim retires; an indeterminate same-process write shall retry or recognize that batch under the still-owned claim, while recovery after process death shall reconstruct only evidence provable from the durable baseline and current repository observation before source restoration.
+
+`governedPlayerStates` shall name every delegated-player state declared by `roleStates`, or shall be exactly empty for an artifact with no delegated-player state; it shall name no other state.
+Each state shall name exactly the outcomes in that state's `invoke.input.result`, and each outcome shall contain exactly `fields` and `repositoryDisposition`.
+The outcome key owns the semantic discriminator, so `guard` shall not appear in `fields`; the `fields` keys shall equal every additional payload field named by that outcome's result description.
+Each field shall have exactly one authority from `presentation`, `semantic`, `effect`, or `runtime`; every linker-declared verbatim payload field and `question` shall be `presentation`, `latestCommit` shall be `effect`, and the payload fields `irNumber` and `irTask` shall be `semantic`, while outcome keys such as `moreTasks` and `finalTask` remain semantic discriminators.
+Each repository disposition shall be exactly `unchanged`, `one-descendant-commit`, or `deferred`; an effect-owned field is valid on `one-descendant-commit` and `unchanged` and never on `deferred`, and `deferred` is valid only on `needsBossReply` with presentation-owned `question` and another outcome in that state declaring `one-descendant-commit`.
+The linker shall derive each disposition from the source-derived operation and the outcome's required repository effect, independently of whether its result description declares an effect-owned payload field.
+A completion that requires committing the result to Git shall declare `one-descendant-commit` even when its outcome is simply `done` with `fields: {}`; its eligible `needsBossReply` arm shall declare `deferred` under the rule above.
+The absence of `latestCommit` or any other effect-owned field shall never justify defaulting that completion to `unchanged`.
+The shared factory shall reject every legacy artifact schema and reject schema-3 missing, extra, unknown, wrongly owned, or inconsistent metadata before the affected player call.
 
 `init` receives the host-owned playbook session identity and ports, constructs the XState actor with FSM `input` derived from `options`, and starts the actor.
 The runtime owns the actor for its lifetime; `handleBossInput` runs one turn, and `dispose` stops the actor and drains pending port emissions.
@@ -184,12 +640,14 @@ differ from both its `rootSessionId` and `parentSessionId`.
 Run outcomes are exact: `no-action` means no FSM event was sent;
 `quiescent` means a non-failure parked/idle state; `failed` means the FSM is in
 a recoverable failure state; `terminal` means top-level final with optional
-JSON output; `aborted` means the turn signal ended work; and `suspended` means
+JSON output and the exact authored `stateDescription` of the reached final
+state when one is declared; `aborted` means the turn signal ended work; and `suspended` means
 exactly one `pendingCall` is active.
+Only the terminal variant may carry `stateDescription`; the runtime shall omit it when the final state declares none and shall never substitute a state id or derive it from opaque output ([DR-037](../specs/decisions/037-terminal-result-meaning.md)).
 Control-plane exceptions reject the runtime method rather than masquerade as a
 recoverable workflow `failed` result.
 
-`PlaybookRuntimeOptions` is host-agnostic and carries only _per-run_ workflow knobs, strategy overrides the linker exposes, and — where the compiled playbook's policy needs a host seam — host-supplied port-shaped callbacks the linker exposes as option members whose types the artifact itself declares, so the six-member `PlaybookPorts` contract and the shared contract module stay free of host types.
+Configured options shall be plain JSON and live host seams shall enter only through `hostCapabilities` in the disjoint schema-3 construction input above.
 The link compiler emits a typed options interface per playbook based on the FSM's `CodingInput` (or equivalent).
 The CLI's absence of `--link-option` values does not mean that
 `PlaybookRuntimeOptions` is empty. CLI link options are compile-time inputs;
@@ -200,6 +658,17 @@ remain a required readonly runtime option passed through to machine input; the
 linker shall neither invent an empty catalog nor require it to be baked into a
 CLI link option.
 
+The linked module shall export public synchronous pure `validateOptions(value: unknown): PlaybookRuntimeOptions` and bind that same function as the shared spec's `snapshotOptions`.
+The validator shall first capture `value === undefined ? {} : value` with the public `snapshotJsonValue` exported by `@sublang/playbook/xstate-runtime`, before reading option members, applying defaults, or constructing a replacement record; only top-level `undefined` is normalized, and non-JSON input rejects through that shared boundary.
+It shall then validate the artifact's actual option shape, requiredness, source-authored defaults, unknown keys, and declared values against the detached snapshot, reject null and invalid options, and return a detached immutable plain-JSON option record without runtime construction or live host capabilities.
+Boss text supplied by the entry event is not a required startup option unless Source independently requires it before the first Boss turn; a generated required type annotation alone is not that evidence.
+A generated entry guard that requires the text already in context is likewise
+not independent Source evidence; it is a producer defect when the entry action
+has yet to copy the event's text. Do not compensate with a required option or
+invented startup task. Entry metadata does not populate fresh context before
+FSM guards execute. Interrupted-step checkpoints retain accepted input.
+A source-appropriate optional seed may remain, and genuine required bootstrap catalogs or other options shall not be erased or filled with invented defaults.
+
 Concrete player binding and prompt identity are host policy and shall not enter `PlaybookRuntimeOptions`, machine input, or the emitted artifact.
 For a shell-hosted runtime, `PlaybookSession.roleBindings` shall carry exactly the runtime's local roles, map each to its resolved player id and current prompt identity, and be the sole source for call targeting, player-facing prompt identity, concurrency keys, and trace player ids.
 The host shall derive `promptIdentity` from the current effective model when present and the established adapter otherwise; a standalone runtime may omit the map and retain only its local role identity.
@@ -208,6 +677,7 @@ The host shall derive `promptIdentity` from the current effective model when pre
 
 ```typescript
 interface PlaybookPorts {
+  recordStep?(step: PlaybookStepRecord, position?: PlaybookRuntimeSnapshot): Promise<void>;
   callPlayer(
     roleId: string,
     prompt: string,
@@ -230,6 +700,7 @@ interface PlaybookPorts {
 
 interface PlayerCallOptions {
   resume: string | false;
+  freshPrompt?: string;
 }
 
 interface CaptainCallOptions {
@@ -257,6 +728,12 @@ interface PlaybookCallRequest {
   text: string;
 }
 
+interface PlaybookTerminalOutcome {
+  stateId: string;
+  kind: 'success' | 'failure';
+  description?: string;
+}
+
 type PlaybookCallResult =
   | {
       status: 'ok';
@@ -264,6 +741,7 @@ type PlaybookCallResult =
       childSessionId: string;
       state?: PlaybookState;
       output?: JsonValue;
+      terminal?: PlaybookTerminalOutcome;
     }
   | {
       status: 'aborted';
@@ -284,6 +762,8 @@ type PlaybookCallStart =
   | { state: 'settled'; result: PlaybookCallResult }
   | { state: 'suspended'; childSessionId: string };
 ```
+
+A runtime's `{ outcome: 'unresolved-effect', state }` abandonment result is not a `PlaybookCallResult`: a host shall not translate it into child output or error, resume a parent FSM with it, or treat it as authored completion.
 
 `PlayerResult` mirrors the status, resume token, final text, and error fields of cligent's `PlayerRunResult` ([TMUX-033](https://github.com/sublang-ai/cligent/blob/main/specs/user/tmux-play.md#tmux-033)).
 The runtime treats `status !== 'ok'` as a player failure and routes it through the FSM's error path (§Abort).
@@ -386,7 +866,7 @@ The runtime never speaks to LLMs directly and never touches host types beyond `P
 ## Playbook trace
 
 Every linked runtime shall emit a boundary-complete, ordered trace through `emitTelemetry` topic `playbook.trace`.
-Each payload shall carry `schemaVersion: 3`, the immutable session identity and
+Each payload shall carry `schemaVersion: 4`, the immutable session identity and
 causality, a contiguous one-based `sequence`, a Unix-millisecond `timestamp`, a
 trace `type`, event `payload`, and the runtime-local `turnId` / paired `callId`
 where applicable.
@@ -406,12 +886,13 @@ type PlaybookTraceType =
   | 'apply.started'
   | 'apply.finished'
   | 'fsm.transition'
+  | 'outcome.accepted'
   | 'status.emitted'
   | 'boss.input.settled'
   | 'session.disposed';
 
 interface PlaybookTraceEvent {
-  schemaVersion: 3;
+  schemaVersion: 4;
   sessionId: string;
   playbookId: string;
   rootSessionId: string;
@@ -437,8 +918,9 @@ The trace types are `session.started`, `boss.input.received`,
 `player.call.finished`, `captain.call.started`, `captain.call.finished`,
 `playbook.call.started`,
 `playbook.call.finished`, `apply.started`, `apply.finished`,
-`fsm.transition`, `status.emitted`,
+`fsm.transition`, `outcome.accepted`, `status.emitted`,
 `boss.input.settled`, and `session.disposed`.
+No trace event whose `schemaVersion` is below `4` is authority-bearing accepted-outcome evidence.
 Call pairs carry exact prompts and replies, normalized failures, actor and state
 identity, and their boundary-specific options.
 `apply.started` and `apply.finished` are the paired apply boundary of a
@@ -453,8 +935,13 @@ Direct-Captain start and finish payloads shall carry `allowedTools` exactly when
 the originating `CaptainCallOptions` selects it and shall omit the member when
 the call preserves the host Captain's configured tools.
 `session.started` and `session.disposed` carry their descriptor as top-level
-`state` and its singular `stateId` when present. Every judge start and finish
-carries the working snapshot's singular `stateId` when one exists;
+`state` and its singular `stateId` when present. An adopted runtime begins its
+fresh target trace with `session.started` at sequence `1`; that event also
+carries an exact nested `adoption` object with `sourceSessionId` and
+`sourceGenerationId`, plus the source/target call and child-session identities
+when a suspended edge was rebased. The suspended form carries the fresh target
+call id as top-level `callId` and carries no source `turnId`. Every judge start
+and finish carries the working snapshot's singular `stateId` when one exists;
 classification uses the current descriptor and adjudication uses the invoking
 actor input. The default Captain always has such a singular id, while a
 parallel snapshot may omit it. Every judge finish also carries
@@ -496,8 +983,12 @@ id and then reject the original start error. It shall not retry either event or
 let a failure of that finish attempt replace the start error.
 A start-sink rejection causally identical to the applicable signal reason is
 the cancellation itself, not a control error: no host call begins, the
-best-effort paired finish carries `status: 'aborted'`, nothing is latched, and
-the boundary settles as §Abort prescribes
+best-effort paired finish carries the boundary's canonical aborted evidence —
+`status: 'aborted'` for a host call, or the rejected-before-effect disposition
+and reason for apply — and nothing is latched. An ordinary run boundary settles
+as §Abort prescribes. At the apply boundary the same event remains
+pre-acceptance: `apply` rejects with that exact reason, records no receipt, and
+leaves the key reusable
 ([DR-036](../specs/decisions/036-coherent-abort-settlement.md)).
 When a call boundary carries `callId`, that id shall be unique within the
 runtime session. A stable FSM `stateId` is identity metadata in the payload,
@@ -511,6 +1002,7 @@ result: its outcome must be one of the `PlaybookRunResult` discriminants (never
 an invented `error` outcome), and it shall include `state`, singular
 `stateId`, `pendingCall`, `output`, and normalized `error` whenever the matching
 result arm carries them.
+The `unresolved-effect` arm shall carry only `state`; bounded repository-effect evidence remains host-owned and shall enter neither that result nor its trace projection.
 One runtime-owned concurrency-one emission queue shall serialize every trace,
 human status, and state telemetry call. Sequence allocation and enqueueing
 shall occur atomically, and every public method shall drain that queue before
@@ -585,30 +1077,17 @@ Those blocks are outside the domain prompt body.
 The composer shall not inject a player-visible Boss-question instruction.
 Boss-question detection is adjudicator-facing: it comes from the state's `needsBossReply` result description, not from extra prompt text.
 
-When `PlayerInput` carries both `pendingBossQuestion` and `bossReply`, the
-composer shall prepend the continuation preamble and labelled Q&A blocks before
-ordinary structured blocks and before the domain prompt body:
+When `PlayerInput` carries both `pendingBossQuestion` and `bossReply`, the composer receives an optional third `resuming` boolean after `promptIdentity`; absent means fresh.
+The shared `composePlayerContinuation(input, body, resuming)` helper prefixes the verbatim Boss reply and, only for a fresh conversation, the pending question labeled `Your previous question:`.
+A resumed call omits that question; a fresh call includes it before `Boss reply:`.
+Both retain the authored task body exactly once, with two newlines between blocks.
+These framework blocks never enter `invoke.input.prompt` or persisted FSM context.
 
-```text
-You previously paused this task to ask Boss a question; Boss has now replied. Continue the same task using the reply below.
-
-Boss question:
-<pendingBossQuestion.question>
-
-Boss reply:
-<bossReply>
-
-```
-
-The continuation preamble is framework text supplied by the runtime.
-It is not part of the GEARS blockquote and shall not appear in `invoke.input.prompt`.
-The composer shall retain the blank line after the Boss reply before the next
-structured block or domain prompt, producing exactly two newline characters at
-that boundary.
-When implementing the prefix as an array joined with `"\n"`, the array needs
-two trailing empty strings after `bossReply`; one trailing empty string emits
-only one newline and is nonconformant. Equivalently, append `"\n\n"` exactly
-once before the following block or domain body.
+The runtime chooses the compact prompt only after selecting a conversation token and carries the complete prompt as optional `PlayerCallOptions.freshPrompt`.
+A host starting fresh after a definite pre-execution token rejection uses `freshPrompt`, when supplied, instead of the compact prompt.
+Without that option, the given prompt remains complete.
+Traces and host observations record the respective prompts actually sent.
+Old composers may ignore the optional argument and retain their full prompt.
 
 ## Captain prompt composition
 
@@ -780,7 +1259,8 @@ clause (or equivalent typed output metadata). Backticked prose before that
 clause can name statuses, guards, or concepts such as `ok`, `aborted`, and
 `error`; those names are not output properties and shall never become required
 judge fields.
-For a delegated-player field annotated exactly `` `<field>: <verbatim final text>` ``, the judge shall select the guard but the runtime shall replace any judge-supplied value with the player's canonical non-empty final text before returning the actor output.
+For a nongoverned delegated-player field annotated exactly `` `<field>: <verbatim final text>` ``, the judge shall select the guard but the runtime shall replace any judge-supplied value with the player's canonical non-empty final text before returning the actor output.
+For an artifact-schema-3 governed field, that annotation instead declares presentation authority and any judge-supplied value is a structural error under the authority rule below.
 The linker shall derive the complete `verbatimPayloadFields` set from those annotations across the FSM result maps.
 A field name that is annotated in one result map and unannotated in another is a link error because the shared adjudication strategy cannot give one property both ownership policies.
 For a direct Captain result, `question` and `response` are human-presentation
@@ -793,13 +1273,110 @@ After validating that selection, the runtime shall inject the exact non-empty
 It shall reject a judge reply that supplies either presentation field as an
 undeclared extra key, so hidden adjudication cannot replace, paraphrase, or
 decorate prose Boss already saw.
-Delegated-player adjudication retains extraction of every required field from
-the judge reply, including a player-authored Boss question.
+For an artifact-schema-3 governed delegated-player call, the shared engine
+shall instead use one semantic reconciler for both the default linked runtime
+and any linked machinery of an artifact's own that adopts schema `3`.
+That reconciler shall retain the validated player's exact non-empty
+`finalText` as opaque presentation evidence, let the hidden adjudicator read
+it only as semantic evidence, and require the adjudicator's detached
+plain-JSON candidate to contain exactly `guard` plus every and only
+semantic-owned payload field declared for that guard.
+The candidate shall therefore contain no presentation-, effect-, or
+runtime-owned payload field; `guard` shall name exactly one outcome declared
+by both the live result map and `outcomeAuthority`; and every semantic-owned
+field shall satisfy the result map's required-field type before any actor
+output is delivered.
+The judge prompt shall render each governed outcome's description with its
+meaning verbatim and its `Output shall include` clause replaced by that reply
+contract — exactly `guard` plus the semantic-owned fields, each keeping its
+authored placeholder or guidance, with every presentation-, effect-, or
+runtime-owned field named as runtime-supplied to omit — so the judge is never asked for a
+field it does not own; the artifact's description text stays unchanged.
+The shared engine shall export that rendering as `renderGovernedOutcomeContract`
+on `@sublang/playbook/xstate-runtime`, and linked machinery of an artifact's
+own shall render its judge prompt through it rather than restate the contract.
+The reconciler shall construct the complete actor output rather than accept a
+cross-authority object from the judge: every presentation-owned payload field
+shall receive the canonical `finalText.trim()` value; every effect-owned
+field shall receive only the qualifying receipt's repository fact selected by
+the accepted outcome's declared disposition — the exact new-descendant commit
+OID on `one-descendant-commit`, or the matching `unchanged` receipt's
+observed HEAD OID on `unchanged` — never a value keyed on the field's name;
+and no authority may supply, overwrite, or contradict another authority's
+field.
+It shall reject an absent required field, an undeclared or extra field, a
+field supplied by the wrong authority, an invalid value, or any mutually
+inconsistent candidate before FSM delivery.
+When no outcome matches, a governed judge may instead return exactly
+`{ blocked: <nonempty explanation> }`.
+The shared reconciler retains this candidate and returns `no-matching-outcome`
+with its explanation as a `runtime-defect` cause; it authorizes neither a
+corrective judge nor an FSM outcome.
+Both shared and bespoke judge prompts shall state this alternative explicitly
+instead of forcing a match when the declared results are incomplete.
+
+For a non-deferred candidate, reconciliation shall require a complete durable
+physical receipt, or the complete cumulative logical receipt of a deferred
+operation, whose classification is exactly the outcome's declared
+`unchanged` or `one-descendant-commit` disposition; a `one-descendant-commit`
+receipt shall carry exactly the after-HEAD OID used for the arm's effect-owned
+fields, while an `unchanged` receipt's complete validated observation supplies
+its observed HEAD OID for them, and a receipt that cannot prove that observed
+HEAD shall leave the envelope unresolved rather than inject a fabricated
+value.
+A `deferred` candidate shall be admissible only for its already-validated
+effect-authorized `needsBossReply` outcome and only from a complete after
+observation whose HEAD equals the logical operation's original baseline HEAD
+and whose classification is exactly `unchanged` or `worktree-only-change`.
+It shall become deliverable only after the current host durably acknowledges
+the exact checkpoint, question, continuation, and logical-operation binding
+defined above; a missing checkpoint, changed HEAD, multiple or rewritten
+history, detected concurrent or foreign change, or ambiguous observation
+shall leave it unresolved.
+
+The first structurally invalid schema-3 semantic reply shall make at most one
+corrective hidden adjudication eligible over the identical retained
+presentation evidence and declared outcome schema, with the validation error
+restated.
+Before starting that corrective judge, the runtime shall compare-and-swap the
+boundary's `correctionBudget` from `{ limit: 1, spent: false }` to
+`{ limit: 1, spent: true }` while atomically retaining its receipt, opaque
+presentation, and first recoverable invalid `semanticCandidate` through
+`effectLedger.writeAhead`, await the durable acknowledgement, replace its
+mirror with that acknowledged ledger, and check the applicable abort signal
+again.
+A failed or indeterminate spend, an acknowledgement that does not contain the
+exact one-way update, a previously spent budget, or an abort before the call
+begins shall start no corrective judge; the spent value shall remain spent
+across export, restore, adoption, and process restart.
+A second structurally invalid reply shall receive no further correction.
+A player abort, error, non-`ok` result, or missing non-empty `finalText` shall
+start no adjudication, while an initial or corrective judge transport failure
+or invalid host result shall start no corrective or third judge respectively.
+
+Only a complete, authority-consistent semantic-and-effect envelope shall be
+delivered once to the FSM, and only after its evidence and applicable
+correction-budget or deferred-operation updates are durably acknowledged.
+The completion path shall retain the opaque `finalText`, the latest recoverable
+detached plain-JSON semantic candidate even when it is structurally invalid,
+and the receipt and correction budget without parsing the presentation for a
+repository fact; where a correction replaces that candidate, immutable
+`initialSemanticCandidate` shall preserve the candidate that consumed the
+budget, while a malformed reply from which no JSON value can be recovered may
+omit both candidates.
+An effect-possible envelope whose presentation, semantic, effect, or deferred
+checkpoint evidence is absent, invalid, incomplete, or inconsistent shall
+deliver no actor output and shall remain parked for later reconciliation;
+once its matching source state is restored, reconstruction from a durable
+complete envelope may perform that same reconciliation once without another
+player or judge call.
 The adjudicator shall use the same document-order tolerant JSON recovery as
 the Boss classifier. Unlike invalid classification, a reply from which no
 object can be recovered, an undeclared guard, or a missing required field is a
-control-plane error and shall throw after the invocation reaches its FSM error
-path and ordered emissions drain.
+control-plane error for nongoverned delegated-player and direct-Captain adjudication and
+shall throw after the invocation reaches its FSM error path and ordered
+emissions drain; schema-3 governed adjudication follows the bounded
+reconciliation contract above instead.
 
 Two default adjudication strategies, in selection order:
 
@@ -807,14 +1384,19 @@ Two default adjudication strategies, in selection order:
   names the source item's actor (and delegated player where applicable),
   includes the actor's verbatim output,
   lists the `result` keys with their descriptions, and demands a JSON
-  `{ guard, …structuralPayloadFields }` answer keyed to exactly one of the
-  declared guards, excluding the runtime-owned direct-Captain `question` and
-  `response` fields above. The prompt shall identify hidden control work,
+  answer keyed to exactly one of the declared guards: a nongoverned player uses
+  `{ guard, …structuralPayloadFields }`, while a governed schema-3 player uses
+  `{ guard, …semanticOwnedPayloadFields }` and explicitly forbids every other
+  payload field. The governed form also permits the blocked report above when no outcome matches.
+  Both forms exclude the runtime-injected direct-Captain
+  `question` and `response` fields above. The prompt shall identify hidden control work,
   prohibit tool use, file inspection, and external evidence, direct the judge
   to decide only from the supplied actor output and declared outcomes, and
   require exactly one JSON object with no prose. The judge prompt shall not
   interpret the player's output, paraphrase it, or alter the FSM's `result`
-  text — it carries the description verbatim.
+  text — it carries the description verbatim, except that a governed
+  schema-3 outcome's `Output shall include` clause is rendered as the
+  authority-derived reply contract of §Captain adjudication.
 - **Marker-parse** (delegated-player alternative): a deterministic parser that
   scans the player output for a terminal control line such as
   `FSM-RESULT: { "guard": "...", ... }`. Useful when player adapters can
@@ -882,7 +1464,7 @@ the `{ visibility: 'visible', resume: false }` workflow-call selection
 (§PlaybookPorts contract, §Captain prompt composition) stay the
 visible-presentation shape for non-controller playbooks.
 
-The adjudicator shall fail loudly on:
+The nongoverned player adjudicator and every direct-Captain adjudicator shall fail loudly on:
 
 - A guard the state does not declare,
 - A missing payload field the state's `result` description requires,
@@ -894,7 +1476,7 @@ identify an undeclared guard, and an incomplete selection shall identify the
 missing required field. A generic “no declared guard selected” error for all
 three cases is nonconformant.
 
-Adjudicator failures are control-plane errors.
+Those adjudicator failures are control-plane errors.
 The runtime shall propagate them by throwing out of `handleBossInput` after attempting cleanup.
 The host adapter surfaces the throw on its control-plane channel (cligent surfaces such throws as `runtime_error` per [TMUX-025](https://github.com/sublang-ai/cligent/blob/main/specs/user/tmux-play.md#tmux-025)).
 The host's player-result channels (`player_finished` and equivalents) are reserved for failures the player itself produced; the host emits them when `callPlayer` resolves with `status !== 'ok'`.
@@ -904,11 +1486,12 @@ failure path specified above. Captain transport, result-shape, trace-sink, and
 adjudication failures remain control-plane errors unless the transport failure
 is causally identical to the active abort signal.
 Because XState still needs the invoked promise to settle, the linked runtime
-shall latch an adjudicator, actor-output JSON-validation, or nested-boundary
+shall latch a nongoverned delegated-player or direct-Captain adjudicator failure, actor-output JSON-validation, or nested-boundary
 control error outside machine context, allow the invocation's `onError` path to
 reach quiescence, drain all emissions, and then reject the public runtime
 method with that original error. It shall not return such a failure as a
 recoverable `{ outcome: 'failed' }` workflow result.
+An artifact-schema-3 governed-player adjudicator shall instead use the bounded structural correction, authority reconciliation, and unresolved parking contract above.
 The first latched non-abort control error takes precedence over a coincident
 boundary-signal abort. Read and clear the latch only in the public boundary's
 `finally` cleanup after XState and emissions have settled, so it cannot leak
@@ -957,10 +1540,14 @@ The provided actor shall:
   exit — shall deliver
   `SIGTERM` to the entire group, escalate to `SIGKILL` after a bounded grace,
   and settle only after the shell process itself has exited and the group has
-  stopped being signalable, rejecting with the signal's reason. The same
+  stopped being signalable, confirmed by an `ESRCH` liveness probe, rejecting
+  with the signal's reason. The same
   bounded grace caps the post-`SIGKILL` wait for kernel teardown, so an
-  unreaped member outside the runtime's control cannot stall settlement, and
-  the kill is always posted before the actor settles. Abort ownership — the
+  unreaped member outside the runtime's control cannot stall settlement. If
+  the group remains signalable through that bound, or confirmation fails
+  without `ESRCH`, the boundary rejects with a distinct teardown control error
+  rather than reporting a clean abort over unconfirmed cleanup. The kill is
+  always posted before the actor settles. Abort ownership — the
   listener and its escalation — spans the whole invocation, not the
   spawn-to-exit window
   ([DR-036](../specs/decisions/036-coherent-abort-settlement.md)). An abort
@@ -994,14 +1581,18 @@ XState `.provide(...)` receives the exact declared actor input rather than a
 structurally similar local type.
 Construct one bridge per runtime and wire every integration hook: allocate ids
 with `nextCallId`; return the currently active public-boundary signal from
-`getBoundarySignal`; bind `resumePlaybookCall.signal` before settling the
-deferred actor through `bindResumeSignal`; enqueue the exact start/finish trace
-through `emitStarted` / `emitFinished`; drain the global emission queue through
-`drain`; latch the original control error through `onControlPlaneError`; and
-retain any cleanup/observer failure through `onBackgroundError` for the next
-public boundary or disposal rejection. The runtime shall not leave these
-optional API hooks unwired merely because their TypeScript properties are
-optional for simpler bridge consumers.
+`getBoundarySignal`; capture an immutable cancellation classifier for the
+invocation's signal identities; compose `resumePlaybookCall.signal` into that
+classifier through `bindResumeSignal`; pass the applicable classifier through
+`emitStarted`, `emitFinished`, and `drain`; bind it to the root transition
+caused by child settlement through `bindActorSettlement`; and pass it through
+`onControlPlaneError` and `onBackgroundError`. Each receiving latch shall drop
+only a failure the supplied classifier identifies as exact cancellation and
+shall retain every distinct cleanup or observer failure for the owning public
+boundary, the next drain, or disposal rejection as applicable. A stored
+distinct failure shall never be reclassified against a later boundary. The
+runtime shall not leave these optional API hooks unwired merely because their
+TypeScript properties are optional for simpler bridge consumers.
 On invocation the bridge allocates a runtime-local call id, traces the start,
 and calls `PlaybookPorts.callPlaybook` with the composed target/text and the
 bridge signal combined from the XState invocation lifetime, the active public
@@ -1072,12 +1663,25 @@ playbook id, and child session id; bind its new turn signal for work resumed in
 the parent; emit and drain the call-finish trace; settle the bridge deferred;
 and use XState `waitFor` to drive the parent to its next
 quiescent, suspended, failed, aborted, or terminal result.
-An `ok` result resolves the actor and reaches `invoke.onDone`; `aborted` and
-`error` results reject it and reach `invoke.onError`.
+An `ok` result whose `terminal.kind` is `success`, and an `ok` result carrying
+no `terminal` record at all, resolve the actor and reach `invoke.onDone`;
+`aborted` and `error` results, and an `ok` result whose `terminal.kind` is
+`failure`, reject it and reach `invoke.onError`.
 The rejection shall be an `Error` whose public readonly `result` property is
 the exact normalized `PlaybookCallResult`; throwing the result object directly
 or discarding its status prevents the FSM from distinguishing abort from
 failure during recovery.
+A completed child's `ok` result carries `terminal` exactly when the child's
+artifact declares its reached final state's kind: the runtime reads
+`meta.playbook.terminal` and that state's authored description from the
+artifact, never from an agent reply, and a declared value other than `success`
+or `failure` is a control-plane error rather than a child outcome.
+`onDone` proves successful bridge delivery without a declared child failure;
+it does not establish every caller-owned domain condition. The caller shall
+enforce its own explicit Source-authored acceptance or relay predicates on
+the delivered output before continuing, without inventing predicates from
+callee implementation details or overriding the child's compiled terminal
+kind with output fields.
 Unknown, duplicate, or stale call ids reject without changing actor state.
 The finish trace shall therefore precede any parent FSM transition caused by
 the child return.
@@ -1086,12 +1690,15 @@ registry; linker-time metadata is not authorization to call a target.
 
 Disposal shall settle an outstanding call as aborted and drain its finish
 trace before `session.disposed`.
-If registered child abort cleanup rejects, the bridge shall emit the paired
-finish with an error result and reject `abortPending` or disposal with that
-original cleanup error; it shall not swallow the failure merely because the
-promise actor also observes a `NestedPlaybookCallError`. Parent disposal shall
-still drain, emit its one `session.disposed` boundary, and clear the bound
-session before rejecting with that preserved cleanup error.
+If registered child abort cleanup rejects with a failure distinct from every
+applicable abort reason, the bridge shall emit the paired finish with an error
+result and reject `abortPending` or disposal with that original cleanup error,
+or with an aggregate containing every distinct failure when more than one
+remains;
+an exact abort-reason rejection is cancellation evidence and shall not be
+retained as a control failure. Parent disposal shall still drain, emit its one
+`session.disposed` boundary, and clear the bound session before rejecting with
+any preserved distinct cleanup error.
 Child output and errors must be JSON-safe; a non-JSON-safe result is a
 control-plane error.
 
@@ -1261,18 +1868,22 @@ The `PlaybookRuntime` shall:
 The actor's `lastError` field shall be surfaced via `emitStatus` when the machine enters its `failed` state.
 Presence of linker-emitted `roleStates` selects the canonical factory-backed status profile.
 That profile shall emit the selected Boss event type
-before sending that event, exactly `→ <guard>` (with no payload-count or tally
-rider) when a settling actor output carries a guard, and
+before sending that event; exactly `→ <acceptedOutcome>` (with no payload-count or tally
+rider) only from a confirmed accepted-outcome marker; and
 `⤷ <Role>: <label>` only when the entered state appears in the linked module's `roleStates` metadata.
 It shall emit no raw state-id fallback for any other state.
 `roleStates` shall be a complete map of the FSM states
-that invoke the typed `player` actor; each schema-2 value carries the exact
+that invoke the typed `player` actor; each value carries the exact
 local role from that state's source-derived `meta.playbook.role` and the state's exact FSM description as `{ role, label }`.
 The factory shall reject an
 incomplete entry, a non-player state, or a role or label that differs from the FSM metadata.
 Artifact schema `1` and a missing compatibility declaration
 shall reject before interpretation because their legacy `player` values may
 encode bindings or aliases rather than canonical local roles.
+For artifact schema `3`, an accepted-outcome marker is a root-machine XState action with exact type `playbook.acceptedOutcome` and exact plain-data params `{ source, target, acceptedOutcome }` naming a declared governed outcome.
+The runtime shall observe that action only through the public root `@xstate.action` inspection event, retain it privately until the corresponding next public root `@xstate.snapshot` confirms `source` active in the prior snapshot and `target` active in the new snapshot, then emit one trace-schema-4 `outcome.accepted` event with those exact params before its canonical status and before public settlement; markers confirmed together shall retain their XState execution order.
+A valid unmarked transition, including an unexecuted guarded arm or rejected-guard fallback, shall settle normally with neither accepted-outcome evidence nor claimed-outcome status.
+An executed marker that is malformed, undeclared, or unconfirmed by those adjacent snapshots, or a batch that instruments one governed source more than once regardless of target or outcome, shall clear the entire pending marker batch and fail the current public boundary after retaining the ordinary transitioned state but before settlement, accepted-outcome evidence, or claimed-outcome status.
 For the default Captain runtime, an initial `ready` state and a terminal `done`
 state shall not emit human status. The terminal response is already visible
 Captain prose; a synthetic “entered done” message would present it twice.
@@ -1308,25 +1919,30 @@ rehydrate it in a later process (DR-014). A runtime that implements either
 member shall implement both. When generated for a runtime whose host needs
 durability, the pair shall behave as follows.
 
-`exportSnapshot()` shall return `undefined` unless the runtime is at a safe
+A shared runtime may also receive the internal step-start snapshot for its current invocation or `exportSnapshot({child})` for a bridge-owned child during startup; these capture stopped positions without execution.
+Ordinary `exportSnapshot()` shall return `undefined` unless the runtime is at a safe
 capture point: initialized, not disposing or disposed, no active
 `handleBossInput`/`resumePlaybookCall` boundary, and the root actor at a
 quiescent state with actor status `active`.
 At a safe capture point it shall return a JSON-safe
 `PlaybookRuntimeSnapshot` carrying:
 
-- `schemaVersion`: literal `3`.
+- `schemaVersion`: literal `4`.
 - `playbookId`: the bound session's playbook id.
 - `machine`: the root actor's `getPersistedSnapshot()` result, passed
   through the shared JSON detachment with any raw `Error` context value
   (for example FSM `lastError`) normalized to `{ name, message, stack? }`
   first. The value is opaque to hosts.
+- `effectLedger`: the detached immutable schema-version-1 mirror most recently
+  acknowledged by the current host's atomic ledger channel; a linked workflow
+  runtime carries the complete current-host mirror, while the internal compiled
+  Captain runtime carries the exact empty ledger.
 - `roleResumeTokens`: the local-role resume-token projection as a plain object
   (§PlaybookPorts contract).
 - `sequences`: the live `trace`, `turn`, `judgeCall`, `playerCall`, and
   `playbookCall` counters, plus `captainCall` when the runtime supports direct
   Captain calls.
-  A direct-Captain-capable runtime shall persist it in every schema-version-3 export.
+  A direct-Captain-capable runtime shall persist it in every schema-version-4 export.
 - `state`: the current normalized state descriptor.
 - `pendingBossQuestions`: the pending Boss question(s) from FSM context as
   a list of `{ questionId, asker, question, sourceItem? }`, where `asker` is
@@ -1348,14 +1964,18 @@ unsafe and returns `undefined`.
 `restore(session, snapshot)` is an alternative to `init` under the same
 lifecycle guards (§Session lifecycle): it shall reject when already
 initialized, disposing, or disposed, and shall validate
-schema version `3` and that `snapshot.playbookId` equals `session.playbookId` before touching state.
-Runtime snapshot schemas `1` and `2` shall reject before state binding because their token and pending-question fields conflate local roles, concrete players, and Captain identity.
+schema version `4`, the complete effect-ledger mirror, and that `snapshot.playbookId` equals `session.playbookId` before touching state.
+Runtime snapshot schemas `1` and `2` shall reject before state binding because their token and pending-question fields conflate local roles, concrete players, and Captain identity; schema `3` shall reject because it cannot prove an effect ledger.
 The host supplies the same immutable `PlaybookSession` identity the
 snapshot was exported under and recreates the runtime through the same
 factory with equivalent options; the runtime does not diff options, and
 module identity — that the factory constructing this runtime still
 belongs to the snapshot's playbook — is likewise the host's check to
 make before calling `restore`.
+Before actor or source-state restoration, a linked workflow runtime shall require
+the snapshot ledger to equal the detached synchronous mirror exposed by its
+current-host capability; the internal Captain runtime shall require its mirror
+to be empty.
 `restore` shall bind the session and its current detached role bindings, restore the local-role token projection, the
 sequence counters, and the
 prior-state descriptor from the snapshot,
@@ -1378,6 +1998,112 @@ ownership without a child-host call or duplicate start/finish boundary.
 A restore failure shall leave the runtime unbound so `dispose` remains
 callable and terminal.
 
+## Retained-snapshot adoption (optional)
+
+A linked runtime may implement the optional adoption capability of
+`@sublang/playbook/runtime` — `adopt(session, snapshot, context)` — as a third
+initialization path distinct from `init` and same-engagement `restore`.
+Adoption may bind a retained generation to a fresh valid `PlaybookSession`
+identity. Every runtime the shared `createXStatePlaybookRuntime` factory
+constructs for a flat machine implements `adopt`, regardless of whether the
+artifact supplies retained-generation classification metadata; one it
+constructs for a machine that declares a parallel state omits it, as linked
+machinery of an artifact's own may, and hosts feature-detect the capability
+by member presence.
+
+Before actor construction or any player-session-store, port, trace, status,
+or telemetry effect, `adopt` shall validate and detach the target session, the
+snapshot, and an exact closed-schema `PlaybookAdoptionContext` whose nonempty
+`sourceSessionId` names the retained frame's source runtime session, whose
+nonempty `sourceGenerationId` names the retained stack root's source
+`rootSessionId`, and whose optional nonempty `targetChildSessionId` is present
+exactly when the snapshot carries a suspended call. The source session and
+generation ids shall coincide exactly for a root frame. The target session and
+root ids shall each differ from their source counterparts, and a supplied
+target child id shall differ from every source and target identity visible to
+that frame. Accessors, unknown or missing members, empty identities, and an
+inconsistent child mapping shall reject during preflight.
+
+That preflight shall also validate the part of the exact structural envelope
+visible to the runtime: snapshot schema version `4`, target playbook id, the
+factory's already-validated artifact contract, and any supplied local-role
+binding set against the artifact's declared roles. The adopting host
+owns the working-directory and complete catalog-entry comparison — registry
+module identity, manifest command, options, and role set — plus every retained
+frame's artifact-schema comparison, and shall perform them before calling the
+runtime capability (DR-038 §3).
+The preflight shall apply the same exact full-mirror rule as restore: a linked
+workflow target receives a current-host mirror equal to the retained ledger,
+while the internal Captain target requires the retained ledger to be empty.
+
+Adoption shall not restore any source counter. The fresh target trace, turn,
+judge-call, player-call, supported direct-Captain-call, playbook-call, and
+apply-call counter spaces shall start at zero. Before its session-start trace,
+a descriptor-free adoption leaves the playbook-call counter at zero. A
+suspended adoption instead consumes `playbook-1` as the fresh target call id,
+replaces the descriptor's source child id with `targetChildSessionId`, omits the
+source `turnId`, and sets the target playbook-call counter to one; it changes no
+opaque persisted machine value and makes no child-host call.
+
+After preflight, adoption shall construct the persisted actor and prepare the
+nested bridge through the same transaction as restore, using the rebased
+descriptor or an explicit absence. Before actor startup it shall emit exactly
+one `session.started` as target trace sequence `1`, carrying the adopted
+top-level `state` and optional `stateId` plus an exact `adoption` object:
+
+- without a suspended call, `{ sourceSessionId, sourceGenerationId }`;
+- with a suspended call, `{ sourceSessionId, sourceGenerationId,
+  sourceCallId, sourceChildSessionId, targetCallId: 'playbook-1',
+  targetChildSessionId }`, while the event also carries top-level
+  `callId: 'playbook-1'` and no `turnId`.
+
+The runtime shall then start the actor with inspection effects suppressed,
+claim the rebased descriptor, require the reconstructed active normalized
+state to equal the retained state under that rebase, drain suppressed work,
+and confirm the bridge as the final fallible step. A preflight mismatch emits
+nothing. A later state or bridge mismatch makes no child-host call or
+playbook-call start/finish boundary, rolls provisional ownership back, and,
+because the target start was attempted, performs failed-start cleanup with one
+best-effort target `session.disposed`; successful cleanup leaves the runtime
+reusable. A successful adoption shall close `init`, `restore`, and `adopt`
+under the ordinary one-start runtime lifecycle. Its immediate export shall
+carry trace sequence `1`, zero fresh turn, judge, and player counters, zero
+direct-Captain counter when supported, and playbook-call sequence zero or one
+according to the suspended shape. Later target turns and calls allocate from
+those fresh counters rather than continue any source id or sequence. Ordinary
+same-engagement restore remains trace-silent and preserves its source
+identities and counters exactly (DR-038 §5).
+
+Adoption shall not apply the retained snapshot's `roleResumeTokens` through a
+supplied player-session store's `restore` operation or seed runtime-private
+continuation from them. For every later local-role invocation, any target
+session `roleBindings` are the sole source of supplied player and prompt
+identities, and any supplied player-session store is the sole conversation
+authority. The runtime shall resolve the current binding and, when a store is
+supplied, select it at the invocation boundary and pass the exact selected
+token or `false`. Where
+the ordinary continuation rules authorize a store mutation, that mutation
+shall target the same store. It shall never fall back to the retained token
+projection. A replacement binding whose current selection is `false` therefore
+starts fresh under its new identities; without a supplied store, the target
+runtime's private continuation starts empty (DR-038 §4).
+
+## Retained-generation classification (optional)
+
+A linked runtime may expose the optional read-only
+`retainedGenerationMetadata` marker of `@sublang/playbook/runtime` together
+with the parked-session snapshot pair and the independently feature-detected
+adoption capability so a Captain can retain its safe pre-terminal generations.
+Its `unfinishedFinalStateIds` array shall preserve the artifact's link-time
+declaration exactly, including an explicitly empty set, and shall be immutable
+and detached from that declaration. Absence means the runtime contributes no
+retained generation; presence supplies only terminal classification metadata
+and does not itself supply the adoption operation.
+Every runtime the shared `createXStatePlaybookRuntime` factory constructs from
+a supplied `unfinishedFinalStateIds` spec member shall expose the marker;
+linked machinery of an artifact's own opts into classification only by
+implementing the public member itself.
+
 ## Control surface (optional)
 
 A linked runtime may implement the optional control-surface capability of
@@ -1392,9 +2118,23 @@ parked-session snapshot capability; the pair changes no runtime ABI and no
 artifact or snapshot schema.
 
 ```typescript
+type PlaybookControlStanding = 'ready' | 'no-op' | 'blocked';
+type PlaybookControlActionReason = 'receipt-complete';
+
 interface PlaybookControlAction {
   id: string;      // stable within the returned view
   label: string;   // runtime-written, Boss-appropriate
+  standing?: PlaybookControlStanding;     // what running it would do (DR-063);
+                                          // absent reads as `ready`
+  reason?: PlaybookControlActionReason;   // why it is not `ready`
+}
+
+interface PlaybookRecoveryOffer {
+  prompt: string;
+  description?: string;
+  preparation?: string;
+  evidence?: JsonValue;
+  continuation: { kind: 'reply' } | { kind: 'runtime'; actionId: string };
 }
 
 interface PlaybookControlView {
@@ -1404,16 +2144,23 @@ interface PlaybookControlView {
   pendingQuestions: readonly PlaybookPendingBossQuestion[];
   lastError?: NormalizedError;
   actions: readonly PlaybookControlAction[];
+  recovery?: PlaybookRecoveryOffer;
 }
 
 type PlaybookControlReceipt =
   | { disposition: 'rejected'; reason: string }          // before any effect
   | { disposition: 'executed'; run: PlaybookRunResult }
-  | { disposition: 'failed'; error: NormalizedError };   // effects may exist
+  | { disposition: 'failed'; error: NormalizedError; run?: PlaybookRunResult };   // effects may exist
 
 // Optional PlaybookRuntime members — both or neither:
 describe?(): PlaybookControlView;
 apply?(input: { actionId: string; key: string; signal: AbortSignal }): Promise<PlaybookControlReceipt>;
+
+// Independent optional host-only unresolved-envelope identity seam:
+unresolvedEffectEnvelopes?(): readonly (
+  | { readonly kind: 'boundary'; readonly boundaryId: string }
+  | { readonly kind: 'logical-operation'; readonly operationId: string }
+)[];
 ```
 
 `describe()` shall be side-effect free — it emits no trace, status, or
@@ -1424,6 +2171,7 @@ throw. The view carries the current normalized state descriptor, the state
 description defined below, the authored context projection defined below, the
 pending Boss questions with their stable ids, the last recorded error in
 normalized form, and the currently valid actions.
+The shared runtime owns the optional recovery context and invocation checkpoint; linked artifacts need no recovery-specific source, event, or actor.
 
 `stateDescription` is the runtime's own Boss-facing statement of what its
 current state means, taken from the same source state descriptions the action
@@ -1433,6 +2181,16 @@ runtime publishes the meaning rather than leaving the host to substitute the
 identifier for it. A state whose source declares no description carries no
 `stateDescription`: an id is never promoted into a description, so a host is
 never handed an identifier dressed as meaning.
+
+At that same safe control-capture point, a schema-3 runtime that retains
+effect-possible outcome-unresolved work may expose
+`unresolvedEffectEnvelopes()` so its host can project the authoritative effect
+ledger. The method shall return only exact nonblank durable boundary or
+logical-operation identities in envelope order, shall return an empty list
+when no unresolved envelope remains, and shall expose no receipt, repository
+observation, semantic evidence, prose, or live authority. It is side-effect
+free on the same terms as `describe()`, and no returned identity or bounded
+repository evidence shall enter `PlaybookRunResult`.
 
 The view's `context` is an explicit projection the linked runtime **authors**,
 never an allow-by-default serialization of the FSM context (PBRT-52).
@@ -1464,26 +2222,19 @@ default. The rules:
 Actions derive from the live snapshot, only at the same safe point the
 parked-session snapshot uses (actor status `active`, quiescent, no pending
 nested call); anywhere else `actions` is empty while the rest of the view
-still describes the state. Two families exist, labeled from source state
-descriptions:
+still describes the state.
+While effect-possible outcome evidence remains unresolved, the view shall omit its pending Boss questions and state description and shall replace every ordinary action with exactly `reconcile:unresolved-effect` labeled `Retry unresolved effect reconciliation` and `abandon:unresolved-effect` labeled `Abandon unresolved workflow attempt`.
+A valid invocation checkpoint is the only source of a retry: it retries only the stopped invocation after its effect checks, using `retry:<EVENT_TYPE>` for the same entry target or `retry:step` otherwise.
+Saved-result assessment (`retry:adjudication`) never repeats the player and is not offered for an output the machine has already received (checkpoint `delivered: true`), and verified read-only restoration (`retry:restored-step`) records an exact baseline check before replay.
+These retries have standing `ready`; an unsafe checkpoint grants no replay. Saved-result assessment withholds ordinary state jumps. Reconciliation and abandonment remain available whenever effects are unresolved, even alongside an eligible assessment or restoration.
+Ordinary retry and jump actions use source state descriptions and require assessment and unresolved-effect fences to be absent:
 
-- **Failure-state retry** — while the singular state id is the recoverable
-  failure state and the live snapshot accepts the retry event sourced below,
-  the runtime shall advertise `retry:<EVENT_TYPE>` replaying exactly that
-  event. Where the emitted module's entry-event declaration names the FSM
-  context member the machine's entry action copies the exact Boss text into
-  (DR-034), the retry event is that deterministic entry event built from the
-  live snapshot's member — excluded when the member is absent, not a string,
-  or blank, and never falling back to the record. Where it names no member,
-  the retry event is the recorded last classified event (the event a public
-  Boss boundary sent that drove the run into `failed`, kept with its recorded
-  payload), and there is none while the runtime holds none. The member is
-  declared, never inferred from a context member that happens to match the
-  entry event's text field.
+- **Failure-state retry** — a valid invocation checkpoint retries that step only; a completed saved result is consumed without executing the operation again. No checkpoint means no retry. Legacy `entryEvent.contextField` metadata is ignored.
 - **Jump entries** — for each registered resumable state id whose
   explicit-state-jump event (`BOSS_INTERRUPT` with that `targetId`, optional
   textual fields omitted) the live snapshot accepts, guards included, the
-  runtime shall advertise `jump:<stateId>`.
+  runtime shall advertise `jump:<stateId>`, except that a jump out of a governed
+  failure must also pass the full failed-attempt effect check above.
 
 A candidate whose event requires a payload the runtime cannot source from
 recorded state shall be excluded from `actions` — `apply` never invents free
@@ -1493,9 +2244,8 @@ back to a target id or to the replayed event type, because a controller host
 names an executed or refused action by its label and never by its id, so an
 identifier used as a label defeats that substitution. A jump whose target
 publishes no description is therefore not advertised — borrowing another
-state's description would name the wrong state — and a retry falls back from
-its target's description to its own source state's, and is not advertised when
-neither exists.
+state's description would name the wrong state — and a retry requires the
+interrupted invocation's source description.
 
 `apply({ actionId, key, signal })` shall revalidate the action against the
 live state and settle `{ disposition: 'rejected', reason }` with no effect
@@ -1510,8 +2260,8 @@ its key — a later call with that key revalidates afresh, traces its own
 pair, and may execute once the action is advertised — and a key whose call
 threw before reaching acceptance (lifecycle misuse, invalid input, a
 pre-acceptance abort, a rejected start-boundary sink) likewise records
-nothing, so a later call with that key may execute. Executing sends the
-validated event through the same actor drive as `handleBossInput` — state
+nothing, so a later call with that key may execute.
+Executing a jump sends the validated event through the same actor drive as `handleBossInput` — state
 transitions, player/judge boundaries, statuses, and traces flow unchanged —
 and settles `executed` with the projected run result, or `failed` with the
 normalized error when the run settles in the failure state, aborts, or a
@@ -1521,6 +2271,11 @@ settles the `failed` receipt rather than rejecting. The boundary traces as
 the paired `apply.started` / `apply.finished` events of §Playbook trace, and
 `apply` shares the single active-boundary sentinel with `handleBossInput`
 and `resumePlaybookCall`.
+
+Executing `reconcile:unresolved-effect` shall use only the current host's authoritative effect ledger for any reconciliation refresh and shall start no player.
+When an open deferred logical operation is checkpoint-restoration eligible, that action shall reacquire its exclusive repository claim and compare the current observation with the saved checkpoint; exact equality shall durably consume eligibility and return to the identical bound wait with its stable question through an ordinary nonterminal run result without a player, judge, or semantic-candidate delivery, while inequality or any other still-unresolved evidence shall return `no-action` and remain unresolved.
+Executing `abandon:unresolved-effect` shall move no FSM state or start any player, judge, Captain, script, or child call and shall settle `executed` with exactly `{ outcome: 'unresolved-effect', state }`, where `state` is the current normalized nonfinal state.
+That state-only run-result arm shall carry no `stateDescription`, output, pending call, error, repository receipt, effect ledger, semantic evidence, or other bounded effect fact, and shall claim neither an authored outcome nor workflow completion.
 
 Acceptance is also the line past which `apply` does not throw, and
 publication — the `apply.finished` emission — is the line past which its
@@ -1539,12 +2294,18 @@ signal's own abort reason, in which case it evidences the cancellation and is
 dropped, not latched
 ([DR-036](../specs/decisions/036-coherent-abort-settlement.md)).
 
-The recorded receipts and the recorded last classified event are
-process-local: the durable runtime snapshot persists neither. A restored
-runtime therefore advertises the retry of a declared entry-event source
-immediately — that payload rides the persisted machine snapshot — while a
-module declaring no source advertises a retry again only after its next
-classified event.
+Recorded control receipts are process-local. Invocation checkpoints retain the original input and accepted output across restoration; a restored runtime offers only the currently valid step controls.
+
+The optional `PlaybookPorts.recordStep(step, position?)` lets a durable host save ordinary work without understanding machine internals.
+The shared runtime records player, direct-Captain and script starts before execution and their actor results before advancing.
+The runtime owns the complete stopped position, including accepted Boss input; the host joins nested frames and atomically stores starts and results; retention changes wait for settlement.
+An invocation inside a parallel region records its start and result without a single-invocation recovery position, including when only its last region is resuming.
+Sequential invocations after the join use ordinary checkpoints.
+A custom runtime that cannot provide a position remains runnable, but a crash without a supported position returns to Captain with recorded work preserved.
+Automatic recovery requires a failed or quiescent outcome produced by an operation in the same turn; resuming or adopting an older stop starts no preparation.
+The store identifies the step that owns a saved position, so a consumed result cannot be attached to a later stopped snapshot.
+Only internal step-start capture creates a synthetic failed position; public snapshot capture returns the actual stopped state.
+Opening or reporting an interrupted run executes no work; Boss chooses the next action after checking outside effects and stopping any surviving worker.
 
 ## Abort
 
@@ -1562,9 +2323,13 @@ abort remains a non-abort control error and takes precedence. Classification
 lives at each latch or report site, against the boundary signal applicable
 there — the invocation-lifetime combined signal, and during a resume that
 boundary's own signal — so a failure causally identical to the applicable
-reason is the cancellation's own evidence: it is dropped where observed, never
-latched, and never carried to a later boundary
+reason is the cancellation's own evidence: it is handled there under the phase
+rules below, never mislabeled as a distinct failure and never carried to an
+unrelated later boundary
 ([DR-036](../specs/decisions/036-coherent-abort-settlement.md)).
+A failure already latched as distinct retains that ownership; a later drain
+shall not reinterpret it against another boundary whose abort signal happens
+to use the same object as its reason.
 A public boundary settles on the machine's state at its quiescence point,
 in this precedence: a suspended pending call, then a distinct actor error,
 then terminal completion, then a coincident abort, then the recoverable
@@ -1575,6 +2340,39 @@ An abort observed after the outcome is computed does not rewrite it, and a
 settlement-channel rejection causally identical to the abort reason is
 forgiven, so the returned result and the settlement trace state one fact.
 A boundary entered with an already-aborted signal delivers nothing.
+That entry refusal precedes the ordinary settlement order: a pre-aborted
+resume reports `aborted` while preserving its suspended pending call rather
+than reporting `suspended` for work it did not deliver.
+Cancellation-coupled channel rejections obey this phase matrix:
+
+- **Before a host call or effect starts (and before apply acceptance):** an
+  identical start-channel rejection starts no host call or effect and latches
+  no control error. A recorded start receives one best-effort `aborted` finish.
+  An ordinary run boundary then settles by the precedence above; a
+  pre-acceptance `apply` instead rejects with that exact reason, records no
+  receipt, and leaves its key reusable.
+- **After a host call or effect starts but before its finish or outcome is
+  recorded:** an identical host, cleanup, observer, or in-flight-emission
+  rejection is cancellation evidence. Invocation-owned cleanup completes, a
+  started trace pair receives one `aborted` finish, and the ordinary boundary
+  settles by the precedence above. A distinct rejection remains a control
+  failure, produces the applicable error finish, and takes distinct-error
+  precedence.
+- **After a call finish is recorded but before the enclosing non-apply outcome
+  is computed:** an identical finish-sink or drain rejection leaves the
+  recorded finish unchanged, emits no corrective second finish, latches
+  nothing, and lets the enclosing boundary settle by the precedence above.
+- **After apply acceptance but before receipt publication:** every settlement
+  failure, the exact apply abort reason included, is folded into the current
+  `failed` receipt. Acceptance forbids throwing; the replacement receipt is
+  published, returned, and replayed, and the failure is not carried as a later
+  delivery error.
+- **After a non-apply outcome is computed or an apply receipt is published:**
+  an identical rejection is dropped without rewriting the outcome or receipt
+  and without poisoning a later boundary. A distinct non-apply settlement
+  rejection retains current-boundary control-error precedence; a distinct
+  post-publication apply rejection retains the published receipt and travels
+  on the delivery-failure channel to the next boundary that drains.
 On abort, the
 runtime shall not merely race the imperative
 wait and return while an invocation remains live: it shall let the selected
@@ -1616,6 +2414,10 @@ The runtime shall emit, at minimum:
   semantics matter to Boss — e.g., `respondToReview`, `failed`). The
   default is to emit on every transition and let the host filter; hosts
   may bind a stricter rule.
+  Mark both a player-question status and its waiting marker with status data
+  `{ kind: "boss-question" }`; the session Captain replaces those statuses with
+  its own clear reply, using the complete pending question from the control view.
+  Keep the original question in state and telemetry, and deliver Boss input unchanged.
 - One `emitTelemetry` per state transition under a namespaced topic
   (recommended `playbook.fsm.state`), with structured `from`, `to`, `event`,
   `previousState`, and `state` fields. Descriptors carry the JSON-safe XState
@@ -1639,17 +2441,28 @@ The `playbook.trace` copies are the host-agnostic runtime-boundary record requir
 ## Output
 
 The link compiler emits one TypeScript module per playbook.
-For an FSM that declares no `type: 'parallel'` state — necessarily flat
-under [gears2fsm.md](gears2fsm.md)'s one-state-per-item mapping — it shall
+Every linked artifact shall emit an `unfinishedFinalStateIds` set beside its resumable-state registry as mechanical link-time metadata.
+The set shall contain exactly the stable ids of root `type: 'final'` states whose terminal outcomes leave the procedure unfinished, and shall be explicitly empty when no terminal outcome does.
+The linker shall not infer the set from a state description, opaque output, or procedure prose.
+The linker shall reject a declared id that does not name a root final state, and the shared factory shall independently reject it at construction before runtime effects.
+For a factory-backed artifact the set is a `spec` member; linked machinery of an artifact's own shall retain equivalent linked metadata, and the artifact declaration is not itself the public runtime retention marker or an adoption capability.
+For every FSM [gears2fsm.md](gears2fsm.md) produces — flat under its
+one-state-per-item mapping, or carrying root parallel groups of its
+[Parallel groups](gears2fsm.md#parallel-groups) shape — the linker shall
 emit the thin shared-factory module defined below.
-For an FSM that declares a parallel state, it shall emit bespoke linked
-machinery satisfying this document's runtime contract and shall not invoke
-`createXStatePlaybookRuntime`, whose supported domain is flat single-region
-FSMs under [DR-019](../specs/decisions/019-shared-linked-runtime-factory.md).
+The shared factory interprets such a parallel group through its parallel
+profile under [DR-067](../specs/decisions/067-parallel-proposals-through-the-shared-factory.md), deriving the regions, their leaves, and the
+cohort of working leaves from the FSM and its exported `concurrentRoleSets`,
+so the emitted module declares nothing further for it; bespoke linked
+machinery is no longer the prescribed output for any such FSM.
+Linked machinery of an artifact's own that satisfies this document's runtime
+contract remains a valid implementation for an artifact outside this package
+and declares the `bespoke` registry profile below, so hosts keep accepting it.
 The FSM-interpreter machinery — actor wiring, boundary tracing, Boss-event
 mapping, adjudication, script execution, nested-playbook bridging, session
-lifecycle, abort handling, and the optional parked-session snapshot
-capability — is not regenerated for a factory-backed artifact: it ships once
+lifecycle, abort handling, and the optional parked-session snapshot and
+retained-snapshot adoption capabilities — is not regenerated for a
+factory-backed artifact: it ships once
 as the shared `createXStatePlaybookRuntime(machine, spec)` factory exported by
 `@sublang/playbook/xstate-runtime`, and the emitted module hands its FSM and
 a small per-playbook `spec` to that factory. Every behavioral section of
@@ -1683,8 +2496,8 @@ The thin emitted module:
   by `PlaybookSession` or another linker-owned source (§PlaybookRuntime
   contract), plus the optional `cwd` option whenever the FSM contains a
   `script` state (§Script execution).
-- Supplies the spec's `snapshotOptions` with the same options-validation
-  semantics previously generated inline: validate and JSON-snapshot the
+- Exports the public `validateOptions` function specified above and supplies
+  it as the spec's identical `snapshotOptions` callback: validate and JSON-snapshot the
   caller's options, rejecting undeclared keys and non-conforming values, so
   the factory binds an immutable options record before constructing any
   actor.
@@ -1703,9 +2516,13 @@ The thin emitted module:
   complete `roleStates` status map derived from every FSM state that invokes
   the typed `player` actor, with each `role` copied from that state's
   source-derived `meta.playbook.role` (an empty map when there is no such
-  state); the
+  state); the exact schema-3 `outcomeAuthority` map derived
+  from every such state's `invoke.input.result` contract and its linked field
+  authorities and repository dispositions (an explicit empty governed map
+  when there is no such state); the
   `verbatimPayloadFields` set derived from annotated result fields above; the
-  `controlContextFields` projection of §Control surface; and any
+  explicitly empty or populated `unfinishedFinalStateIds` set declared above;
+  the `controlContextFields` projection of §Control surface; and any
   per-playbook strategy override (classifier, prompt composers,
   required-field extraction, status formatting) an earlier section of this
   definition requires for that playbook.
@@ -1756,15 +2573,15 @@ The thin emitted module:
   error.
   `NO_ACTION` and `BOSS_REPLY` are runtime-owned event types the factory
   supplies itself — `NO_ACTION` as exactly `{ type: 'NO_ACTION' }`, and
-  `BOSS_REPLY` as an optional judge-selected `questionId` plus the exact-text
-  `answer` the runtime attaches. `bossEvents` shall carry no entry for either
+  `BOSS_REPLY` as a judge-selected `questionId` — optional while one question
+  is pending and required, from the pending ids, while several are — plus the
+  exact-text `answer` the runtime attaches. `bossEvents` shall carry no entry for either
   type; supplying one is a construction error, so a linker that judges a
   runtime-owned arm to have lost payload detail under erasure shall report
   that gap rather than emit the entry.
 - Supplies `spec.compat` with the compatibility values current at link time:
-  `{ artifactSchema, runtimeAbi }`, where `artifactSchema` is `2` — the
-  schema number of the local-role thin-module format this §Output defines — and
-  `runtimeAbi` is the installed shared engine's `RUNTIME_ABI` self-report.
+  `{ artifactSchema: 3, runtimeAbi }`, where `runtimeAbi` is the installed shared engine's
+  `RUNTIME_ABI` self-report.
   The linker shall verify that the installed engine lists the emitted
   schema in `SUPPORTED_ARTIFACT_SCHEMAS` and treat its absence as a
   link-time error; it shall not stamp a different member (such as the
@@ -1775,9 +2592,22 @@ The thin emitted module:
   module and fails construction on a mismatch, so an artifact linked under
   one engine cannot run silently skewed under another. Modules emitted
   before this contract carry no `compat` member and shall reject before interpretation.
-- Requires the containing public registry manifest to advertise the same `artifactSchema: 2`; the Captain host shall reject a missing or disagreeing registry value before constructing this runtime, and a bespoke runtime profile shall advertise the same schema without claiming this shared factory's `runtimeAbi`.
-- Default-exports the factory call as `createPlaybookRuntime`, typed
-  `PlaybookRuntimeFactory<PlaybookRuntimeOptions>`. A registry module loads
+- Requires the containing public registry manifest to advertise the identical
+  `artifactSchema` and an exact implementation `runtimeProfile`. A shared
+  factory profile is `{ kind: 'shared-factory', compat }`, where `compat` is
+  the immutable compatibility record captured by that actual factory from
+  its validated `spec.compat`; a bespoke profile is
+  `{ kind: 'bespoke', artifactSchema }`, with schema `3` declared directly by
+  that implementation and no `runtimeAbi` claim. A registry factory accepts configured options and current
+  host capabilities separately and composes the linked runtime's exact
+  `{ configuredOptions, hostCapabilities }` input. The Captain host shall
+  capture the imported manifest fields once, require capabilities for every
+  and only enabled artifact id, validate each capability's artifact, role,
+  cohort, and canonical-worktree authority, and reject a missing, extra,
+  malformed, or mismatched capability before runtime construction.
+- Default-exports the factory call as `createPlaybookRuntime`, typed as
+  `XStatePlaybookRuntimeFactory<XStatePlaybookRuntimeConstruction<PlaybookRuntimeOptions, HostCapabilities>, 3>`
+  with the artifact's declared live capability type. A registry module loads
   dynamically inside the host's caught boundary, so its eager module-scope
   factory call fails fast there. The compiled session Captain module is the
   exception: the shell and both CLI front ends import it statically, so it
@@ -1787,8 +2617,11 @@ The thin emitted module:
   host-construction boundary's setup diagnostic.
 - Exposes, under an `_internal` export, the pure helpers verification
   needs — at least the prompt composers its own machine uses, which may
-  re-export the shared defaults when the spec does not override composition —
-  so compilation-correctness tests can exercise composition without a host.
+  re-export the shared defaults when the spec does not override composition,
+  and the `VERBATIM_PAYLOAD_FIELDS` and `UNFINISHED_FINAL_STATE_IDS` sets the
+  spec declares, which the linked-ownership check reads back — so
+  compilation-correctness tests can exercise composition and ownership
+  without a host.
   A playbook that calls players exposes `composePlayerPrompt`; a playbook
   whose states make direct-Captain calls exposes `composeCaptainPrompt`. A
   controller playbook that calls no players exposes no player composer:
@@ -1837,6 +2670,10 @@ original template. Replacement strings are literal: placeholder-looking text
 inside Boss/catalog/plan/result values and JavaScript replacement tokens such
 as `$&`, `$$`, dollar-backtick, and `$'` shall not be interpreted or
 substituted again.
+A quoted relay line `> <placeholder>` whose value is empty shall be omitted
+from the composed text rather than left as an empty quoted line, a multi-line
+value shall be quoted line by line so every continuation line keeps its `>`
+marker, and the composer shall insert no empty quoted line of its own.
 
 ## Host adaptation (informative, not normative)
 
@@ -1885,6 +2722,22 @@ This spec is silent on the choice; the contract is the same in any location.
   (DR-014); everything beyond it remains out of scope.
 
 New behavior in any of these areas requires a separate slc spec.
+
+## Compiled execution
+
+This section governs compiled execution of this phase; the rules above remain the transformation's normative content for both execution paths.
+
+Where the phase host supplies `<definition>` as the exact bytes of the definition file the request names, when a transformation request names an `fsm` Source (`.ts`) and a `playbook` Target (`.ts`), Captain shall carry out the FSM-to-runtime linking as specified:
+
+> Follow the definition relayed between the `--- DEFINITION ---` and `--- END DEFINITION ---` lines exactly, adding no rules of your own: read the named Source and write the named Target as the definition specifies.
+> If the Source cannot be transformed under the definition, do not guess: leave the Target unwritten and report the concrete reason.
+> --- DEFINITION ---
+> \<definition\>
+> --- END DEFINITION ---
+
+Results:
+- `compiled`: Captain wrote the named Target as the relayed definition specifies.
+- `rejected`: Captain reported that the Source cannot be transformed under the relayed definition and left the Target unwritten.
 
 ## References
 
