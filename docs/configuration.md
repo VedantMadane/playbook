@@ -62,8 +62,8 @@ exactly once. The launcher injects the rest — you do not write host wiring by
 hand.
 
 The launcher seeds one adapter for the Captain and all stable players from
-locally visible credentials: Claude first, then Codex. It uses Claude Opus 5
-for Claude or GPT-5.6 Sol for Codex, with Captain and Coder at `high` effort
+locally visible credentials: Claude first, then Codex. It uses Claude Opus 5.5
+for Claude or GPT-6 Sol for Codex, with Captain and Coder at `high` effort
 and Reviewer and Analyst at `xhigh`. If neither adapter is configured, it
 seeds Claude and prints a notice. Credentials do not prove SDK availability
 or remaining quota; launch still checks the configured adapter. Existing
@@ -75,7 +75,7 @@ The Claude default is shown below. A Codex seed also adds
 ```yaml
 captain:
   adapter: claude
-  model: claude-opus-5
+  model: claude-opus-5-5
   effort: high
   permissions:
     mode: auto # protected auto mode for the Claude Captain
@@ -83,21 +83,21 @@ captain:
 players:
   dev.coder:
     adapter: claude
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     permissions:
       mode: auto # protected auto mode for the Claude Coder
 
   dev.reviewer:
     adapter: claude
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: xhigh
     permissions:
       mode: auto # protected auto mode for the Claude Reviewer
 
   dev.analyst:
     adapter: claude
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: xhigh
     permissions:
       mode: auto # protected auto mode for the Claude Analyst
@@ -163,7 +163,7 @@ mode:
 roles:
   coder:
     player: dev.coder
-    model: gpt-5.6-sol
+    model: claude-sonnet-5-5
     effort: false # explicitly reset to this provider's default
     fastMode: false # literal disabled request, not a default sentinel
 ```
@@ -175,7 +175,8 @@ resumed conversation cannot accidentally retain an earlier selection. For
 top-level setting selects the provider default. A present fast-mode boolean is
 accepted only for adapters Cligent reports as supporting it. A role binding
 cannot override adapter, instruction, permissions, workspace, or tool posture;
-those define the stable player envelope.
+those define the stable player envelope, so an overriding model must be one
+that player's adapter serves.
 
 ## Sharing, isolation, and concurrency
 
@@ -198,8 +199,11 @@ second top-level player and change only its binding:
 players:
   review.coder:
     adapter: codex
-    model: gpt-5.6-sol
+    model: gpt-6-sol
     effort: ultra
+    permissions:
+      mode: auto
+      writablePaths: ['.git'] # lets the Codex Coder commit its review fixes
 
 playbooks:
   review:
@@ -247,7 +251,7 @@ playbook run --with fast-lineup.yaml "/code implement the approved change"
 # fast-lineup.yaml — retune the shared Coder; nothing is written back.
 players:
   dev.coder:
-    model: gpt-5.6-sol
+    model: claude-sonnet-5-5
     effort: medium
     fastMode: false
 ```
@@ -365,12 +369,12 @@ playbooks:
   code:
     from: '@sublang/playbook/code/registry'
     players:
-      coder: { adapter: claude, model: claude-opus-4-8[1m] }
+      coder: { adapter: claude, model: claude-opus-5-5 }
   review:
     from: '@sublang/playbook/review/registry'
     players:
-      coder: { adapter: claude, model: claude-opus-4-8[1m] }
-      reviewer: { adapter: codex, model: gpt-5.5 }
+      coder: { adapter: claude, model: claude-opus-5-5 }
+      reviewer: { adapter: codex, model: gpt-6-sol }
 ```
 
 Move each provider agent into the flat top-level map, choose stable IDs, and
@@ -378,8 +382,8 @@ bind the local roles explicitly:
 
 ```yaml
 players:
-  dev.coder: { adapter: claude, model: claude-opus-4-8[1m] }
-  dev.reviewer: { adapter: codex, model: gpt-5.5 }
+  dev.coder: { adapter: claude, model: claude-opus-5-5 }
+  dev.reviewer: { adapter: codex, model: gpt-6-sol }
 
 playbooks:
   code:

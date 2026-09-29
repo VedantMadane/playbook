@@ -807,7 +807,7 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     expect(onlyClaude.seeded.captain.adapter).toBe('claude');
     expect(onlyClaude.seeded.players['dev.coder']).toEqual({
       adapter: 'claude',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       effort: 'high',
       permissions: { mode: 'auto' },
     });
@@ -819,7 +819,7 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     expect(onlyCodex.seeded.captain.adapter).toBe('codex');
     expect(onlyCodex.seeded.players['dev.coder']).toEqual({
       adapter: 'codex',
-      model: 'gpt-5.6-sol',
+      model: 'gpt-6-sol',
       effort: 'high',
       permissions: { mode: 'auto', writablePaths: ['.git'] },
     });
@@ -872,7 +872,7 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     expect(seeded).toContain('@sublang/playbook/dev/registry');
     expect(seeded).toContain('@sublang/playbook/branch/registry');
     expect(seeded).toContain('@sublang/playbook/pr/registry');
-    expect(seeded).toContain('claude-opus-5');
+    expect(seeded).toContain('claude-opus-5-5');
     expect(seeded).not.toContain('committer:');
     expect(stderr.text()).toContain(`created config at ${configPath}`);
 
@@ -881,26 +881,26 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     expect(seededParsed.profiles).toBeUndefined();
     expect(seededParsed.captain).toMatchObject({
       adapter: 'claude',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       effort: 'high',
       permissions: { mode: 'auto' },
     });
     expect(seededParsed.players).toEqual({
       'dev.coder': {
         adapter: 'claude',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         effort: 'high',
         permissions: { mode: 'auto' },
       },
       'dev.reviewer': {
         adapter: 'claude',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         effort: 'xhigh',
         permissions: { mode: 'auto' },
       },
       'dev.analyst': {
         adapter: 'claude',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         effort: 'xhigh',
         permissions: { mode: 'auto' },
       },
@@ -927,7 +927,7 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
     expect(composed.captain.from).toBe(PLAYBOOK_CAPTAIN_MODULE);
     expect(composed.captain).toMatchObject({
       adapter: 'claude',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       effort: 'high',
       // PBCLI-11: every seeded agent, including the claude Captain, runs in
       // cligent's protected auto mode.
@@ -937,14 +937,14 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
       {
         id: 'dev.coder',
         adapter: 'claude',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         effort: 'high',
         permissions: { mode: 'auto' },
       },
       {
         id: 'dev.reviewer',
         adapter: 'claude',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         effort: 'xhigh',
         // PBCLI-11: seeded claude roles get auto mode, no writablePaths.
         permissions: { mode: 'auto' },
@@ -952,7 +952,7 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
       {
         id: 'dev.analyst',
         adapter: 'claude',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         effort: 'xhigh',
         permissions: { mode: 'auto' },
       },
@@ -969,7 +969,7 @@ describe('playbook launcher — seeding and launch (PBCLI-13)', () => {
           // back to the provider's.
           model: {
             kind: 'value',
-            value: 'claude-opus-5',
+            value: 'claude-opus-5-5',
           },
           effort: { kind: 'value', value: 'high' },
         },

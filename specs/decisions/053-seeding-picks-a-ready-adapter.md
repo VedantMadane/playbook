@@ -7,6 +7,7 @@
 
 Accepted.
 Amends [DR-044](044-dev-planning-workflow.md)'s seeded-lineup consequence in one scope: the seeded agents' adapter and model are selected at seed time rather than fixed, while the players, their role bindings, and everything else that consequence settles stand.
+Model-currency scope amended by [DR-074](074-seeds-name-the-latest-models.md): the fixed per-adapter table names the latest model of each adapter's line and moves together with the Cligent floor that serves it; selection, precedence, efforts, and the none-ready notice stand.
 
 ## Context
 

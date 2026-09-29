@@ -78,11 +78,11 @@ declare const playerAdapter: {
 const roleBindings = {
   coder: {
     playerId: 'team.coder',
-    promptIdentity: 'claude-opus-4-8[1m]',
+    promptIdentity: 'claude-opus-5-5',
   },
   reviewer: {
     playerId: 'team.reviewer',
-    promptIdentity: 'gpt-5.5',
+    promptIdentity: 'gpt-6-sol',
   },
 } satisfies Readonly<Record<string, PlaybookRoleBinding>>;
 

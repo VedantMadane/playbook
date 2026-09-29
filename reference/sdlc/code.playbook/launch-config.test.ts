@@ -1792,7 +1792,7 @@ describe('shared launch-config plan (PBCLI-47)', () => {
     expect(template.playbooks.dev.roles).toEqual({ analyst: 'dev.analyst' });
     expect(template.players['dev.analyst']).toEqual({
       adapter: 'claude',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       effort: 'xhigh',
       permissions: { mode: 'auto' },
     });

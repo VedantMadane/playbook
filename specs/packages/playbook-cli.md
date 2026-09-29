@@ -351,12 +351,12 @@ The starter shall define players `dev.coder`, `dev.reviewer`, and `dev.analyst`;
 The seeded lineup shall take one adapter for every seeded agent, chosen when the
 file is written from the adapters the credential check of
 [[playbook-cli-12](playbook-cli.md#playbook-cli-12)] already sees, by this fixed
-order ([DR-053](../decisions/053-seeding-picks-a-ready-adapter.md)):
+order and with these models ([DR-053](../decisions/053-seeding-picks-a-ready-adapter.md); [DR-074](../decisions/074-seeds-name-the-latest-models.md)):
 
 | Order | Adapter | Model |
 | --- | --- | --- |
-| 1 | `claude` | `claude-opus-5` |
-| 2 | `codex` | `gpt-5.6-sol` |
+| 1 | `claude` | `claude-opus-5-5` |
+| 2 | `codex` | `gpt-6-sol` |
 
 - the first ready adapter in that order supplies every seeded agent, so one
   seeded config names one provider;
@@ -1145,10 +1145,10 @@ shall fail unless the command creates that file from the bundled starter config,
 
 | Credentials visible to the seed | Seeded lineup | Notice |
 | --- | --- | --- |
-| claude only | every agent on `claude` / `claude-opus-5`, no writable-path grant | the resolved path alone |
-| codex only | every agent on `codex` / `gpt-5.6-sol`, each carrying `permissions.writablePaths: ['.git']` | the resolved path alone |
-| both | every agent on `claude` / `claude-opus-5`, the fixed order deciding | the resolved path alone |
-| neither | every agent on `claude` / `claude-opus-5` | the resolved path, plus one line naming that no adapter probed ready |
+| claude only | every agent on `claude` / `claude-opus-5-5`, no writable-path grant | the resolved path alone |
+| codex only | every agent on `codex` / `gpt-6-sol`, each carrying `permissions.writablePaths: ['.git']` | the resolved path alone |
+| both | every agent on `claude` / `claude-opus-5-5`, the fixed order deciding | the resolved path alone |
+| neither | every agent on `claude` / `claude-opus-5-5` | the resolved path, plus one line naming that no adapter probed ready |
 
 - Captain and `dev.coder` take effort `high` and `dev.reviewer` and `dev.analyst` `xhigh` in every row;
 - each row shall be driven by an injected home directory and an explicit environment, so no case depends on the machine running the suite;
