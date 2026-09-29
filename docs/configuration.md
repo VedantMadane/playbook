@@ -163,7 +163,7 @@ mode:
 roles:
   coder:
     player: dev.coder
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     effort: false # explicitly reset to this provider's default
     fastMode: false # literal disabled request, not a default sentinel
 ```
@@ -251,7 +251,7 @@ playbook run --with fast-lineup.yaml "/code implement the approved change"
 # fast-lineup.yaml — retune the shared Coder; nothing is written back.
 players:
   dev.coder:
-    model: claude-sonnet-5
+    model: claude-sonnet-5-5
     effort: medium
     fastMode: false
 ```
