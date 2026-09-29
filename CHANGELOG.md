@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [17.1.0] - 2026-09-29
+
 ### Changed
 
 - **The starter seeds the latest models.** A fresh config names `claude-opus-5-5` (Claude Opus 5.5) when it seeds Claude and `gpt-6-sol` (GPT-6 Sol) when it seeds Codex, in place of `claude-opus-5` and `gpt-5.6-sol`; adapter selection, its order, and every effort are unchanged, and an existing config is never rewritten ([[playbook-cli-11](specs/packages/playbook-cli.md#playbook-cli-11)], [DR-074](specs/decisions/074-seeds-name-the-latest-models.md)). The documentation's examples, the live acceptance gate's default models, and the CI acceptance config move to current models as well.
@@ -772,7 +774,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Conformance test suite (386 tests across six files) pinning the gears ↔ FSM 1:1 mapping (PLAYBOOK-1..6), runtime contract (PBRT-5..16), prompt composition, introspect helpers, and onDone arm coverage.
 - Package exports `./code/playbook` (the host-agnostic `createPlaybookRuntime` factory) and `./code/tmux-play` (the cligent-bound Captain factory).
 
-[Unreleased]: https://github.com/sublang-ai/playbook/compare/v17.0.0...HEAD
+[Unreleased]: https://github.com/sublang-ai/playbook/compare/v17.1.0...HEAD
+[17.1.0]: https://github.com/sublang-ai/playbook/compare/v17.0.0...v17.1.0
 [17.0.0]: https://github.com/sublang-ai/playbook/compare/v16.0.0...v17.0.0
 [16.0.0]: https://github.com/sublang-ai/playbook/compare/v15.1.0...v16.0.0
 [15.1.0]: https://github.com/sublang-ai/playbook/compare/v15.0.0...v15.1.0
