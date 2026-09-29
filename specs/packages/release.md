@@ -168,7 +168,7 @@ available in `@sublang/cligent` 0.13.0, and shall admit the explicit
 [[playbook-captain-16](playbook-captain.md#playbook-captain-16)], and the isolated
 `CallCaptainOptions.resume` and `CallCaptainOptions.allowedTools`
 surface required by [[playbook-captain-31](playbook-captain.md#playbook-captain-31)].
-The declared range's floor shall be at least `@sublang/cligent` 0.25.0 and shall preserve `[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*` player ids while player and Captain call options carry atomic complete per-call model, effort, optional fast mode, instruction, and permissions with explicit concrete-value versus provider-default model and effort tuning ([[playbook-cli-4](playbook-cli.md#playbook-cli-4)], [[playbook-captain-10](playbook-captain.md#playbook-captain-10)], [[playbook-captain-31](playbook-captain.md#playbook-captain-31)]).
+The declared range's floor shall be at least `@sublang/cligent` 0.28.0, the oldest release whose runtime floors serve every seeded model ([DR-074](../decisions/074-seeds-name-the-latest-models.md)), and shall preserve `[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*` player ids while player and Captain call options carry atomic complete per-call model, effort, optional fast mode, instruction, and permissions with explicit concrete-value versus provider-default model and effort tuning ([[playbook-cli-4](playbook-cli.md#playbook-cli-4)], [[playbook-captain-10](playbook-captain.md#playbook-captain-10)], [[playbook-captain-31](playbook-captain.md#playbook-captain-31)]).
 That floor shall expose cligent's public adapter-scoped fast-mode capability and assertion as a callable runtime export rather than require a Playbook-owned support table, accept literal `true` and `false` only for supported adapters, and reject either present boolean for an unsupported adapter before provider work.
 That floor shall preserve adjacent complete `text` messages as distinct newline-separated messages in player `finalText` when a successful terminal `done` event supplies no result.
 That floor shall also expose the typed complete-settings rejection used to preserve a prior continuation without a fresh fallback, plus optional `CaptainRunResult.errorCode` and `PlayerRunResult.errorCode` members typed exactly `'SESSION_RESUME_REJECTED'`, whose pre-execution proof permits one fresh call [[session-storage-8](session-storage.md#session-storage-8)].
@@ -532,12 +532,13 @@ not be substituted for any case.
 #### release-19
 
 The test suite shall fail unless `package.json` declares
-`@sublang/cligent` with a caret SemVer range and — unless the
+`@sublang/cligent` with a caret SemVer range whose floor meets the
+[[release-14](#release-14)] floor and — unless the
 [[release-11](release.md#release-11)] local-development
 override is active, which rewrites both the recorded specifier and
 the resolution in the working copy — the root importer in
 `pnpm-lock.yaml` records the same specifier and a concrete resolved
-cligent version whose public tmux-play contract declares both the
+cligent version, at or above that floor, whose public tmux-play contract declares both the
 pre-close `Captain.prepareDispose()` lifecycle and
 `CallPlayerOptions.resume` selection accepted by
 `CaptainContext.callPlayer`, plus `CallCaptainOptions.resume` and
